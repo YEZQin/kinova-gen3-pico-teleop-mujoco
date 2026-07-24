@@ -59,6 +59,16 @@ python -m pip install -e ".[dev]"
 
 若从 GitHub 克隆，把上面的 `cd` 替换为实际克隆目录。
 
+> 性能提示：某些 WSL2 版本在 `/mnt/d` 中创建 venv 会因跨文件系统小文件 I/O 耗时很久。若安装明显缓慢，推荐把 venv 放在 WSL 的 Linux 文件系统中；后续命令中的 `source .venv-wsl/bin/activate` 相应替换为下面的路径：
+
+```bash
+mkdir -p ~/.venvs
+python3 -m venv ~/.venvs/kinova-pico-teleop
+source ~/.venvs/kinova-pico-teleop/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
 先验证 MuJoCo、模型、IK 和无头控制循环：
 
 ```bash
