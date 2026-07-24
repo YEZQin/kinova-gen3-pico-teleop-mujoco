@@ -3,6 +3,7 @@ from collections.abc import Iterable
 import mujoco
 import numpy as np
 
+from kinova_teleop.ik_solver import IKResult
 from kinova_teleop.teleop_controller import TeleopConfig, TeleopController
 from kinova_teleop.xr_input import ControllerSample, DryRunXrInput
 
@@ -93,5 +94,32 @@ def test_target_marker_tracks_mapping_target(teleop_model_path) -> None:
             controller.data.mocap_pos[mocap_id],
             expected_target,
         )
+    finally:
+        controller.close()
+
+
+def test_nonconverged_ik_holds_previous_target(teleop_model_path) -> None:
+    source = ScriptedInput([sample([0.0, 0.0, 0.0], 1.0, 1, 1.0)])
+    controller = TeleopController(
+        TeleopConfig(model_path=teleop_model_path, realtime=False),
+        source,
+    )
+
+    class NonconvergedIK:
+        def solve(self, *_args, **_kwargs) -> IKResult:
+            return IKResult(
+                qpos=np.ones(7),
+                converged=False,
+                position_error=0.1,
+                rotation_error=0.2,
+                iterations=40,
+            )
+
+    controller.ik = NonconvergedIK()
+    held = controller.data.ctrl.copy()
+    try:
+        diagnostics = controller.step_once()
+        assert not diagnostics.ik_converged
+        np.testing.assert_allclose(controller.data.ctrl, held)
     finally:
         controller.close()

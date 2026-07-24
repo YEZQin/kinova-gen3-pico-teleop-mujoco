@@ -149,7 +149,8 @@ class TeleopController:
             position_error = result.position_error
             rotation_error = result.rotation_error
             if (
-                np.isfinite(result.qpos).all()
+                result.converged
+                and np.isfinite(result.qpos).all()
                 and np.isfinite(result.position_error)
                 and np.isfinite(result.rotation_error)
             ):
