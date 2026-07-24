@@ -1,0 +1,17 @@
+.venv/
+.venv-wsl/
+.upstream/
+.worktrees/
+.local-deps/
+kinova/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+PXREASetting.ini
+setting.ini
+logs/
