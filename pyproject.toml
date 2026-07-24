@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kinova-gen3-pico-teleop"
+version = "0.1.0"
+description = "PICO left-controller teleoperation for a Kinova Gen3 arm in MuJoCo"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "mujoco>=3.3",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+kinova-pico-teleop = "kinova_teleop.main:main"
+
+[tool.setuptools.packages.find]
+include = ["kinova_teleop*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --basetemp=.pytest-tmp"
