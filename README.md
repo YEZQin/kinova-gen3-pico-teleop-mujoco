@@ -1,271 +1,244 @@
-# PICO 左手柄遥操 Kinova Gen3（MuJoCo）
+# PICO 左手柄遥操作 Kinova Gen3（仅 MuJoCo）
 
-本项目通过 PICO 左手柄的相对位置和姿态，实时控制 MuJoCo 中单台 Kinova Gen3 7DoF 机械臂的末端 `pinch_site`。按住左手柄 Grip 后进行完整 6DoF 跟随，松开 Grip 则保持当前机械臂目标并允许重新离合。
-
-数据链路如下：
-
-```text
-PICO 左手柄 → Windows XRoboToolkit PC Service → WSL xrobotoolkit_sdk
-             → 相对 6DoF 映射/Grip 离合 → MuJoCo Jacobian DLS IK
-             → Gen3 七个位置执行器 + MuJoCo Viewer
-```
-
-## 功能与边界
-
-- 只使用 PICO **左手柄**。
-- 跟随位置和姿态（6DoF），采用相对映射，按下 Grip 时不会跳变。
-- Grip 值大于 `0.9` 时启用；松开、无效位姿或时间戳超过 `0.2 s` 未更新时保持上一有效关节目标。
-- MuJoCo 原生 Jacobian 阻尼最小二乘 IK，包含关节限位、连续关节角度环绕、奇异位形阻尼和有限值检查。
-- 红/绿/蓝坐标架表示当前末端目标。
-- 只控制仿真中的单机械臂，不控制真实 Kinova 硬件。
-- 模型不带夹爪，因此没有夹爪操作。
-
-工作区原有 `kinova/kinova.urdf` 是 JACO2 J2S6S200，不是 Gen3；本项目使用已验证的 `kinova_gen3_mujoco/`。该模型对应 Kinova 官方产品名称中的 **Gen3 Ultra lightweight robot（7DoF）**。
-
-## 目录
-
-```text
-kinova_teleop/             遥操、XR 输入、位姿映射、IK 和 CLI
-kinova_gen3_mujoco/        可直接加载的 Gen3 MJCF、STL 与遥操场景
-tests/                     单元测试和 MuJoCo 集成测试
-docs/superpowers/          设计说明与实施计划
-```
-
-## 1. 安装 WSL2 与 Python 环境
-
-在管理员 PowerShell 中安装 Ubuntu 22.04（已经安装则跳过）：
+本项目在 **Windows 原生 Python** 中接收 PICO 左手柄位姿，通过局域网
+UDP 自动发现链路控制 MuJoCo 中的 Kinova Gen3 7DoF 模型。首次构建并安装
+PICO 应用、之后日常启动分别使用：
 
 ```powershell
-wsl --install -d Ubuntu-22.04
+$unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
+.\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
+.\scripts\start_pico_udp_teleop.ps1
 ```
 
-打开 Ubuntu-22.04，安装依赖：
+> **安全边界：** 当前实现只控制
+> `kinova_gen3_mujoco/teleop_scene.xml` 仿真，不连接、初始化或命令任何
+> Kinova 实体机器人。仓库没有 Kortex 后端。
 
-```bash
-sudo apt update
-sudo apt install -y python3-venv python3-dev build-essential cmake git \
-  libgl1-mesa-dev libglfw3 netcat-openbsd
-```
+详细的首次配置、PICO 手动启动、健康检查和排障步骤见
+[PICO UDP 快速开始](docs/pico-udp-quickstart.md)。
 
-若使用当前工作区：
-
-```bash
-cd /mnt/d/yezq/26.7.24_Kinova_controll
-python3 -m venv .venv-wsl
-source .venv-wsl/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-```
-
-若从 GitHub 克隆，把上面的 `cd` 替换为实际克隆目录。
-
-> 性能提示：某些 WSL2 版本在 `/mnt/d` 中创建 venv 会因跨文件系统小文件 I/O 耗时很久。若安装明显缓慢，推荐把 venv 放在 WSL 的 Linux 文件系统中；后续命令中的 `source .venv-wsl/bin/activate` 相应替换为下面的路径：
-
-```bash
-mkdir -p ~/.venvs
-python3 -m venv ~/.venvs/kinova-pico-teleop
-source ~/.venvs/kinova-pico-teleop/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-```
-
-先验证 MuJoCo、模型、IK 和无头控制循环：
-
-```bash
-python -m pytest -q
-python -m kinova_teleop.main --dry-run --headless --steps 2000
-```
-
-成功时最后一行应包含：
+## 推荐链路和操作语义
 
 ```text
-completed steps=2000 finite_state=true
+PICO 左手柄
+  -> PICO Unity OpenXR bridge
+  -> UDP 15031 自动 DISCOVER/READY（不配置固定 Windows IP）
+  -> PicoUdpInput
+  -> Grip 安全离合与相对 6DoF 映射
+  -> EndEffectorTargetBackend
+  -> MuJoCoBackend
+  -> Kinova Gen3 MJCF 仿真
 ```
 
-## 2. Windows 端：PICO 与 PC Service
+- 只读取左手柄；Trigger、摇杆、A/B/X/Y 和夹爪均不使用。
+- 启动或链路恢复后必须先把 Grip 松到 `< 0.8`，再按到 `> 0.9` 才能运动。
+- 按下时捕获手柄和仿真末端当前位姿，因此激活瞬间不跳变。
+- 持续按住时映射完整相对 6DoF：平移默认缩放 `0.5`，相对旋转为 1:1。
+- 松开 Grip 后保持最后目标；重新摆放手柄、再按下可从新参考位姿继续。
+- 无效包、倒序/重复包、未跟踪或超过 `0.2 s` 的陈旧输入都会解除离合并
+  保持目标。恢复后不能沿用仍按住的 Grip，必须再次松开再按下。
 
-1. 按 [XRoboToolkit PC Service](https://github.com/XR-Robotics/XRoboToolkit-PC-Service) 的说明在 Windows 安装或构建 PC Service。
-2. 按 XRoboToolkit/PICO 端说明连接头显，使 PC Service 能看到设备及左右控制器数据。
-3. 完全退出 PC Service。
-4. 找到与 PC Service 可执行文件配套的 `setting.ini`，修改为：
+## 要求和固定版本
 
-```ini
-[Service]
-listenAddr=0.0.0.0
-listenPort=60061
-```
+- Windows 10/11、PowerShell 5.1 或更高版本。
+- Windows 原生 Python `>=3.10`；推荐仓库根目录的 `.venv`。
+- Unity `2022.3.62f3c1`，包含 Android Build Support、SDK/NDK 和 OpenJDK。
+- PICO Unity OpenXR SDK 固定在提交
+  `3aa3e62bff41df618529eeb60ff02c29a515dafe`（release 1.4.0）。
+- PICO OS `5.13.0` 或更高版本；已验证目标为 A9210、Android 14。
+- PICO 和 Windows 位于允许 UDP 广播/单播互通的同一 LAN/VLAN。
+- 可选 ADB 默认路径为 `C:\adb\adb.exe`；没有 ADB 也可在头显中手动启动。
 
-5. 重新启动 PC Service，并在 Windows 防火墙中只对受信任的专用网络/WSL 网段允许该程序或 TCP `60061` 入站。
+推荐路径不需要 WSL、XRoboToolkit PC Service 或
+`xrobotoolkit_sdk`。
 
-WSL2 默认使用 NAT，WSL 内的 `127.0.0.1` 通常不是 Windows PC Service。这里让服务监听 Windows 网卡，再由 WSL 使用默认网关地址连接。`0.0.0.0` 会监听多个接口，不应在不受信任的网络上开放端口。
+## Windows Python 环境
 
-## 3. WSL 端：构建 XRoboToolkit Python SDK
-
-项目运行时会延迟导入 `xrobotoolkit_sdk`；dry-run 不需要它，连接真实 PICO 时需要。以下固定使用本项目验证过的 Pybind 提交：
-
-```bash
-cd /mnt/d/yezq/26.7.24_Kinova_controll
-source .venv-wsl/bin/activate
-mkdir -p .local-deps
-git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind.git \
-  .local-deps/XRoboToolkit-PC-Service-Pybind
-cd .local-deps/XRoboToolkit-PC-Service-Pybind
-git checkout c64ccf6acd577a333e03b66fafe8efeeceb511b1
-```
-
-该提交的 `setup_ubuntu.sh` 在非 Conda 环境中把 `-y` 误传给 `pip install`。在 Python venv 中先修正这一行，再运行原脚本：
-
-```bash
-sed -i 's/pip install pybind11 -y/pip install pybind11/' setup_ubuntu.sh
-bash setup_ubuntu.sh
-cd /mnt/d/yezq/26.7.24_Kinova_controll
-```
-
-每次新开 WSL 终端，激活环境后加入 SDK 动态库目录：
-
-```bash
-source .venv-wsl/bin/activate
-export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
-python -c "import xrobotoolkit_sdk; print('xrobotoolkit_sdk import OK')"
-```
-
-## 4. 配置 WSL 到 Windows 的连接
-
-确保 Windows PC Service 已运行，然后在**项目根目录**生成 `PXREASetting.ini`。SDK 从当前工作目录读取这个文件：
-
-```bash
-WINDOWS_HOST_IP="$(ip route show default | awk '{print $3}')"
-cat > PXREASetting.ini <<EOF
-[Client]
-connectAddr=${WINDOWS_HOST_IP}
-connectPort=60061
-EOF
-nc -vz "${WINDOWS_HOST_IP}" 60061
-```
-
-`nc` 成功表示 TCP 端口可达；它不代表 PICO 数据已经正常，需要继续执行输入检查。
-
-## 5. 推荐启动顺序
-
-每次运行按这个顺序操作：
-
-1. 启动 PICO 端 XRoboToolkit 应用并连接设备/控制器。
-2. 启动 Windows XRoboToolkit PC Service，确认设备在线。
-3. 打开 WSL，进入项目目录，激活 venv 并设置 `LD_LIBRARY_PATH`。
-4. 检查左手柄数据：
-
-```bash
-python -m kinova_teleop.main --check-xr --samples 100
-```
-
-输出应连续包含 `left position`、`quat_xyzw`、`grip` 和递增的 `timestamp_ns`。移动左手柄、按压 Grip 时，这些值应变化。
-
-5. 首次使用或改动代码后先跑无头自检：
-
-```bash
-python -m kinova_teleop.main --dry-run --headless --steps 2000
-```
-
-6. 启动真实遥操和 Viewer：
-
-```bash
-python -m kinova_teleop.main --model kinova_gen3_mujoco/teleop_scene.xml
-```
-
-若手柄移动对应的机械臂平移过大，先降低比例：
-
-```bash
-python -m kinova_teleop.main --scale 0.5
-```
-
-WSLg 正常时 Viewer 会直接显示在 Windows 桌面。关闭 Viewer 或按 `Ctrl+C` 退出。
-
-## 6. 操作方法
-
-1. 左手柄移动到舒适位置，暂时不要按 Grip。
-2. **按住左手柄 Grip（left Grip）**，其值超过 `0.9` 时捕获当前手柄和末端位姿作为参考。
-3. 保持 Grip，移动和旋转左手柄；机械臂末端跟随完整相对 6DoF 变化。
-4. 松开 Grip：机械臂保持最后有效关节目标。
-5. 把左手移动到新的舒适位置，再次按住 Grip 继续，不会因手柄绝对位置产生目标跳变。
-
-红/绿/蓝坐标架是期望末端位姿。接近不可达区域时 IK 可能无法完全收敛；程序会保持上一帧已收敛的有效关节目标。关节目标同时受限位、单步变化和有限值检查保护。
-
-## 7. 命令行参数
-
-```bash
-python -m kinova_teleop.main --help
-```
-
-- `--controller left`：仅允许左手柄。
-- `--model PATH`：MJCF 场景，默认 `kinova_gen3_mujoco/teleop_scene.xml`。
-- `--scale FLOAT`：手柄平移到机械臂平移的比例，默认 `1.0`。
-- `--control-hz FLOAT`：控制频率，默认 `100` Hz。
-- `--stale-timeout FLOAT`：时间戳不更新后的释放时间，默认 `0.2` s。
-- `--check-xr [--samples N]`：只检查 XR 链路，不加载 MuJoCo。
-- `--dry-run`：使用确定性的内置小幅 6DoF 轨迹。
-- `--headless --steps N`：不打开 Viewer，运行固定步数后退出。
-
-安装后也可使用入口命令 `kinova-pico-teleop`，参数相同。
-
-## 8. 故障排查
-
-### `nc` 连接失败
-
-- 确认 Windows PC Service 正在运行，`setting.ini` 修改后已重启。
-- 确认 `listenAddr=0.0.0.0`、端口两端均为 `60061`。
-- 重新计算 `WINDOWS_HOST_IP`，WSL 重启后默认网关可能改变。
-- 检查 Windows 防火墙入站规则和当前网络配置文件。
-
-### `xrobotoolkit_sdk is unavailable` 或共享库错误
-
-- 确认当前终端激活的是 `.venv-wsl`。
-- 重新运行 `python -c "import xrobotoolkit_sdk"` 查看底层错误。
-- 确认 `LD_LIBRARY_PATH` 包含 Pybind 仓库的 `lib/`。
-- 用 `ldd "$(python -c 'import xrobotoolkit_sdk; print(xrobotoolkit_sdk.__file__)')"` 检查缺失的 `.so`。
-- 若 ABI/编译失败，在 Ubuntu 22.04、Python 3.10 环境按第 3 节重新构建。
-
-### `--check-xr` 能连接但时间戳不变
-
-- 确认 PICO 端应用正在发送跟踪数据，设备在 PC Service 中在线。
-- 唤醒头显和左手柄；移动手柄并按 Grip 观察输出。
-- 时间戳持续不变超过 `0.2 s` 时，本程序会自动解除遥操并保持机械臂。
-
-### Viewer 不显示
-
-```bash
-echo "$DISPLAY"
-python -m mujoco.viewer --mjcf kinova_gen3_mujoco/teleop_scene.xml
-```
-
-若 `DISPLAY` 为空或 Viewer 报 OpenGL/GLFW 错误，先更新 WSL/WSLg：
+在仓库根目录运行：
 
 ```powershell
-wsl --update
-wsl --shutdown
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-重新打开 Ubuntu 后再试。自动化验证可始终使用 `--headless`。
+先验证 MuJoCo、Gen3 模型和控制安全性：
 
-### 运动方向或幅度不符合预期
-
-- 先确认只使用左手柄且 `--check-xr` 的位置/四元数变化合理。
-- 本项目已将 PICO 坐标转换到 MuJoCo 世界坐标；不要同时在外部再次变换。
-- 用 `--scale 0.5` 或更小值降低平移幅度。
-- 松开 Grip、换一个舒适位姿后重新按下，以重设相对参考。
-
-## 9. 开发验证
-
-```bash
-python -m pip install -e ".[dev]"
-python -m pytest -q
-python -m kinova_teleop.main --dry-run --headless --steps 5000
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m kinova_teleop.main `
+  --dry-run --headless --steps 5000
 ```
 
-核心模型契约为：7 个关节 `joint_1`～`joint_7`、7 个位置执行器、`home` 关键帧及 `pinch_site` 末端站点。缺少其中任一项都会在启动时明确报错。
+成功的 dry-run 以此行结束：
 
-## 来源与许可
+```text
+completed steps=5000 finite_state=true
+```
 
-- 遥操接口设计参考 [XR-Robotics/XRoboToolkit-Teleop-Sample-Python](https://github.com/XR-Robotics/XRoboToolkit-Teleop-Sample-Python)。
-- XR Python 绑定来自 [XRoboToolkit-PC-Service-Pybind](https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind)。
-- Gen3 MJCF 来自 [MuJoCo Menagerie 的 Kinova Gen3](https://github.com/google-deepmind/mujoco_menagerie/tree/main/kinova_gen3)。
-- 本项目 Python 代码采用根目录 MIT License；`kinova_gen3_mujoco/` 内模型资产保留其 BSD-3-Clause License。
+## 构建、安装和日常启动
+
+首次构建/安装：
+
+```powershell
+$unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
+.\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
+```
+
+脚本先运行 Unity EditMode 测试，再构建 ARM64/IL2CPP APK，复制到被 Git
+忽略的 `artifacts/kinova-pico-udp-bridge.apk`，最后只向已授权的 USB
+设备安装。若连接了多个已授权设备，请显式指定：
+
+```powershell
+.\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install `
+  -DeviceSerial YOUR_PICO_SERIAL
+```
+
+日常使用：
+
+```powershell
+.\scripts\start_pico_udp_teleop.ps1
+```
+
+脚本在检测到唯一 PICO USB 设备时自动启动
+`com.yezqin.kinovapicobridge`，随后要求 20 个新鲜、tracked 的样本和至少
+一次 Grip `< 0.8`，门禁通过后才打开 MuJoCo Viewer。若 ADB 不可用，请在
+PICO 应用库中手动打开 **Kinova PICO Bridge**，再运行：
+
+```powershell
+.\scripts\start_pico_udp_teleop.ps1 -ManualPicoStart
+```
+
+关闭 Viewer 或按 `Ctrl+C` 退出。程序会释放 UDP 和 MuJoCo 资源。
+
+## 输入健康检查和比例调节
+
+只检查 100 个 PICO 数据样本而不加载 MuJoCo：
+
+```powershell
+.\.venv\Scripts\python.exe -m kinova_teleop.main `
+  --input pico-udp --check-input --samples 100 --check-timeout 60
+```
+
+每行会显示 `left position`、`quat_xyzw`、`grip` 和递增的
+`timestamp_ns`。移动、旋转左手柄并按下/松开 Grip 时，对应数值应变化；
+四元数应保持有限且归一化。输入检查必须看到一次 Grip `< 0.8` 才会成功。
+
+若仿真末端平移过大，降低比例：
+
+```powershell
+.\scripts\start_pico_udp_teleop.ps1 -Scale 0.25
+```
+
+`-Scale` 只缩放平移；姿态仍使用完整相对旋转。
+
+## 网络、跟踪和安全排障
+
+- 首次出现 Windows 防火墙提示时，只在受信任的专用网络允许 Python。
+  Windows 必须允许 Python 接收 UDP `15031`。
+- PICO 与 PC 必须在同一 LAN/VLAN；关闭会拦截局域网的 VPN，避免访客
+  Wi-Fi、AP/client isolation 或不同 VLAN。
+- 不配置 PICO/PC 固定 IP：PICO 广播 `KINOVA_DISCOVER_V1`，Windows 在
+  UDP `15031` 回应 `KINOVA_READY_V1`，随后锁定第一个有效数据源。
+- 超时通常表示应用未启动、左手柄休眠/未跟踪、防火墙阻止 UDP 或网络隔离。
+- 若 PICO 仍停留在旧版 controller bridge 或系统手柄/HandDialog，ADB
+  启动意图可能被当前 VR 应用拦截。退出旧应用并关闭系统对话框，在头显中
+  手动打开 **Kinova PICO Bridge**，然后重新运行
+  `.\scripts\start_pico_udp_teleop.ps1 -ManualPicoStart`。
+- `Grip release` 错误表示检查期间没有观察到 `< 0.8`；完全松开 Grip 后重试。
+- `stale=true`、`untracked`、非法/倒序数据或网络断开都会保持最后目标；
+  链路恢复后先松开再按下 Grip。
+- 支持的日常恢复流程是：结束当前 Windows 控制进程并退出头显应用；下次重新
+  打开两端后，从 Grip 完全松开的新会话开始。不要把“应用重启后继续保持
+  Grip 按下并无缝接管上一会话”作为操作流程。
+- UDP `15031` 已被占用时，退出占用进程后重试；程序不会切换随机端口。
+
+脚本不会自动创建永久防火墙规则，也不会使用 ADB Reverse、`adb tcpip`
+或 `adb connect`。
+
+## 模型和后端边界
+
+本项目固定使用 `kinova_gen3_mujoco/` 中的 Gen3 7DoF MJCF。
+旧工作区中的 `kinova/kinova.urdf` 实际描述 JACO2 J2S6S200，不得作为
+Gen3 模型使用。
+
+`EndEffectorTargetBackend` 把控制逻辑与 `MuJoCoBackend` 分离，但这不是
+实体机器人实现。未来若开发 RobotBackend/Kortex 后端，必须作为独立项目
+完成明确授权、工作空间及速度/加速度限制、急停、网络看门狗、模式切换和
+真机验证；当前仓库没有该能力。
+
+## XRoboToolkit 兼容入口（非推荐）
+
+`--input xrobotoolkit` 仅为旧环境保留。它依赖 WSL、XRoboToolkit PC
+Service 和 `xrobotoolkit_sdk`，不属于本项目推荐或验收路径。新部署请使用
+默认的 Windows 原生 `pico-udp` 链路。
+
+## 开发验证
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m kinova_teleop.main `
+  --dry-run --headless --steps 5000
+git diff --check
+```
+
+生成的 Unity `Library/`、`Temp/`、`Logs/`、`UserSettings/`、APK 和
+`artifacts/` 均不应提交。
+## 已有本地环境：直接启动并控制 Kinova Gen3
+
+以下命令均从仓库根目录的 **Windows PowerShell** 运行。该项目仅在 Windows 原生 Python
+中工作；不需要 WSL、XRoboToolkit PC Service，也不使用固定 IP。PICO 和 PC 必须在允许 UDP
+广播/单播的同一 LAN/VLAN 上，Windows 仅需允许 Python 接收 UDP `15031`。
+
+如当前环境尚未安装项目依赖，先执行一次：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+```
+
+首次构建并安装 PICO APK 前，将 `$unityPath` 改为本机安装的 **Unity 2022.3.62f3c1**
+`Unity.exe` 路径；连接并授权唯一的 PICO USB 设备后执行：
+
+```powershell
+$unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
+.\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
+```
+
+日常使用时，左手柄唤醒并处于 tracked 状态后，先**完全松开左手 Grip**，再启动：
+
+```powershell
+.\scripts\start_pico_udp_teleop.ps1
+```
+
+脚本会在 ADB 可用且只发现一个已授权 PICO USB 设备时自动启动 `Kinova PICO Bridge`，随后进行
+UDP 输入预检，确认至少一次 Grip `< 0.8` 后才打开 MuJoCo Viewer。若没有 ADB、自动启动被 VR
+前台应用拦截，或你已在头显中手动打开应用，请使用手动回退：
+
+```powershell
+.\scripts\start_pico_udp_teleop.ps1 -ManualPicoStart
+```
+
+只检查输入而不加载 MuJoCo：
+
+```powershell
+.\.venv\Scripts\python.exe -m kinova_teleop.main `
+  --input pico-udp --check-input --samples 100 --check-timeout 60
+```
+
+平移幅度过大时调小比例（姿态仍为完整的相对 6DoF 旋转）：
+
+```powershell
+.\scripts\start_pico_udp_teleop.ps1 -Scale 0.25
+```
+
+控制期间始终使用**左手 Grip**：启动、断链或应用重启后必须先释放到 `< 0.8`，再按下到 `> 0.9`；
+不能保持按住 Grip 跨会话接管。关闭 MuJoCo Viewer 或按 `Ctrl+C` 即可停止，程序会释放 UDP 和
+MuJoCo 资源。
+
+即使日常口头称其为“机械臂 URDF”，本控制实现实际加载的是
+`kinova_gen3_mujoco/teleop_scene.xml`：其中为 MuJoCo 生成/整理的 Kinova Gen3 7DoF **MJCF**
+模型。它不是旧目录 `kinova/kinova.urdf` 所描述的 JACO2 J2S6S200，后者不得作为 Gen3 使用。
+本仓库仅控制该 MuJoCo 仿真，绝不连接、初始化或命令任何实体 Kinova 机器人。

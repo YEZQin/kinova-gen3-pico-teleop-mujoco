@@ -1,0 +1,26 @@
+{
+  "name": "Yezqin.KinovaPico.Editor",
+  "rootNamespace": "Yezqin.KinovaPico.Editor",
+  "references": [
+    "Yezqin.KinovaPico",
+    "Unity.XR.Hands",
+    "Unity.XR.Management",
+    "Unity.XR.Management.Editor",
+    "Unity.XR.OpenXR",
+    "Unity.XR.OpenXR.Editor",
+    "Unity.XR.OpenXR.Features.PICOSupport",
+    "Unity.XR.OpenXRPico",
+    "PICO.Platform"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
