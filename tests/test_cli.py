@@ -132,6 +132,37 @@ def test_kortex_rejections_happen_before_connection(
     assert calls == []
 
 
+@pytest.mark.parametrize("option", ("--robot-ip", "--robot-user"))
+def test_kortex_rejects_blank_connection_identity_before_prompt_or_import(
+    monkeypatch,
+    option: str,
+) -> None:
+    """Blank Kortex host or user must not reach confirmation, imports, or connect."""
+
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    imports: list[str] = []
+    monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt))
+
+    import builtins
+
+    original_import = builtins.__import__
+
+    def forbid_kortex_import(name, *args, **kwargs):
+        if "kortex" in name:
+            imports.append(name)
+            raise AssertionError("Kortex import must not occur")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", forbid_kortex_import)
+
+    assert main(["--backend", "kortex", "--enable-hardware", option, "   "]) == 2
+    assert prompts == []
+    assert imports == []
+    assert calls == []
+
+
 def test_mujoco_default_does_not_construct_kortex_connection(monkeypatch) -> None:
     """The default path remains independent of Kortex credentials and SDKs."""
 
@@ -310,3 +341,67 @@ def test_kortex_errors_close_controller_and_backend(
 
     assert main(["--backend", "kortex", "--enable-hardware"]) == expected_code
     assert events == ["controller.close", "source.close", "backend.close"]
+
+
+def test_kortex_cleanup_failure_blocks_success_and_closes_remaining_resources(
+    monkeypatch,
+    capsys,
+) -> None:
+    """A Stop-unconfirmed cleanup failure must not be reported as completion."""
+
+    from kinova_teleop.kortex_backend import KortexSafetyError
+
+    events: list[str] = []
+
+    class FakeConnection:
+        def close(self) -> None:
+            events.append("connection.close")
+
+    class FakeBackend:
+        def close(self) -> None:
+            events.append("backend.close")
+            raise KortexSafetyError("Stop attempted but unconfirmed")
+
+    class FakeSource:
+        def close(self) -> None:
+            events.append("source.close")
+
+    class FakeController:
+        steps = 4
+
+        def __init__(self, _config, source, backend) -> None:
+            self.source = source
+            self.backend = backend
+
+        def run(self, **_kwargs) -> None:
+            pass
+
+        def close(self) -> None:
+            events.append("controller.close")
+            self.backend.close()
+
+    monkeypatch.setattr(
+        "kinova_teleop.main._create_kortex_connection",
+        lambda _config: FakeConnection(),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main._create_kortex_backend",
+        lambda *_args, **_kwargs: FakeBackend(),
+    )
+    monkeypatch.setattr("kinova_teleop.main.SdkXrInput", FakeSource)
+    monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
+    monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
+
+    assert main(["--backend", "kortex", "--enable-hardware"]) == 2
+    captured = capsys.readouterr()
+    assert "completed" not in captured.out
+    assert "Kortex cleanup failed" in captured.err
+    assert "secret" not in captured.err
+    assert events == [
+        "controller.close",
+        "backend.close",
+        "source.close",
+        "backend.close",
+        "connection.close",
+    ]

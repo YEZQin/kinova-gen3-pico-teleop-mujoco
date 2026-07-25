@@ -220,6 +220,10 @@ def _validate_kortex_args(args: argparse.Namespace, password: str | None) -> str
         return "--backend kortex requires --enable-hardware"
     if args.dry_run:
         return "--dry-run cannot be used with --backend kortex"
+    if not args.robot_ip.strip():
+        return "--robot-ip must not be empty"
+    if not args.robot_user.strip():
+        return "--robot-user must not be empty"
     if not password:
         return "KINOVA_PASSWORD must be set for --backend kortex"
     if args.scale is not None and args.scale > 0.5:
@@ -235,13 +239,40 @@ def _validate_kortex_args(args: argparse.Namespace, password: str | None) -> str
     return None
 
 
-def _safe_close(resource: Any) -> None:
-    """Release a partially constructed resource without masking the main result."""
+def _close_resource(resource: Any, *, hardware: bool) -> bool:
+    """Attempt one close operation and report whether it completed safely."""
 
     try:
         resource.close()
     except BaseException:
-        print("error: cleanup failed", file=sys.stderr)
+        message = (
+            "error: Kortex cleanup failed; motion stop may be unconfirmed"
+            if hardware
+            else "error: cleanup failed"
+        )
+        print(message, file=sys.stderr)
+        return False
+    return True
+
+
+def _cleanup_resources(
+    controller: Any,
+    source: Any,
+    backend: Any,
+    connection: Any,
+) -> bool:
+    """Close all remaining resources after a failed aggregate controller close."""
+
+    hardware = backend is not None or connection is not None
+    if controller is not None and _close_resource(controller, hardware=hardware):
+        return True
+
+    resources = (source, backend, connection)
+    succeeded = True
+    for resource in resources:
+        if resource is not None:
+            succeeded = _close_resource(resource, hardware=hardware) and succeeded
+    return succeeded
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -277,6 +308,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     connection = None
     backend = None
     controller = None
+    exit_code = 2
+    completion: str | None = None
     try:
         if args.backend == "kortex":
             from .kortex_transport import KortexConfig
@@ -321,29 +354,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                     controller.data.ctrl,
                 )
             )
-            print(
+            completion = (
                 f"completed steps={controller.steps} "
-                f"finite_state={str(finite).lower()}",
+                f"finite_state={str(finite).lower()}"
             )
-            return 0 if finite else 2
-        print(f"completed steps={controller.steps}")
-        return 0
+            exit_code = 0 if finite else 2
+        else:
+            completion = f"completed steps={controller.steps}"
+            exit_code = 0
     except KeyboardInterrupt:
         print("stopped by user", file=sys.stderr)
-        return 130
+        exit_code = 130
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        exit_code = 2
     finally:
-        if controller is not None:
-            _safe_close(controller)
-        else:
-            if source is not None:
-                _safe_close(source)
-            if backend is not None:
-                _safe_close(backend)
-            elif connection is not None:
-                _safe_close(connection)
+        cleanup_succeeded = _cleanup_resources(
+            controller,
+            source,
+            backend,
+            connection,
+        )
+        if args.backend == "kortex" and not cleanup_succeeded and exit_code != 130:
+            exit_code = 2
+
+    if completion is not None and (args.backend == "mujoco" or exit_code == 0):
+        print(completion)
+    return exit_code
 
 
 if __name__ == "__main__":
