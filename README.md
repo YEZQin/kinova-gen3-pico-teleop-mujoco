@@ -207,7 +207,54 @@ python -m kinova_teleop.main --help
 
 安装后也可使用入口命令 `kinova-pico-teleop`，参数相同。
 
-## 8. 故障排查
+## 8. Kinova Gen3 实体模式（已设计并离线测试，尚未完成实机验证）
+
+> **安全状态：**本分支的 Kortex 实体后端只完成了设计与离线自动化测试，**未在真实机械臂上验证**。默认命令仍只启动 MuJoCo；只有具备实体设备、安全条件并完成下列验收的操作者，才可选择实体模式。
+
+实体模式需要从 Kinova 获取与目标机械臂**固件版本和受支持 Python 版本相匹配**的 Kortex Python wheel。该 wheel 不随本项目分发，也不是项目依赖；MuJoCo 模式不需要安装它。机械臂与控制主机应使用受信任的**有线网络**连接，并确认 Kortex TCP 端口 `10000` 可达。
+
+### 上机前安全检查
+
+1. 固定机械臂并清空工作空间；人员离开危险区域，实体急停保持可触及且已验证可用。
+2. 先在 Kinova Web App 中将机械臂设为安全姿态、配置低速和工作空间限制；不要依赖本程序替代实体急停或机械臂安全配置。
+3. 核对固件、Python 与 Kortex wheel 匹配，确认有线网络和 TCP `10000`。先只做 Web App/网络的**只读检查**，不要在此阶段发起运动命令。
+4. 只通过环境变量提供密码；不要把密码写入命令历史、脚本、配置文件或本仓库。可在当前终端交互设置：
+
+```bash
+read -rsp "Kortex password: " KINOVA_PASSWORD; echo
+export KINOVA_PASSWORD
+```
+
+### 实体模式启动与操作
+
+首次上机从低速开始：线速度 `0.01 m/s`、角速度 `2 deg/s`。以下命令中的 IP 和用户必须替换为目标机械臂的实际值：
+
+```bash
+python -m kinova_teleop.main \
+  --backend kortex \
+  --enable-hardware \
+  --robot-ip 192.168.1.10 \
+  --robot-user admin \
+  --max-linear-speed 0.01 \
+  --max-angular-speed-deg 2
+```
+
+命令会要求在终端中**精确输入 `MOVE`**；只有输入完全匹配后才会建立 Kortex 连接。程序没有自动 Home：连接后且 Grip 未按下时，机械臂应保持静止。首次检测到左手柄 Grip 的新鲜按下沿时，程序读取当前实体末端位姿作为机械臂锚点，并以当时手柄位姿建立相对 6DoF 映射；因此先确认手柄处于舒适、安全的位置，再按住 Grip。
+
+Grip 松开、XR 输入陈旧/无效、发送错误或程序退出时，软件会请求 Stop。`200 ms` 仅是主机侧的 stop-request/admission guarantee：它限制主机何时接受或继续发送控制，不足以证明机械臂在 200 ms 内完成物理停止。实体急停、Web App 限速和清空工作空间仍是必需的独立安全层。
+
+### 首次实体验收清单
+
+- [ ] 已记录本次为“实体测试”，且未把离线测试结果误记为实机验证。
+- [ ] 实体急停、固定安装、清空工作空间和 Kinova Web App 的安全姿态/低速设置均已确认。
+- [ ] Kortex wheel 与固件/Python 匹配；有线网络与 TCP `10000` 已通过只读检查。
+- [ ] 密码仅通过 `KINOVA_PASSWORD` 环境变量提供，未出现在文件或命令历史中。
+- [ ] 使用上述 `0.01 m/s`、`2 deg/s` 命令启动，并仅在提示时精确输入 `MOVE`。
+- [ ] 连接后、未按 Grip 时无运动，且程序未执行自动 Home。
+- [ ] 第一次 Grip 按下仅建立手柄—当前实体末端锚点，无初始跳变。
+- [ ] 分别验证 Grip 松开、XR 断流、网络异常和程序退出时的 Stop 行为；记录观察到的实体停止结果。
+
+## 9. 故障排查
 
 ### `nc` 连接失败
 
@@ -253,7 +300,7 @@ wsl --shutdown
 - 用 `--scale 0.5` 或更小值降低平移幅度。
 - 松开 Grip、换一个舒适位姿后重新按下，以重设相对参考。
 
-## 9. 开发验证
+## 10. 开发验证
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -262,6 +309,25 @@ python -m kinova_teleop.main --dry-run --headless --steps 5000
 ```
 
 核心模型契约为：7 个关节 `joint_1`～`joint_7`、7 个位置执行器、`home` 关键帧及 `pinch_site` 末端站点。缺少其中任一项都会在启动时明确报错。
+
+## 11. 本地已有环境的启动方式
+
+当前本地环境可继续按既有 MuJoCo/PICO 流程启动；默认后端就是 MuJoCo：
+
+```bash
+source .venv-wsl/bin/activate
+export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
+python -m kinova_teleop.main --model kinova_gen3_mujoco/teleop_scene.xml
+```
+
+不接 PICO 或仅验证本地环境时，使用离线 MuJoCo dry-run：
+
+```bash
+source .venv-wsl/bin/activate
+python -m kinova_teleop.main --dry-run --headless --steps 2000
+```
+
+未来满足第 8 节全部实体安全条件、已安装匹配 Kortex wheel 且明确接受实体验收责任后，才使用第 8 节的 `--backend kortex --enable-hardware` 命令启动实体模式；它不会替代 MuJoCo 命令，也不会自动选择实体后端。
 
 ## 来源与许可
 
