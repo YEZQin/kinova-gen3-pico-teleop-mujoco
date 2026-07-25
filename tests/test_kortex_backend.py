@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import kinova_teleop.kortex_backend as kortex_backend_module
 from kinova_teleop.kortex_backend import KortexBackend
 from kinova_teleop.pose_mapping import Pose
 
@@ -103,8 +104,9 @@ class _Connection:
 class _ManualThread:
     instances = []
 
-    def __init__(self, *, target, name, daemon):
+    def __init__(self, *, target, args=(), name, daemon):
         self.target = target
+        self.args = args
         self.name = name
         self.daemon = daemon
         self.started = False
@@ -112,6 +114,7 @@ class _ManualThread:
 
     def start(self):
         self.started = True
+        self.args[0].set()
 
     def join(self, timeout=None):
         pass
@@ -144,7 +147,17 @@ def _velocity(command):
 
 
 def _backend(connection, **kwargs):
-    return KortexBackend(connection, thread_factory=_ManualThread, **kwargs)
+    return KortexBackend(connection, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _private_watchdog_thread_seam(monkeypatch):
+    _ManualThread.instances.clear()
+    monkeypatch.setattr(
+        kortex_backend_module,
+        "_watchdog_thread_factory",
+        _ManualThread,
+    )
 
 
 def test_feedback_fixed_axis_xyz_pose_is_converted_to_wxyz():
@@ -257,35 +270,17 @@ def test_fresh_successful_command_resets_watchdog_deadline():
 def test_nonzero_command_arms_independent_daemon_watchdog():
     clock = _Clock()
     connection = _Connection(_feedback())
-    created_threads = []
-
-    class InlineThread:
-        def __init__(self, *, target, name, daemon):
-            self.target = target
-            self.name = name
-            self.daemon = daemon
-            created_threads.append(self)
-
-        def start(self):
-            pass
-
-        def run(self):
-            self.target()
-
-    backend = KortexBackend(
-        connection,
-        monotonic=clock,
-        thread_factory=InlineThread,
-    )
-    assert created_threads == []
+    backend = KortexBackend(connection, monotonic=clock)
+    assert _ManualThread.instances == []
     backend.begin_control()
 
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
     clock.now = 0.200001
     backend.check_watchdog()
 
-    assert len(created_threads) == 1
-    assert created_threads[0].daemon is True
+    assert len(_ManualThread.instances) == 1
+    assert _ManualThread.instances[0].daemon is True
+    assert _ManualThread.instances[0].started is True
     assert connection.base.stop_count == 1
 
 
@@ -450,11 +445,13 @@ def test_watchdog_stop_exception_does_not_escape_and_is_retried():
     assert attempts == [100, 100]
 
 
-def test_watchdog_thread_start_failure_attempts_stop_and_reports_unconfirmed():
+def test_watchdog_thread_start_failure_attempts_stop_and_reports_unconfirmed(
+    monkeypatch,
+):
     connection = _Connection(_feedback())
 
     class StartFailure:
-        def __init__(self, *, target, name, daemon):
+        def __init__(self, *, target, args=(), name, daemon):
             pass
 
         def start(self):
@@ -463,8 +460,13 @@ def test_watchdog_thread_start_failure_attempts_stop_and_reports_unconfirmed():
     def failed_stop(*, options=None):
         raise RuntimeError("stop unavailable")
 
+    monkeypatch.setattr(
+        kortex_backend_module,
+        "_watchdog_thread_factory",
+        StartFailure,
+    )
     connection.base.Stop = failed_stop
-    backend = KortexBackend(connection, thread_factory=StartFailure)
+    backend = KortexBackend(connection)
     backend.begin_control()
 
     with pytest.raises(RuntimeError, match="Stop attempted but unconfirmed"):
@@ -472,22 +474,58 @@ def test_watchdog_thread_start_failure_attempts_stop_and_reports_unconfirmed():
 
     assert backend.stop_requested is True
     assert backend.stop_confirmed is False
-    assert len(connection.base.sent) == 1
+    assert connection.base.sent == []
 
 
-def test_watchdog_thread_construction_failure_attempts_stop():
+def test_watchdog_thread_construction_failure_attempts_stop(monkeypatch):
     connection = _Connection(_feedback())
 
     class ConstructionFailure:
-        def __init__(self, *, target, name, daemon):
+        def __init__(self, *, target, args=(), name, daemon):
             raise RuntimeError("thread construction unavailable")
 
-    backend = KortexBackend(connection, thread_factory=ConstructionFailure)
+    monkeypatch.setattr(
+        kortex_backend_module,
+        "_watchdog_thread_factory",
+        ConstructionFailure,
+    )
+    backend = KortexBackend(connection)
     backend.begin_control()
 
     with pytest.raises(RuntimeError, match="Failed to start Kortex watchdog"):
         backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
+    assert connection.base.stop_count == 1
+    assert backend.stop_confirmed is True
+
+
+def test_watchdog_thread_that_never_reports_ready_stops_before_first_nonzero_send(
+    monkeypatch,
+):
+    connection = _Connection(_feedback())
+
+    class SilentThread:
+        def __init__(self, *, target, args=(), name, daemon):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(
+        kortex_backend_module,
+        "_watchdog_thread_factory",
+        SilentThread,
+    )
+    backend = KortexBackend(connection)
+    backend.begin_control()
+
+    with pytest.raises(RuntimeError, match="ready"):
+        backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+
+    assert connection.base.sent == []
     assert connection.base.stop_count == 1
     assert backend.stop_confirmed is True
 
@@ -517,6 +555,129 @@ def test_watchdog_cannot_be_disabled_through_production_constructor():
         KortexBackend(connection, start_watchdog=False)
     with pytest.raises(TypeError):
         KortexBackend(connection, shutdown_event=threading.Event())
+    with pytest.raises(TypeError):
+        KortexBackend(connection, thread_factory=_ManualThread)
+
+
+def test_stop_attempt_token_cannot_cross_into_new_control_epoch():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+    old_token = backend._request_stop(force=True)
+    backend._attempt_stop(token=old_token, raise_on_failure=False)
+    assert connection.base.stop_count == 1
+    backend.begin_control()
+    new_token = backend._request_stop(force=True)
+
+    backend._attempt_stop(token=old_token, raise_on_failure=False)
+    assert connection.base.stop_count == 1
+    backend._attempt_stop(token=new_token, raise_on_failure=False)
+
+    assert connection.base.stop_count == 2
+    assert backend.stop_confirmed is True
+
+
+def test_queued_old_stop_attempt_is_discarded_after_new_stop_epoch():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    class FirstAcquireGate:
+        def __init__(self):
+            self.first = True
+            self.queued = threading.Event()
+            self.release_first = threading.Event()
+
+        def acquire(self, timeout=None):
+            if self.first:
+                self.first = False
+                self.queued.set()
+                return self.release_first.wait(timeout=timeout)
+            return True
+
+        def release(self):
+            pass
+
+    gate = FirstAcquireGate()
+    backend._rpc_lock = gate
+    old_token = backend._request_stop(force=True)
+    old_attempt = threading.Thread(
+        target=lambda: backend._attempt_stop(
+            token=old_token,
+            raise_on_failure=False,
+        )
+    )
+    old_attempt.start()
+    assert gate.queued.wait(timeout=1.0)
+    new_token = backend._request_stop(force=True)
+    gate.release_first.set()
+    old_attempt.join(timeout=1.0)
+
+    assert not old_attempt.is_alive()
+    assert connection.base.stop_count == 0
+    backend._attempt_stop(token=new_token, raise_on_failure=False)
+    assert connection.base.stop_count == 1
+
+
+def test_stop_request_blocks_new_feedback_before_rpc_admission():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+    backend._request_stop(force=True)
+    refresh_count = len(connection.base_cyclic.options)
+
+    with pytest.raises(RuntimeError, match="Stop"):
+        backend.current_pose()
+
+    assert len(connection.base_cyclic.options) == refresh_count
+
+
+def test_feedback_queued_before_stop_rechecks_admission_after_rpc_lock():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    class GateLock:
+        def __init__(self):
+            self.attempted = threading.Event()
+            self.permit = threading.Event()
+
+        def acquire(self, timeout=None):
+            self.attempted.set()
+            return self.permit.wait(timeout=timeout)
+
+        def release(self):
+            pass
+
+    gate = GateLock()
+    backend._rpc_lock = gate
+    errors = []
+    feedback_thread = threading.Thread(
+        target=lambda: _capture_error(backend.current_pose, errors)
+    )
+    feedback_thread.start()
+    assert gate.attempted.wait(timeout=1.0)
+    backend._request_stop(force=True)
+    gate.permit.set()
+    feedback_thread.join(timeout=1.0)
+
+    assert not feedback_thread.is_alive()
+    assert errors and "Stop" in str(errors[0])
+    assert connection.base_cyclic.options == []
+
+
+def test_old_stop_attempt_after_close_does_not_access_cleared_client():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+    old_token = backend._request_stop(force=True)
+    backend.close()
+    stop_count = connection.base.stop_count
+    connection.base = None
+
+    backend._attempt_stop(token=old_token, raise_on_failure=False)
+
+    assert stop_count == 1
 
 
 def _capture_error(call, errors):
