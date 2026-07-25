@@ -1,0 +1,16 @@
+{
+  "name": "Yezqin.KinovaPico",
+  "rootNamespace": "Yezqin.KinovaPico",
+  "references": [
+    "UnityEngine.SpatialTracking"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

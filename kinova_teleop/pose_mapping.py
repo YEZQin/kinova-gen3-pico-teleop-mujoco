@@ -1,6 +1,7 @@
 """Pose mathematics and stateful relative controller mapping."""
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -23,20 +24,40 @@ class Pose:
     quaternion: np.ndarray
 
 
+class ClutchState(str, Enum):
+    WAITING_FOR_RELEASE = "waiting_for_release"
+    READY = "ready"
+    ACTIVE = "active"
+
+
 @dataclass(frozen=True)
 class MappingConfig:
     translation_scale: float = 1.0
-    grip_threshold: float = 0.9
+    grip_press_threshold: float = 0.9
+    grip_release_threshold: float = 0.8
     stale_timeout: float = 0.2
     filter_time_constant: float = 0.05
     max_position_step: float = 0.02
     max_rotation_step: float = 0.15
+
+    def __post_init__(self) -> None:
+        thresholds = np.asarray(
+            [self.grip_press_threshold, self.grip_release_threshold],
+            dtype=np.float64,
+        )
+        if not np.isfinite(thresholds).all() or not np.all(
+            (0.0 <= thresholds) & (thresholds <= 1.0)
+        ):
+            raise ValueError("Grip thresholds must be finite values in [0, 1]")
+        if self.grip_release_threshold >= self.grip_press_threshold:
+            raise ValueError("Grip release threshold must be lower than press threshold")
 
 
 @dataclass(frozen=True)
 class MappingOutput:
     target: Pose
     active: bool
+    clutch_state: ClutchState
     activated: bool
     deactivated: bool
     stale: bool
@@ -223,7 +244,7 @@ class RelativePoseMapper:
 
     def __init__(self, config: MappingConfig):
         self.config = config
-        self.active = False
+        self.clutch_state = ClutchState.WAITING_FOR_RELEASE
         self._controller_reference: Pose | None = None
         self._ee_reference: Pose | None = None
         self._last_target: Pose | None = None
@@ -232,7 +253,7 @@ class RelativePoseMapper:
         self._last_update_time: float | None = None
 
     def reset(self, ee_pose: Pose) -> None:
-        self.active = False
+        self.clutch_state = ClutchState.WAITING_FOR_RELEASE
         self._controller_reference = None
         self._ee_reference = None
         self._last_target = _copy_pose(ee_pose)
@@ -241,15 +262,19 @@ class RelativePoseMapper:
         self._last_update_time = None
 
     def _deactivate(self, stale: bool) -> MappingOutput:
-        was_active = self.active
-        self.active = False
+        was_active = self.clutch_state is ClutchState.ACTIVE
+        self.clutch_state = ClutchState.WAITING_FOR_RELEASE
         self._controller_reference = None
         self._ee_reference = None
+        self._last_timestamp = None
+        self._last_fresh_time = None
+        self._last_update_time = None
         if self._last_target is None:
             raise RuntimeError("Pose mapper has no target")
         return MappingOutput(
             target=_copy_pose(self._last_target),
             active=False,
+            clutch_state=self.clutch_state,
             activated=False,
             deactivated=was_active,
             stale=stale,
@@ -276,19 +301,6 @@ class RelativePoseMapper:
         if not sample_valid or stale:
             return self._deactivate(stale=stale)
 
-        pressed = float(sample.grip) > self.config.grip_threshold
-        if not pressed:
-            return self._deactivate(stale=False)
-
-        if self.active and not new_timestamp:
-            return MappingOutput(
-                target=_copy_pose(self._last_target),
-                active=True,
-                activated=False,
-                deactivated=False,
-                stale=False,
-            )
-
         try:
             controller_pose = transform_controller_pose(
                 sample.position, sample.quaternion_xyzw
@@ -296,8 +308,55 @@ class RelativePoseMapper:
         except ValueError:
             return self._deactivate(stale=False)
 
-        if not self.active:
-            self.active = True
+        grip = float(sample.grip)
+        if self.clutch_state is ClutchState.WAITING_FOR_RELEASE:
+            if grip < self.config.grip_release_threshold:
+                self.clutch_state = ClutchState.READY
+            return MappingOutput(
+                target=_copy_pose(self._last_target),
+                active=False,
+                clutch_state=self.clutch_state,
+                activated=False,
+                deactivated=False,
+                stale=False,
+            )
+
+        if self.clutch_state is ClutchState.READY:
+            if grip <= self.config.grip_press_threshold:
+                return MappingOutput(
+                    target=_copy_pose(self._last_target),
+                    active=False,
+                    clutch_state=self.clutch_state,
+                    activated=False,
+                    deactivated=False,
+                    stale=False,
+                )
+
+        elif grip < self.config.grip_release_threshold:
+            self.clutch_state = ClutchState.READY
+            self._controller_reference = None
+            self._ee_reference = None
+            return MappingOutput(
+                target=_copy_pose(self._last_target),
+                active=False,
+                clutch_state=self.clutch_state,
+                activated=False,
+                deactivated=True,
+                stale=False,
+            )
+
+        if self.clutch_state is ClutchState.ACTIVE and not new_timestamp:
+            return MappingOutput(
+                target=_copy_pose(self._last_target),
+                active=True,
+                clutch_state=self.clutch_state,
+                activated=False,
+                deactivated=False,
+                stale=False,
+            )
+
+        if self.clutch_state is not ClutchState.ACTIVE:
+            self.clutch_state = ClutchState.ACTIVE
             self._controller_reference = controller_pose
             self._ee_reference = _copy_pose(ee_pose)
             self._last_target = _copy_pose(ee_pose)
@@ -305,6 +364,7 @@ class RelativePoseMapper:
             return MappingOutput(
                 target=_copy_pose(self._last_target),
                 active=True,
+                clutch_state=self.clutch_state,
                 activated=True,
                 deactivated=False,
                 stale=False,
@@ -358,6 +418,7 @@ class RelativePoseMapper:
         return MappingOutput(
             target=_copy_pose(self._last_target),
             active=True,
+            clutch_state=self.clutch_state,
             activated=False,
             deactivated=False,
             stale=False,

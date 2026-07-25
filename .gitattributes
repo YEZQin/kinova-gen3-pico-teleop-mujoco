@@ -1,0 +1,7 @@
+# Unity serializes blank YAML/meta values with trailing spaces; preserve the files without diff whitespace diagnostics.
+pico_unity_bridge/**/*.meta whitespace=-trailing-space
+pico_unity_bridge/**/*.asset whitespace=-trailing-space
+pico_unity_bridge/**/*.unity whitespace=-trailing-space
+pico_unity_bridge/**/*.yaml whitespace=-trailing-space
+pico_unity_bridge/**/*.yml whitespace=-trailing-space
+pico_unity_bridge/ProjectSettings/**/*.asset whitespace=-trailing-space
