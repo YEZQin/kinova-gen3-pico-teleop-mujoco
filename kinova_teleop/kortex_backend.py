@@ -114,6 +114,8 @@ class KortexBackend:
         self._active = False
         self._stop_requested = False
         self._stop_confirmed = True
+        self._feedback_requires_rearm = False
+        self._rearm_feedback_pending = False
         self._closed = False
         self._connection_closed = False
 
@@ -159,41 +161,63 @@ class KortexBackend:
             and (generation is None or generation == self._generation)
         )
 
+    def _feedback_admission_locked(self) -> int | None:
+        if self._closed:
+            raise KortexSafetyError("Kortex backend is closing")
+        if self._stop_requested:
+            raise KortexSafetyError("Stop is requested; feedback is blocked")
+        if self._feedback_requires_rearm and not self._rearm_feedback_pending:
+            raise KortexSafetyError(
+                "Stop was requested; begin_control is required before feedback"
+            )
+        return self._generation if self._rearm_feedback_pending else None
+
     def current_pose(self) -> Pose:
         with self._state_lock:
-            if self._closed:
-                raise KortexSafetyError("Kortex backend is closing")
-            if self._stop_requested and not self._stop_confirmed:
-                raise KortexSafetyError("Stop is requested but unconfirmed")
+            self._feedback_admission_locked()
         if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
             raise KortexSafetyError("Timed out waiting for in-flight RPC")
         try:
             with self._state_lock:
-                if self._closed:
-                    raise KortexSafetyError("Kortex backend is closing")
-                if self._stop_requested and not self._stop_confirmed:
-                    raise KortexSafetyError("Stop is requested but unconfirmed")
+                rearm_generation = self._feedback_admission_locked()
             feedback = self.connection.base_cyclic.RefreshFeedback(
                 options=self.connection.rpc_options()
             ).base
+
+            position = np.array(
+                [feedback.tool_pose_x, feedback.tool_pose_y, feedback.tool_pose_z],
+                dtype=np.float64,
+            )
+            angles = np.array(
+                [
+                    feedback.tool_pose_theta_x,
+                    feedback.tool_pose_theta_y,
+                    feedback.tool_pose_theta_z,
+                ],
+                dtype=np.float64,
+            )
+            if not np.isfinite(position).all() or not np.isfinite(angles).all():
+                raise ValueError("Kortex feedback pose must be finite")
+            pose = Pose(
+                position=position,
+                quaternion=_fixed_xyz_quaternion(angles),
+            )
+            if rearm_generation is not None:
+                with self._state_lock:
+                    if (
+                        self._closed
+                        or self._stop_requested
+                        or not self._rearm_feedback_pending
+                        or self._generation != rearm_generation
+                    ):
+                        raise KortexSafetyError(
+                            "Stop was requested during re-arm feedback"
+                        )
+                    self._rearm_feedback_pending = False
+                    self._feedback_requires_rearm = False
+            return pose
         finally:
             self._rpc_lock.release()
-
-        position = np.array(
-            [feedback.tool_pose_x, feedback.tool_pose_y, feedback.tool_pose_z],
-            dtype=np.float64,
-        )
-        angles = np.array(
-            [
-                feedback.tool_pose_theta_x,
-                feedback.tool_pose_theta_y,
-                feedback.tool_pose_theta_z,
-            ],
-            dtype=np.float64,
-        )
-        if not np.isfinite(position).all() or not np.isfinite(angles).all():
-            raise ValueError("Kortex feedback pose must be finite")
-        return Pose(position=position, quaternion=_fixed_xyz_quaternion(angles))
 
     def begin_control(self) -> None:
         with self._state_lock:
@@ -209,6 +233,7 @@ class KortexBackend:
             self._stop_confirmed = False
             self._stop_token = None
             self._deadline = None
+            self._rearm_feedback_pending = True
 
     @staticmethod
     def _inactive_result() -> BackendResult:
@@ -381,6 +406,8 @@ class KortexBackend:
         self._stop_confirmed = False
         self._stop_token = token
         self._deadline = None
+        self._feedback_requires_rearm = True
+        self._rearm_feedback_pending = False
         return token
 
     def _request_stop(self, *, force: bool) -> _StopToken:
@@ -453,6 +480,11 @@ class KortexBackend:
         with self._watchdog_start_lock:
             with self._state_lock:
                 if self._connection_closed:
+                    if not self._stop_confirmed:
+                        raise KortexSafetyError(
+                            "Kortex connection closed after Stop attempted "
+                            "but unconfirmed"
+                        ) from None
                     return
                 self._closed = True
                 if self._terminal_stop_token is None:

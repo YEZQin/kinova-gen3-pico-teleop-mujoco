@@ -1,7 +1,7 @@
 """Pose mathematics and stateful relative controller mapping."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -35,7 +35,7 @@ class MappingConfig:
 
 @dataclass(frozen=True)
 class MappingOutput:
-    target: Pose
+    target: Pose | None
     active: bool
     activated: bool
     deactivated: bool
@@ -231,11 +231,11 @@ class RelativePoseMapper:
         self._last_fresh_time: float | None = None
         self._last_update_time: float | None = None
 
-    def reset(self, ee_pose: Pose) -> None:
+    def reset(self, ee_pose: Pose | None = None) -> None:
         self.active = False
         self._controller_reference = None
         self._ee_reference = None
-        self._last_target = _copy_pose(ee_pose)
+        self._last_target = None if ee_pose is None else _copy_pose(ee_pose)
         self._last_timestamp = None
         self._last_fresh_time = None
         self._last_update_time = None
@@ -245,20 +245,24 @@ class RelativePoseMapper:
         self.active = False
         self._controller_reference = None
         self._ee_reference = None
-        if self._last_target is None:
-            raise RuntimeError("Pose mapper has no target")
         return MappingOutput(
-            target=_copy_pose(self._last_target),
+            target=(
+                None
+                if self._last_target is None
+                else _copy_pose(self._last_target)
+            ),
             active=False,
             activated=False,
             deactivated=was_active,
             stale=stale,
         )
 
-    def update(self, sample: Any, ee_pose: Pose, now: float) -> MappingOutput:
-        if self._last_target is None:
-            self._last_target = _copy_pose(ee_pose)
-
+    def update(
+        self,
+        sample: Any,
+        anchor_pose: Pose | Callable[[], Pose],
+        now: float,
+    ) -> MappingOutput:
         sample_valid = bool(getattr(sample, "valid", False))
         sample_valid = sample_valid and np.isfinite(getattr(sample, "grip", np.nan))
         new_timestamp = (
@@ -297,6 +301,7 @@ class RelativePoseMapper:
             return self._deactivate(stale=False)
 
         if not self.active:
+            ee_pose = anchor_pose() if callable(anchor_pose) else anchor_pose
             self.active = True
             self._controller_reference = controller_pose
             self._ee_reference = _copy_pose(ee_pose)

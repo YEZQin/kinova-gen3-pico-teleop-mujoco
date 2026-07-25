@@ -112,18 +112,25 @@ class KortexConnection:
             session_info.connection_inactivity_timeout = (
                 self.config.connection_inactivity_timeout_ms
             )
-            self.session_manager.CreateSession(session_info)
+            self.session_manager.CreateSession(
+                session_info,
+                options=self.rpc_options(),
+            )
 
             self.base = factories.base_client(self.router)
             self.base_cyclic = factories.base_cyclic_client(self.router)
             self.base_pb2 = factories.base_pb2
             self._connected = True
         except BaseException as error:
-            self._cleanup(stop=self.base is not None)
+            stop_confirmed = self._cleanup(stop=self.base is not None)
+            if not isinstance(error, Exception):
+                raise
             safe_message = str(error)
             if self.config.password:
                 safe_message = safe_message.replace(self.config.password, "[REDACTED]")
             failure_message = f"Failed to connect to Kortex robot: {safe_message}"
+            if not stop_confirmed:
+                failure_message += "; Stop attempted but unconfirmed during cleanup"
         if failure_message is not None:
             raise RuntimeError(failure_message) from None
         return self
@@ -143,7 +150,7 @@ class KortexConnection:
                 stop_confirmed = False
         if self.session_manager is not None:
             try:
-                self.session_manager.CloseSession()
+                self.session_manager.CloseSession(options=self.rpc_options())
             except BaseException:
                 pass
         if self.router is not None:

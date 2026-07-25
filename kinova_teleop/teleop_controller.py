@@ -10,7 +10,7 @@ from typing import Any
 
 from .backend import EndEffectorTargetBackend
 from .mujoco_backend import MuJoCoBackend
-from .pose_mapping import MappingConfig, RelativePoseMapper
+from .pose_mapping import MappingConfig, Pose, RelativePoseMapper
 from .xr_input import XrInputSource
 
 
@@ -57,9 +57,11 @@ class TeleopController:
                 stale_timeout=config.stale_timeout,
             ),
         )
-        self.mapper.reset(self.backend.current_pose())
+        self.mapper.reset()
         self._steps = 0
         self._closed = False
+        self._backend_closed = False
+        self._source_closed = False
 
     @property
     def model(self) -> Any:
@@ -85,6 +87,10 @@ class TeleopController:
     def steps(self) -> int:
         return self._steps
 
+    def _begin_anchor_transaction(self) -> Pose:
+        self.backend.begin_control()
+        return self.backend.current_pose()
+
     def step_once(self) -> StepDiagnostics:
         sample = self.source.read()
         now = (
@@ -92,12 +98,12 @@ class TeleopController:
             if self.config.realtime
             else float(sample.received_monotonic)
         )
-        mapping = self.mapper.update(sample, self.backend.current_pose(), now)
+        mapping = self.mapper.update(sample, self._begin_anchor_transaction, now)
 
         result = None
-        if mapping.activated:
-            self.backend.begin_control()
         if mapping.active:
+            if mapping.target is None:
+                raise RuntimeError("Active pose mapping has no target")
             result = self.backend.command_pose(mapping.target)
         elif mapping.deactivated:
             self.backend.hold()
@@ -146,9 +152,26 @@ class TeleopController:
             self.close()
 
     def close(self) -> None:
-        if not self._closed:
+        if self._closed:
+            return
+
+        first_error: BaseException | None = None
+        if not self._backend_closed:
+            try:
+                self.backend.close()
+            except BaseException as error:
+                first_error = error
+            else:
+                self._backend_closed = True
+        if not self._source_closed:
             try:
                 self.source.close()
-            finally:
-                self.backend.close()
-                self._closed = True
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                self._source_closed = True
+
+        self._closed = self._backend_closed and self._source_closed
+        if first_error is not None:
+            raise first_error

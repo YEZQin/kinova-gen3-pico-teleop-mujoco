@@ -86,11 +86,12 @@ class _Cyclic:
 
 
 class _Connection:
-    def __init__(self, feedback):
+    def __init__(self, feedback, *, close_result=True):
         self.base = _Base()
         self.base_cyclic = _Cyclic(feedback)
         self.base_pb2 = BASE_PB2
         self.closed = 0
+        self.close_result = close_result
 
     def rpc_options(self):
         return SimpleNamespace(timeout_ms=100)
@@ -98,7 +99,7 @@ class _Connection:
     def close(self):
         self.base.Stop(options=self.rpc_options())
         self.closed += 1
-        return True
+        return self.close_result
 
 
 class _ManualThread:
@@ -231,6 +232,21 @@ def test_hold_stops_only_once_and_close_is_idempotent():
     assert connection.base.stop_count == 2
 
 
+def test_false_connection_close_remains_unconfirmed_across_backend_close_retries():
+    """A repeated backend close must not erase an explicit False Stop result."""
+
+    connection = _Connection(_feedback(), close_result=False)
+    backend = _backend(connection)
+
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        backend.close()
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        backend.close()
+
+    assert backend.stop_confirmed is False
+    assert connection.closed == 1
+
+
 def test_watchdog_crossing_200_ms_stops_once_and_latches():
     clock = _Clock()
     connection = _Connection(_feedback())
@@ -288,6 +304,9 @@ def test_hold_while_feedback_is_in_flight_prevents_stopped_generation_send():
     feedback_started = threading.Event()
     release_feedback = threading.Event()
     connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+    backend.current_pose()
 
     def blocking_feedback(*, options=None):
         feedback_started.set()
@@ -295,8 +314,6 @@ def test_hold_while_feedback_is_in_flight_prevents_stopped_generation_send():
         return _feedback()
 
     connection.base_cyclic.RefreshFeedback = blocking_feedback
-    backend = _backend(connection)
-    backend.begin_control()
     command_thread = threading.Thread(
         target=backend.command_pose,
         args=(_target(position=(0.01, 0.0, 0.0)),),
@@ -632,6 +649,28 @@ def test_stop_request_blocks_new_feedback_before_rpc_admission():
     assert len(connection.base_cyclic.options) == refresh_count
 
 
+def test_confirmed_stop_blocks_ordinary_feedback_until_explicit_rearm_transaction():
+    """Clearing Stop admission without begin_control must break this test."""
+
+    connection = _Connection(_feedback((1.0, 2.0, 3.0)))
+    backend = _backend(connection)
+    backend.begin_control()
+    backend.current_pose()
+    backend.hold()
+    refresh_count = len(connection.base_cyclic.options)
+    assert backend.stop_confirmed is True
+
+    with pytest.raises(RuntimeError, match="Stop"):
+        backend.current_pose()
+    assert len(connection.base_cyclic.options) == refresh_count
+
+    backend.begin_control()
+    anchor = backend.current_pose()
+
+    np.testing.assert_allclose(anchor.position, [1.0, 2.0, 3.0])
+    assert len(connection.base_cyclic.options) == refresh_count + 1
+
+
 def test_feedback_queued_before_stop_rechecks_admission_after_rpc_lock():
     connection = _Connection(_feedback())
     backend = _backend(connection)
@@ -816,6 +855,7 @@ def test_close_does_not_disconnect_during_blocked_feedback_and_can_retry():
     connection = _Connection(_feedback())
     backend = _backend(connection)
     backend.begin_control()
+    backend.current_pose()
 
     def blocking_feedback(*, options=None):
         feedback_started.set()

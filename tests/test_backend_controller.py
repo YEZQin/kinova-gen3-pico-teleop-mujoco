@@ -1,6 +1,8 @@
 from collections.abc import Iterable
+from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from kinova_teleop.backend import BackendResult
 from kinova_teleop.pose_mapping import Pose
@@ -53,6 +55,12 @@ class RecordingBackend:
         self.close_calls += 1
 
 
+class RpcOrderingBackend(RecordingBackend):
+    def current_pose(self) -> Pose:
+        self.events.append("current_pose")
+        return self.pose
+
+
 def sample(position: list[float], grip: float, timestamp_ns: int, received: float) -> ControllerSample:
     return ControllerSample(
         position=np.asarray(position, dtype=np.float64),
@@ -103,6 +111,129 @@ def test_controller_orchestrates_backend_clutch_lifecycle() -> None:
 
     assert backend.close_calls == 1
     assert source.close_calls == 1
+
+
+def test_controller_close_orders_backend_before_source_and_is_idempotent() -> None:
+    """Closing XR before the motion backend must break this test."""
+
+    events: list[str] = []
+
+    class OrderedSource(ScriptedInput):
+        def close(self) -> None:
+            events.append("source.close")
+            super().close()
+
+    class OrderedBackend(RecordingBackend):
+        def close(self) -> None:
+            events.append("backend.close")
+            super().close()
+
+    source = OrderedSource([])
+    backend = OrderedBackend()
+    controller = TeleopController(
+        TeleopConfig(model_path=None, realtime=False),
+        source,
+        backend,
+    )
+
+    controller.close()
+    controller.close()
+
+    assert events == ["backend.close", "source.close"]
+    assert backend.close_calls == 1
+    assert source.close_calls == 1
+
+
+def test_controller_close_attempts_source_after_backend_failure() -> None:
+    """A backend close failure must not strand the XR input resource."""
+
+    events: list[str] = []
+
+    class OrderedSource(ScriptedInput):
+        def close(self) -> None:
+            events.append("source.close")
+            super().close()
+
+    class FailingBackend(RecordingBackend):
+        def close(self) -> None:
+            events.append("backend.close")
+            raise RuntimeError("backend cleanup failed")
+
+    controller = TeleopController(
+        TeleopConfig(model_path=None, realtime=False),
+        OrderedSource([]),
+        FailingBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="backend cleanup failed"):
+        controller.close()
+
+    assert events == ["backend.close", "source.close"]
+
+
+def test_first_grip_reads_anchor_after_begin_and_active_cycle_adds_no_feedback() -> None:
+    """Eager or per-active-cycle controller feedback must break this test."""
+
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 1.0, 1, 1.00),
+            sample([0.01, 0.0, 0.0], 1.0, 2, 1.01),
+        ],
+    )
+    backend = RpcOrderingBackend()
+    controller = TeleopController(
+        TeleopConfig(model_path=None, realtime=False),
+        source,
+        backend,
+    )
+
+    assert backend.events == []
+    controller.step_once()
+    assert backend.events == [
+        "begin_control",
+        "current_pose",
+        "command_pose",
+        "step",
+    ]
+    np.testing.assert_allclose(backend.targets[0].position, backend.pose.position)
+
+    backend.events.clear()
+    controller.step_once()
+    assert backend.events == ["command_pose", "step"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_sample",
+    [
+        sample([1.0, 2.0, 3.0], 0.0, 2, 1.01),
+        replace(sample([1.0, 2.0, 3.0], 1.0, 2, 1.01), valid=False),
+        sample([1.0, 2.0, 3.0], 1.0, 1, 1.21),
+    ],
+    ids=("released", "invalid", "stale"),
+)
+def test_unsafe_input_holds_without_preceding_feedback(
+    unsafe_sample: ControllerSample,
+) -> None:
+    """Release, invalidity, or staleness must Stop before any feedback RPC."""
+
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 1.0, 1, 1.00),
+            unsafe_sample,
+        ],
+    )
+    backend = RpcOrderingBackend()
+    controller = TeleopController(
+        TeleopConfig(model_path=None, realtime=False),
+        source,
+        backend,
+    )
+    controller.step_once()
+    backend.events.clear()
+
+    controller.step_once()
+
+    assert backend.events == ["hold", "step"]
 
 
 def test_controller_runs_generic_backend_without_a_mujoco_viewer() -> None:

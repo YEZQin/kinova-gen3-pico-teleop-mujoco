@@ -198,7 +198,7 @@ python -m kinova_teleop.main --help
 
 - `--controller left`：仅允许左手柄。
 - `--model PATH`：MJCF 场景，默认 `kinova_gen3_mujoco/teleop_scene.xml`。
-- `--scale FLOAT`：手柄平移到机械臂平移的比例，默认 `1.0`。
+- `--scale FLOAT`：手柄平移到机械臂平移的比例；MuJoCo 默认 `1.0`，Kortex 默认 `0.5`，Kortex 允许调低但不允许高于 `0.5`。
 - `--control-hz FLOAT`：控制频率，默认 `100` Hz。
 - `--stale-timeout FLOAT`：时间戳不更新后的释放时间，默认 `0.2` s。
 - `--check-xr [--samples N]`：只检查 XR 链路，不加载 MuJoCo。

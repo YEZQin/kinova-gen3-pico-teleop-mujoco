@@ -216,6 +216,8 @@ def _validate_args(args: argparse.Namespace) -> str | None:
 def _validate_kortex_args(args: argparse.Namespace, password: str | None) -> str | None:
     """Validate every hardware input before importing or connecting Kortex."""
 
+    if args.stale_timeout > 0.2:
+        return "--stale-timeout must not exceed 0.2 for --backend kortex"
     if not args.enable_hardware:
         return "--backend kortex requires --enable-hardware"
     if args.dry_run:
@@ -243,8 +245,16 @@ def _close_resource(resource: Any, *, hardware: bool) -> bool:
     """Attempt one close operation and report whether it completed safely."""
 
     try:
-        resource.close()
+        result = resource.close()
     except BaseException:
+        message = (
+            "error: Kortex cleanup failed; motion stop may be unconfirmed"
+            if hardware
+            else "error: cleanup failed"
+        )
+        print(message, file=sys.stderr)
+        return False
+    if result is False:
         message = (
             "error: Kortex cleanup failed; motion stop may be unconfirmed"
             if hardware
@@ -267,7 +277,7 @@ def _cleanup_resources(
     if controller is not None and _close_resource(controller, hardware=hardware):
         return True
 
-    resources = (source, backend, connection)
+    resources = (backend, connection, source)
     succeeded = True
     for resource in resources:
         if resource is not None:
