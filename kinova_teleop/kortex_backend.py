@@ -105,10 +105,12 @@ class KortexBackend:
         self._shutdown = threading.Event()
         self._watchdog_thread: Any | None = None
         self._watchdog_ready: threading.Event | None = None
+        self._watchdog_started = False
         self._deadline: float | None = None
         self._generation = 0
         self._stop_epoch = 0
         self._stop_token: _StopToken | None = None
+        self._terminal_stop_token: _StopToken | None = None
         self._active = False
         self._stop_requested = False
         self._stop_confirmed = True
@@ -323,18 +325,15 @@ class KortexBackend:
                     name="kortex-command-watchdog",
                     daemon=True,
                 )
+                candidate.start()
                 with self._state_lock:
                     self._watchdog_thread = candidate
                     self._watchdog_ready = ready
-                candidate.start()
+                    self._watchdog_started = True
             except BaseException:
                 start_failed = True
             if not start_failed and ready.wait(WATCHDOG_READY_TIMEOUT):
                 return
-            with self._state_lock:
-                if self._watchdog_ready is ready:
-                    self._watchdog_thread = None
-                    self._watchdog_ready = None
 
         token = self._request_stop(force=True)
         confirmed = self._attempt_stop(token=token, raise_on_failure=False)
@@ -368,6 +367,8 @@ class KortexBackend:
             self._attempt_stop(token=token, raise_on_failure=False)
 
     def _request_stop_locked(self, *, force: bool) -> _StopToken:
+        if self._terminal_stop_token is not None:
+            return self._terminal_stop_token
         if self._stop_requested and not force:
             if self._stop_token is None:
                 raise RuntimeError("Stop request is missing its token")
@@ -449,15 +450,22 @@ class KortexBackend:
         """The Kortex controller executes commands asynchronously."""
 
     def close(self) -> None:
-        with self._state_lock:
-            if self._connection_closed:
-                return
-            self._closed = True
-            # Closing always makes a fresh bounded Stop attempt before disconnect.
-            self._stop_requested = False
-            self._stop_confirmed = False
-            close_token = self._request_stop_locked(force=True)
-            watchdog_thread = self._watchdog_thread
+        with self._watchdog_start_lock:
+            with self._state_lock:
+                if self._connection_closed:
+                    return
+                self._closed = True
+                if self._terminal_stop_token is None:
+                    # The terminal token owns Stop state until cleanup completes.
+                    self._stop_requested = False
+                    self._stop_confirmed = False
+                    close_token = self._request_stop_locked(force=True)
+                    self._terminal_stop_token = close_token
+                else:
+                    close_token = self._terminal_stop_token
+                watchdog_thread = (
+                    self._watchdog_thread if self._watchdog_started else None
+                )
         self._shutdown.set()
 
         if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
@@ -473,12 +481,12 @@ class KortexBackend:
 
         try:
             connection_stop_confirmed = self.connection.close()
+            with self._state_lock:
+                self._connection_closed = True
+                if self._terminal_stop_token == close_token:
+                    self._stop_confirmed = bool(connection_stop_confirmed)
         finally:
             self._rpc_lock.release()
-        with self._state_lock:
-            self._connection_closed = True
-            if self._stop_token == close_token:
-                self._stop_confirmed = bool(connection_stop_confirmed)
 
         if (
             watchdog_thread is not None

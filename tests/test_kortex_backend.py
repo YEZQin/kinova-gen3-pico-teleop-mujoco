@@ -680,6 +680,129 @@ def test_old_stop_attempt_after_close_does_not_access_cleared_client():
     assert stop_count == 1
 
 
+def test_close_never_joins_standard_thread_before_start_completes(monkeypatch):
+    start_entered = threading.Event()
+    allow_start = threading.Event()
+    connection = _Connection(_feedback())
+
+    class GatedStandardThread:
+        def __init__(self, *, target, args=(), name, daemon):
+            self.inner = threading.Thread(
+                target=target,
+                args=args,
+                name=name,
+                daemon=daemon,
+            )
+
+        def start(self):
+            start_entered.set()
+            assert allow_start.wait(timeout=1.0)
+            self.inner.start()
+
+        def join(self, timeout=None):
+            # Standard Thread raises RuntimeError if join precedes start.
+            self.inner.join(timeout=timeout)
+
+    monkeypatch.setattr(
+        kortex_backend_module,
+        "_watchdog_thread_factory",
+        GatedStandardThread,
+    )
+    backend = KortexBackend(connection)
+    backend.begin_control()
+    command_errors = []
+    command = threading.Thread(
+        target=lambda: _capture_error(
+            lambda: backend.command_pose(_target(position=(0.01, 0.0, 0.0))),
+            command_errors,
+        )
+    )
+    command.start()
+    assert start_entered.wait(timeout=1.0)
+
+    close_errors = []
+    closer = threading.Thread(
+        target=lambda: _capture_error(backend.close, close_errors)
+    )
+    closer.start()
+    allow_start.set()
+    command.join(timeout=1.0)
+    closer.join(timeout=1.0)
+
+    assert not command.is_alive()
+    assert not closer.is_alive()
+    assert close_errors == []
+    assert connection.closed == 1
+
+
+def test_command_failure_after_close_token_cannot_override_close_confirmation():
+    send_entered = threading.Event()
+    release_send = threading.Event()
+    failure_request_entered = threading.Event()
+    allow_failure_request = threading.Event()
+    connection_closed = threading.Event()
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    def failing_send(command, *, options=None):
+        send_entered.set()
+        assert release_send.wait(timeout=1.0)
+        raise RuntimeError("send failed")
+
+    connection.base.SendTwistCommand = failing_send
+    original_request_stop = backend._request_stop
+
+    def delayed_failure_request(*, force):
+        failure_request_entered.set()
+        assert allow_failure_request.wait(timeout=1.0)
+        return original_request_stop(force=force)
+
+    backend._request_stop = delayed_failure_request
+
+    def successful_clearing_close():
+        connection.closed += 1
+        connection.base = None
+        connection_closed.set()
+        return True
+
+    connection.close = successful_clearing_close
+    command_errors = []
+    command = threading.Thread(
+        target=lambda: _capture_error(
+            lambda: backend.command_pose(_target(position=(0.01, 0.0, 0.0))),
+            command_errors,
+        )
+    )
+    command.start()
+    assert send_entered.wait(timeout=1.0)
+    close_errors = []
+    closer = threading.Thread(
+        target=lambda: _capture_error(backend.close, close_errors)
+    )
+    closer.start()
+    close_token_created = False
+    for _ in range(100):
+        with backend._state_lock:
+            close_token_created = backend._closed
+        if close_token_created:
+            break
+        threading.Event().wait(0.001)
+    assert close_token_created
+
+    release_send.set()
+    assert failure_request_entered.wait(timeout=1.0)
+    assert connection_closed.wait(timeout=1.0)
+    allow_failure_request.set()
+    command.join(timeout=1.0)
+    closer.join(timeout=1.0)
+
+    assert close_errors == []
+    assert command_errors and "send failed" in str(command_errors[0])
+    assert backend.stop_confirmed is True
+    assert connection.closed == 1
+
+
 def _capture_error(call, errors):
     try:
         call()
