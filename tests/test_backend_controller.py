@@ -103,3 +103,21 @@ def test_controller_orchestrates_backend_clutch_lifecycle() -> None:
 
     assert backend.close_calls == 1
     assert source.close_calls == 1
+
+
+def test_controller_runs_generic_backend_without_a_mujoco_viewer() -> None:
+    """Reintroducing a controller-level viewer/model dependency must fail here."""
+
+    source = ScriptedInput([sample([0.0, 0.0, 0.0], 1.0, 1, 1.00)])
+    backend = RecordingBackend()
+    controller = TeleopController(
+        TeleopConfig(model_path=None, realtime=False),
+        source,
+        backend,
+    )
+
+    controller.run(max_steps=1)
+
+    assert backend.events == ["begin_control", "command_pose", "step"]
+    assert backend.close_calls == 1
+    assert source.close_calls == 1

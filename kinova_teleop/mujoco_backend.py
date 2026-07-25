@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import mujoco
 import numpy as np
@@ -115,6 +116,11 @@ class MuJoCoBackend:
         for _ in range(self._simulation_substeps):
             mujoco.mj_step(self.model, self.data)
         self._assert_finite_state()
+
+    def launch_viewer(self) -> Any:
+        import mujoco.viewer
+
+        return mujoco.viewer.launch_passive(self.model, self.data)
 
     def close(self) -> None:
         self._closed = True

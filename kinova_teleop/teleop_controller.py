@@ -121,9 +121,9 @@ class TeleopController:
         viewer = None
         try:
             if not headless:
-                import mujoco.viewer
-
-                viewer = mujoco.viewer.launch_passive(self.model, self.data)
+                launch_viewer = getattr(self.backend, "launch_viewer", None)
+                if launch_viewer is not None:
+                    viewer = launch_viewer()
 
             next_deadline = time.monotonic()
             while (
