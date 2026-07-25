@@ -22,6 +22,12 @@ from .pose_mapping import (
 MAX_LINEAR_SPEED = 0.03
 MAX_ANGULAR_SPEED_DEG = 5.0
 WATCHDOG_TIMEOUT = 0.2
+RPC_LOCK_TIMEOUT = 0.15
+WATCHDOG_POLL_INTERVAL = 0.01
+
+
+class KortexSafetyError(RuntimeError):
+    """A bounded safety operation could not be confirmed."""
 
 
 def _clip_norm(vector: np.ndarray, maximum_norm: float) -> np.ndarray:
@@ -60,8 +66,6 @@ class KortexBackend:
         max_angular_speed_deg: float = MAX_ANGULAR_SPEED_DEG,
         monotonic: Callable[[], float] = time.monotonic,
         thread_factory: Callable[..., Any] = threading.Thread,
-        shutdown_event: Any | None = None,
-        start_watchdog: bool = True,
     ):
         values = np.array(
             [kp_linear, kp_angular, max_linear_speed, max_angular_speed_deg],
@@ -85,30 +89,78 @@ class KortexBackend:
         self.max_angular_speed_deg = float(max_angular_speed_deg)
         self._monotonic = monotonic
         self._thread_factory = thread_factory
-        self._start_watchdog = start_watchdog
 
-        self._lock = threading.Lock()
-        self._shutdown = shutdown_event if shutdown_event is not None else threading.Event()
+        self._state_lock = threading.Lock()
+        self._rpc_lock = threading.Lock()
+        self._watchdog_start_lock = threading.Lock()
+        self._shutdown = threading.Event()
         self._watchdog_thread: Any | None = None
         self._deadline: float | None = None
         self._generation = 0
         self._active = False
-        self._stopped = True
+        self._stop_requested = False
+        self._stop_confirmed = True
         self._closed = False
+        self._connection_closed = False
 
-        servoing_mode = self.connection.base_pb2.ServoingModeInformation()
-        servoing_mode.servoing_mode = self.connection.base_pb2.SINGLE_LEVEL_SERVOING
         try:
-            self.connection.base.SetServoingMode(servoing_mode)
-        except BaseException:
+            servoing_mode = self.connection.base_pb2.ServoingModeInformation()
+            servoing_mode.servoing_mode = (
+                self.connection.base_pb2.SINGLE_LEVEL_SERVOING
+            )
+            if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
+                raise KortexSafetyError("Timed out preparing Kortex servoing mode")
             try:
-                self.connection.base.Stop()
-            except BaseException:
-                pass
+                self.connection.base.SetServoingMode(
+                    servoing_mode,
+                    options=self.connection.rpc_options(),
+                )
+            finally:
+                self._rpc_lock.release()
+        except BaseException:
+            self._request_stop(force=True)
+            self._attempt_stop(raise_on_failure=False)
             raise
 
+    @property
+    def stop_requested(self) -> bool:
+        with self._state_lock:
+            return self._stop_requested
+
+    @property
+    def stop_confirmed(self) -> bool:
+        """Whether the most recent Stop RPC returned successfully.
+
+        This is not proof that physical motion has ceased.
+        """
+
+        with self._state_lock:
+            return self._stop_confirmed
+
+    def _state_allows_command_locked(self, generation: int | None = None) -> bool:
+        return (
+            not self._closed
+            and self._active
+            and not self._stop_requested
+            and (generation is None or generation == self._generation)
+        )
+
     def current_pose(self) -> Pose:
-        feedback = self.connection.base_cyclic.RefreshFeedback().base
+        with self._state_lock:
+            if self._closed:
+                raise KortexSafetyError("Kortex backend is closing")
+        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
+            raise KortexSafetyError("Timed out waiting for in-flight RPC")
+        try:
+            with self._state_lock:
+                if self._closed:
+                    raise KortexSafetyError("Kortex backend is closing")
+            feedback = self.connection.base_cyclic.RefreshFeedback(
+                options=self.connection.rpc_options()
+            ).base
+        finally:
+            self._rpc_lock.release()
+
         position = np.array(
             [feedback.tool_pose_x, feedback.tool_pose_y, feedback.tool_pose_z],
             dtype=np.float64,
@@ -126,21 +178,27 @@ class KortexBackend:
         return Pose(position=position, quaternion=_fixed_xyz_quaternion(angles))
 
     def begin_control(self) -> None:
-        with self._lock:
+        with self._state_lock:
             if self._closed:
                 raise RuntimeError("Kortex backend is closed")
+            if self._stop_requested and not self._stop_confirmed:
+                raise KortexSafetyError(
+                    "Cannot resume while the previous Stop is unconfirmed"
+                )
             self._generation += 1
             self._active = True
-            self._stopped = False
+            self._stop_requested = False
+            self._stop_confirmed = False
             self._deadline = None
 
-    def _result_for_inactive(self) -> BackendResult:
+    @staticmethod
+    def _inactive_result() -> BackendResult:
         return BackendResult(converged=False)
 
     def command_pose(self, target: Pose) -> BackendResult:
-        with self._lock:
-            if self._closed or not self._active or self._stopped:
-                return self._result_for_inactive()
+        with self._state_lock:
+            if not self._state_allows_command_locked():
+                return self._inactive_result()
             generation = self._generation
 
         try:
@@ -164,25 +222,7 @@ class KortexBackend:
                 math.radians(self.max_angular_speed_deg),
             )
             angular_deg = np.degrees(angular_rad)
-        except BaseException:
-            self.hold()
-            raise
-
-        result = BackendResult(
-            converged=True,
-            position_error=float(np.linalg.norm(position_error)),
-            rotation_error=float(np.linalg.norm(rotation_error)),
-        )
-        velocity = np.concatenate((linear, angular_deg))
-
-        with self._lock:
-            if (
-                self._closed
-                or not self._active
-                or self._stopped
-                or generation != self._generation
-            ):
-                return self._result_for_inactive()
+            velocity = np.concatenate((linear, angular_deg))
 
             command = self.connection.base_pb2.TwistCommand()
             command.reference_frame = (
@@ -197,74 +237,188 @@ class KortexBackend:
                 command.twist.angular_y,
                 command.twist.angular_z,
             ) = map(float, velocity)
-            try:
-                self.connection.base.SendTwistCommand(command)
-            except BaseException:
-                self._stop_locked()
-                raise
+        except BaseException:
+            self._request_stop(force=True)
+            self._attempt_stop(raise_on_failure=False)
+            raise
 
+        result = BackendResult(
+            converged=True,
+            position_error=float(np.linalg.norm(position_error)),
+            rotation_error=float(np.linalg.norm(rotation_error)),
+        )
+        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
+            self._request_stop(force=True)
+            self._attempt_stop(raise_on_failure=False)
+            raise KortexSafetyError(
+                "Timed out waiting for in-flight RPC; Stop attempted but unconfirmed"
+            )
+
+        send_error: BaseException | None = None
+        sent = False
+        try:
+            with self._state_lock:
+                if not self._state_allows_command_locked(generation):
+                    return self._inactive_result()
+            try:
+                self.connection.base.SendTwistCommand(
+                    command,
+                    options=self.connection.rpc_options(),
+                )
+                sent = True
+            except BaseException as error:
+                send_error = error
+        finally:
+            self._rpc_lock.release()
+
+        if send_error is not None:
+            self._request_stop(force=True)
+            self._attempt_stop(raise_on_failure=False)
+            raise send_error
+
+        with self._state_lock:
+            if not sent or not self._state_allows_command_locked(generation):
+                return self._inactive_result()
             if float(np.linalg.norm(velocity)) > 0.0:
                 self._deadline = self._monotonic() + WATCHDOG_TIMEOUT
-                self._arm_watchdog_locked()
-            return result
 
-    def _arm_watchdog_locked(self) -> None:
-        if not self._start_watchdog or self._watchdog_thread is not None:
-            return
-        self._watchdog_thread = self._thread_factory(
-            target=self._watchdog_loop,
-            name="kortex-command-watchdog",
-            daemon=True,
-        )
-        self._watchdog_thread.start()
+        if float(np.linalg.norm(velocity)) > 0.0:
+            self._ensure_watchdog_started()
+        return result
+
+    def _ensure_watchdog_started(self) -> None:
+        with self._watchdog_start_lock:
+            with self._state_lock:
+                if self._watchdog_thread is not None or not self._active:
+                    return
+            start_failed = False
+            try:
+                candidate = self._thread_factory(
+                    target=self._watchdog_loop,
+                    name="kortex-command-watchdog",
+                    daemon=True,
+                )
+                candidate.start()
+            except BaseException:
+                start_failed = True
+            if not start_failed:
+                with self._state_lock:
+                    self._watchdog_thread = candidate
+                return
+
+        self._request_stop(force=True)
+        confirmed = self._attempt_stop(raise_on_failure=False)
+        status = "Stop confirmed" if confirmed else "Stop attempted but unconfirmed"
+        raise KortexSafetyError(
+            f"Failed to start Kortex watchdog; {status}"
+        ) from None
 
     def _watchdog_loop(self) -> None:
-        while not self._shutdown.wait(0.01):
-            self.check_watchdog()
+        while not self._shutdown.wait(WATCHDOG_POLL_INTERVAL):
+            try:
+                self.check_watchdog()
+            except BaseException:
+                # Safety state remains stop-requested/unconfirmed and is retried.
+                continue
 
     def check_watchdog(self) -> None:
-        """Run one timeout check; also used by deterministic fake-clock tests."""
-
-        with self._lock:
+        should_attempt = False
+        with self._state_lock:
             if (
                 not self._closed
                 and self._active
-                and not self._stopped
                 and self._deadline is not None
                 and self._monotonic() > self._deadline
             ):
-                self._stop_locked()
+                self._request_stop_locked(force=True)
+            should_attempt = self._stop_requested and not self._stop_confirmed
+        if should_attempt:
+            self._attempt_stop(raise_on_failure=False)
 
-    def _stop_locked(self) -> None:
-        if self._active and not self._stopped:
+    def _request_stop_locked(self, *, force: bool) -> None:
+        if self._stop_requested and (self._stop_confirmed or not force):
+            return
+        self._generation += 1
+        self._active = False
+        self._stop_requested = True
+        self._stop_confirmed = False
+        self._deadline = None
+
+    def _request_stop(self, *, force: bool) -> None:
+        with self._state_lock:
+            self._request_stop_locked(force=force)
+
+    def _attempt_stop(self, *, raise_on_failure: bool) -> bool:
+        with self._state_lock:
+            if not self._stop_requested or self._stop_confirmed:
+                return self._stop_confirmed
+
+        acquired = self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT)
+        failed = not acquired
+        if acquired:
             try:
-                self.connection.base.Stop()
+                self.connection.base.Stop(options=self.connection.rpc_options())
+            except BaseException:
+                failed = True
             finally:
-                self._active = False
-                self._stopped = True
-                self._deadline = None
+                self._rpc_lock.release()
+
+        with self._state_lock:
+            if failed:
+                self._stop_confirmed = False
+            else:
+                self._stop_confirmed = True
+        if failed and raise_on_failure:
+            raise KortexSafetyError("Stop attempted but unconfirmed") from None
+        return not failed
 
     def hold(self) -> None:
-        with self._lock:
-            self._stop_locked()
+        with self._state_lock:
+            if self._stop_requested and self._stop_confirmed:
+                return
+            self._request_stop_locked(force=True)
+        self._attempt_stop(raise_on_failure=True)
 
     def step(self) -> None:
         """The Kortex controller executes commands asynchronously."""
 
     def close(self) -> None:
-        watchdog_thread = None
-        with self._lock:
-            if self._closed:
+        with self._state_lock:
+            if self._connection_closed:
                 return
             self._closed = True
-            self._active = False
-            self._stopped = True
-            self._deadline = None
-            self._shutdown.set()
+            # Closing always makes a fresh bounded Stop attempt before disconnect.
+            self._stop_requested = False
+            self._stop_confirmed = False
+            self._request_stop_locked(force=True)
             watchdog_thread = self._watchdog_thread
-            self.connection.close()
+        self._shutdown.set()
+
+        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
+            if (
+                watchdog_thread is not None
+                and watchdog_thread is not threading.current_thread()
+            ):
+                watchdog_thread.join(timeout=RPC_LOCK_TIMEOUT)
+            raise KortexSafetyError(
+                "Cannot close while an in-flight RPC is still active; "
+                "Stop attempted but unconfirmed"
+            ) from None
+
+        try:
+            connection_stop_confirmed = self.connection.close()
+        finally:
+            self._rpc_lock.release()
+        with self._state_lock:
+            self._connection_closed = True
+            self._stop_confirmed = bool(connection_stop_confirmed)
+
         if (
             watchdog_thread is not None
             and watchdog_thread is not threading.current_thread()
         ):
-            watchdog_thread.join(timeout=1.0)
+            watchdog_thread.join(timeout=RPC_LOCK_TIMEOUT)
+        if not self.stop_confirmed:
+            raise KortexSafetyError(
+                "Kortex connection closed after Stop attempted but unconfirmed"
+            ) from None

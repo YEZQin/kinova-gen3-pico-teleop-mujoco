@@ -59,22 +59,28 @@ class _Base:
         self.sent: list[_TwistCommand] = []
         self.stop_count = 0
         self.servo_modes = []
+        self.send_options = []
+        self.stop_options = []
 
-    def SetServoingMode(self, mode):
+    def SetServoingMode(self, mode, *, options=None):
         self.servo_modes.append(mode.servoing_mode)
 
-    def SendTwistCommand(self, command):
+    def SendTwistCommand(self, command, *, options=None):
+        self.send_options.append(options)
         self.sent.append(command)
 
-    def Stop(self):
+    def Stop(self, *, options=None):
+        self.stop_options.append(options)
         self.stop_count += 1
 
 
 class _Cyclic:
     def __init__(self, feedback):
         self.feedback = feedback
+        self.options = []
 
-    def RefreshFeedback(self):
+    def RefreshFeedback(self, *, options=None):
+        self.options.append(options)
         return self.feedback
 
 
@@ -85,9 +91,30 @@ class _Connection:
         self.base_pb2 = BASE_PB2
         self.closed = 0
 
+    def rpc_options(self):
+        return SimpleNamespace(timeout_ms=100)
+
     def close(self):
-        self.base.Stop()
+        self.base.Stop(options=self.rpc_options())
         self.closed += 1
+        return True
+
+
+class _ManualThread:
+    instances = []
+
+    def __init__(self, *, target, name, daemon):
+        self.target = target
+        self.name = name
+        self.daemon = daemon
+        self.started = False
+        self.__class__.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def join(self, timeout=None):
+        pass
 
 
 class _Clock:
@@ -116,9 +143,13 @@ def _velocity(command):
     )
 
 
+def _backend(connection, **kwargs):
+    return KortexBackend(connection, thread_factory=_ManualThread, **kwargs)
+
+
 def test_feedback_fixed_axis_xyz_pose_is_converted_to_wxyz():
     connection = _Connection(_feedback((1.0, 2.0, 3.0), (0.0, 0.0, 90.0)))
-    backend = KortexBackend(connection, start_watchdog=False)
+    backend = _backend(connection)
 
     pose = backend.current_pose()
 
@@ -129,25 +160,26 @@ def test_feedback_fixed_axis_xyz_pose_is_converted_to_wxyz():
         atol=1e-12,
     )
     assert connection.base.servo_modes == [23]
+    assert connection.base_cyclic.options[-1].timeout_ms < 200
 
 
 def test_servoing_mode_error_stops_before_propagating():
     connection = _Connection(_feedback())
 
-    def fail_servoing_mode(mode):
+    def fail_servoing_mode(mode, *, options=None):
         raise RuntimeError("servo mode rejected")
 
     connection.base.SetServoingMode = fail_servoing_mode
 
     with pytest.raises(RuntimeError, match="servo mode rejected"):
-        KortexBackend(connection, start_watchdog=False)
+        _backend(connection)
 
     assert connection.base.stop_count == 1
 
 
 def test_position_error_is_base_frame_and_clipped_by_vector_norm():
     connection = _Connection(_feedback())
-    backend = KortexBackend(connection, kp_linear=1.0, start_watchdog=False)
+    backend = _backend(connection, kp_linear=1.0)
     backend.begin_control()
 
     backend.command_pose(_target(position=(0.1, 0.0, 0.0)))
@@ -155,11 +187,12 @@ def test_position_error_is_base_frame_and_clipped_by_vector_norm():
     np.testing.assert_allclose(_velocity(connection.base.sent[-1]), [0.03, 0, 0, 0, 0, 0])
     assert connection.base.sent[-1].reference_frame == 17
     assert connection.base.sent[-1].duration == 0
+    assert connection.base.send_options[-1].timeout_ms < 200
 
 
 def test_rotation_error_is_converted_from_radians_and_clipped_in_degrees():
     connection = _Connection(_feedback())
-    backend = KortexBackend(connection, kp_angular=1.0, start_watchdog=False)
+    backend = _backend(connection, kp_angular=1.0)
     backend.begin_control()
     z_90 = (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
 
@@ -171,7 +204,7 @@ def test_rotation_error_is_converted_from_radians_and_clipped_in_degrees():
 
 def test_hold_stops_only_once_and_close_is_idempotent():
     connection = _Connection(_feedback())
-    backend = KortexBackend(connection, start_watchdog=False)
+    backend = _backend(connection)
     backend.begin_control()
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
@@ -188,7 +221,7 @@ def test_hold_stops_only_once_and_close_is_idempotent():
 def test_watchdog_crossing_200_ms_stops_once_and_latches():
     clock = _Clock()
     connection = _Connection(_feedback())
-    backend = KortexBackend(connection, monotonic=clock, start_watchdog=False)
+    backend = _backend(connection, monotonic=clock)
     backend.begin_control()
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
@@ -207,7 +240,7 @@ def test_watchdog_crossing_200_ms_stops_once_and_latches():
 def test_fresh_successful_command_resets_watchdog_deadline():
     clock = _Clock()
     connection = _Connection(_feedback())
-    backend = KortexBackend(connection, monotonic=clock, start_watchdog=False)
+    backend = _backend(connection, monotonic=clock)
     backend.begin_control()
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
     clock.now = 0.15
@@ -226,20 +259,6 @@ def test_nonzero_command_arms_independent_daemon_watchdog():
     connection = _Connection(_feedback())
     created_threads = []
 
-    class AdvancingEvent:
-        def __init__(self):
-            self.wait_count = 0
-
-        def wait(self, timeout):
-            self.wait_count += 1
-            if self.wait_count == 1:
-                clock.now = 0.200001
-                return False
-            return True
-
-        def set(self):
-            pass
-
     class InlineThread:
         def __init__(self, *, target, name, daemon):
             self.target = target
@@ -257,13 +276,13 @@ def test_nonzero_command_arms_independent_daemon_watchdog():
         connection,
         monotonic=clock,
         thread_factory=InlineThread,
-        shutdown_event=AdvancingEvent(),
     )
     assert created_threads == []
     backend.begin_control()
 
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
-    created_threads[0].run()
+    clock.now = 0.200001
+    backend.check_watchdog()
 
     assert len(created_threads) == 1
     assert created_threads[0].daemon is True
@@ -275,13 +294,13 @@ def test_hold_while_feedback_is_in_flight_prevents_stopped_generation_send():
     release_feedback = threading.Event()
     connection = _Connection(_feedback())
 
-    def blocking_feedback():
+    def blocking_feedback(*, options=None):
         feedback_started.set()
         assert release_feedback.wait(timeout=1.0)
         return _feedback()
 
     connection.base_cyclic.RefreshFeedback = blocking_feedback
-    backend = KortexBackend(connection, start_watchdog=False)
+    backend = _backend(connection)
     backend.begin_control()
     command_thread = threading.Thread(
         target=backend.command_pose,
@@ -290,9 +309,11 @@ def test_hold_while_feedback_is_in_flight_prevents_stopped_generation_send():
     command_thread.start()
     assert feedback_started.wait(timeout=1.0)
 
-    backend.hold()
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        backend.hold()
     release_feedback.set()
     command_thread.join(timeout=1.0)
+    backend.check_watchdog()
 
     assert not command_thread.is_alive()
     assert connection.base.stop_count == 1
@@ -304,15 +325,11 @@ def test_watchdog_stop_while_feedback_is_in_flight_prevents_late_send():
     feedback_started = threading.Event()
     release_feedback = threading.Event()
     connection = _Connection(_feedback())
-    backend = KortexBackend(
-        connection,
-        monotonic=clock,
-        start_watchdog=False,
-    )
+    backend = _backend(connection, monotonic=clock)
     backend.begin_control()
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
-    def blocking_feedback():
+    def blocking_feedback(*, options=None):
         feedback_started.set()
         assert release_feedback.wait(timeout=1.0)
         return _feedback()
@@ -329,7 +346,222 @@ def test_watchdog_stop_while_feedback_is_in_flight_prevents_late_send():
     backend.check_watchdog()
     release_feedback.set()
     command_thread.join(timeout=1.0)
+    backend.check_watchdog()
 
     assert not command_thread.is_alive()
     assert connection.base.stop_count == 1
     assert len(connection.base.sent) == 1
+
+
+def test_blocked_send_has_bounded_options_and_watchdog_latches_before_stop_rpc():
+    clock = _Clock()
+    send_started = threading.Event()
+    release_send = threading.Event()
+    connection = _Connection(_feedback())
+    backend = _backend(connection, monotonic=clock)
+    backend.begin_control()
+    backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+
+    original_send = connection.base.SendTwistCommand
+
+    def blocking_send(command, *, options=None):
+        assert options.timeout_ms < 200
+        send_started.set()
+        assert release_send.wait(timeout=1.0)
+        original_send(command, options=options)
+
+    connection.base.SendTwistCommand = blocking_send
+    clock.now = 0.15
+    blocked_command = threading.Thread(
+        target=backend.command_pose,
+        args=(_target(position=(0.02, 0.0, 0.0)),),
+    )
+    blocked_command.start()
+    assert send_started.wait(timeout=1.0)
+
+    clock.now = 0.200001
+    watchdog = threading.Thread(target=backend.check_watchdog)
+    watchdog.start()
+    rejected_result = []
+    later_command = threading.Thread(
+        target=lambda: rejected_result.append(
+            backend.command_pose(_target(position=(0.03, 0.0, 0.0)))
+        )
+    )
+    later_command.start()
+    later_command.join(timeout=0.25)
+
+    try:
+        assert not later_command.is_alive()
+        assert rejected_result[0].converged is False
+        assert backend.stop_requested is True
+    finally:
+        release_send.set()
+        blocked_command.join(timeout=1.0)
+        watchdog.join(timeout=1.0)
+
+    assert connection.base.stop_count == 1
+
+
+def test_stop_failure_stays_unconfirmed_and_watchdog_retry_can_confirm():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+    attempts = []
+
+    def flaky_stop(*, options=None):
+        attempts.append(options.timeout_ms)
+        if len(attempts) == 1:
+            raise RuntimeError("stop timeout")
+
+    connection.base.Stop = flaky_stop
+
+    with pytest.raises(RuntimeError, match="unconfirmed"):
+        backend.hold()
+
+    assert backend.stop_requested is True
+    assert backend.stop_confirmed is False
+    backend.check_watchdog()
+    assert backend.stop_confirmed is True
+    assert attempts == [100, 100]
+
+
+def test_watchdog_stop_exception_does_not_escape_and_is_retried():
+    clock = _Clock()
+    connection = _Connection(_feedback())
+    backend = _backend(connection, monotonic=clock)
+    backend.begin_control()
+    backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+    attempts = []
+
+    def flaky_stop(*, options=None):
+        attempts.append(options.timeout_ms)
+        if len(attempts) == 1:
+            raise RuntimeError("stop timeout")
+
+    connection.base.Stop = flaky_stop
+    clock.now = 0.200001
+
+    backend.check_watchdog()
+    assert backend.stop_confirmed is False
+    backend.check_watchdog()
+
+    assert backend.stop_confirmed is True
+    assert attempts == [100, 100]
+
+
+def test_watchdog_thread_start_failure_attempts_stop_and_reports_unconfirmed():
+    connection = _Connection(_feedback())
+
+    class StartFailure:
+        def __init__(self, *, target, name, daemon):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    def failed_stop(*, options=None):
+        raise RuntimeError("stop unavailable")
+
+    connection.base.Stop = failed_stop
+    backend = KortexBackend(connection, thread_factory=StartFailure)
+    backend.begin_control()
+
+    with pytest.raises(RuntimeError, match="Stop attempted but unconfirmed"):
+        backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+
+    assert backend.stop_requested is True
+    assert backend.stop_confirmed is False
+    assert len(connection.base.sent) == 1
+
+
+def test_watchdog_thread_construction_failure_attempts_stop():
+    connection = _Connection(_feedback())
+
+    class ConstructionFailure:
+        def __init__(self, *, target, name, daemon):
+            raise RuntimeError("thread construction unavailable")
+
+    backend = KortexBackend(connection, thread_factory=ConstructionFailure)
+    backend.begin_control()
+
+    with pytest.raises(RuntimeError, match="Failed to start Kortex watchdog"):
+        backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+
+    assert connection.base.stop_count == 1
+    assert backend.stop_confirmed is True
+
+
+def test_twist_adaptation_error_attempts_stop():
+    connection = _Connection(_feedback())
+    connection.base_pb2 = SimpleNamespace(
+        TwistCommand=lambda: (_ for _ in ()).throw(RuntimeError("bad message")),
+        ServoingModeInformation=_ServoingModeInformation,
+        CARTESIAN_REFERENCE_FRAME_BASE=17,
+        SINGLE_LEVEL_SERVOING=23,
+    )
+    backend = _backend(connection)
+    backend.begin_control()
+
+    with pytest.raises(RuntimeError, match="bad message"):
+        backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+
+    assert connection.base.stop_count == 1
+    assert backend.stop_confirmed is True
+
+
+def test_watchdog_cannot_be_disabled_through_production_constructor():
+    connection = _Connection(_feedback())
+
+    with pytest.raises(TypeError):
+        KortexBackend(connection, start_watchdog=False)
+    with pytest.raises(TypeError):
+        KortexBackend(connection, shutdown_event=threading.Event())
+
+
+def _capture_error(call, errors):
+    try:
+        call()
+    except BaseException as error:
+        errors.append(error)
+
+
+def test_close_does_not_disconnect_during_blocked_feedback_and_can_retry():
+    feedback_started = threading.Event()
+    release_feedback = threading.Event()
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    def blocking_feedback(*, options=None):
+        feedback_started.set()
+        assert release_feedback.wait(timeout=1.0)
+        return _feedback()
+
+    connection.base_cyclic.RefreshFeedback = blocking_feedback
+    command = threading.Thread(
+        target=backend.command_pose,
+        args=(_target(position=(0.01, 0.0, 0.0)),),
+    )
+    command.start()
+    assert feedback_started.wait(timeout=1.0)
+    close_errors = []
+    closer = threading.Thread(
+        target=lambda: _capture_error(backend.close, close_errors),
+    )
+    closer.start()
+    closer.join(timeout=0.5)
+
+    close_finished = not closer.is_alive()
+    closed_while_blocked = connection.closed
+    captured_errors = list(close_errors)
+    release_feedback.set()
+    command.join(timeout=1.0)
+    closer.join(timeout=1.0)
+
+    assert close_finished
+    assert closed_while_blocked == 0
+    assert captured_errors and "in-flight RPC" in str(captured_errors[0])
+
+    backend.close()
+    assert connection.closed == 1

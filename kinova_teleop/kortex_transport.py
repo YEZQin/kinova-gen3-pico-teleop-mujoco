@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+RPC_TIMEOUT_MS = 100
+
 
 @dataclass(frozen=True)
 class KortexConfig:
@@ -28,13 +30,14 @@ class KortexFactories:
     base_client: Callable[[Any], Any]
     base_cyclic_client: Callable[[Any], Any]
     create_session_info: Callable[[], Any]
+    create_send_options: Callable[[], Any]
     base_pb2: Any
 
 
 def _sdk_factories() -> KortexFactories:
     """Import Kortex only when a hardware connection is explicitly requested."""
 
-    from kortex_api.RouterClient import RouterClient
+    from kortex_api.RouterClient import RouterClient, RouterClientSendOptions
     from kortex_api.SessionManager import SessionManager
     from kortex_api.TCPTransport import TCPTransport
     from kortex_api.autogen.client_stubs.BaseClientRpc import BaseClient
@@ -48,6 +51,7 @@ def _sdk_factories() -> KortexFactories:
         base_client=BaseClient,
         base_cyclic_client=BaseCyclicClient,
         create_session_info=Session_pb2.CreateSessionInfo,
+        create_send_options=RouterClientSendOptions,
         base_pb2=Base_pb2,
     )
 
@@ -71,6 +75,7 @@ class KortexConnection:
         self.base_pb2: Any | None = None
         self._connected = False
         self._closed = False
+        self.stop_confirmed = True
 
     @property
     def factories(self) -> KortexFactories:
@@ -84,6 +89,7 @@ class KortexConnection:
         if self._closed:
             raise RuntimeError("Cannot reconnect a closed Kortex connection")
 
+        failure_message: str | None = None
         try:
             factories = self.factories
             self.transport = factories.transport()
@@ -112,22 +118,29 @@ class KortexConnection:
             self.base_cyclic = factories.base_cyclic_client(self.router)
             self.base_pb2 = factories.base_pb2
             self._connected = True
-            return self
         except BaseException as error:
-            self._cleanup(stop=False)
+            self._cleanup(stop=self.base is not None)
             safe_message = str(error)
             if self.config.password:
                 safe_message = safe_message.replace(self.config.password, "[REDACTED]")
-            raise RuntimeError(
-                f"Failed to connect to Kortex robot: {safe_message}"
-            ) from None
+            failure_message = f"Failed to connect to Kortex robot: {safe_message}"
+        if failure_message is not None:
+            raise RuntimeError(failure_message) from None
+        return self
 
-    def _cleanup(self, *, stop: bool) -> None:
+    def rpc_options(self) -> Any:
+        options = self.factories.create_send_options()
+        options.timeout_ms = RPC_TIMEOUT_MS
+        return options
+
+    def _cleanup(self, *, stop: bool) -> bool:
+        stop_confirmed = not stop
         if stop and self.base is not None:
             try:
-                self.base.Stop()
+                self.base.Stop(options=self.rpc_options())
+                stop_confirmed = True
             except BaseException:
-                pass
+                stop_confirmed = False
         if self.session_manager is not None:
             try:
                 self.session_manager.CloseSession()
@@ -155,11 +168,13 @@ class KortexConnection:
         self.router = None
         self.transport = None
         self._connected = False
+        self.stop_confirmed = stop_confirmed
+        return stop_confirmed
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Stop first, then close all SDK resources in reverse order."""
 
         if self._closed:
-            return
+            return self.stop_confirmed
         self._closed = True
-        self._cleanup(stop=True)
+        return self._cleanup(stop=True)
