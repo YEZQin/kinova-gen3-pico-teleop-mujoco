@@ -47,27 +47,19 @@ sudo apt install -y python3-venv python3-dev build-essential cmake git \
   libgl1-mesa-dev libglfw3 netcat-openbsd
 ```
 
-若使用当前工作区：
+进入克隆后的项目目录，并把 venv 放在 WSL 的 Linux 文件系统中：
 
 ```bash
-cd /mnt/d/yezq/26.7.24_Kinova_controll
-python3 -m venv .venv-wsl
-source .venv-wsl/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-```
-
-若从 GitHub 克隆，把上面的 `cd` 替换为实际克隆目录。
-
-> 性能提示：某些 WSL2 版本在 `/mnt/d` 中创建 venv 会因跨文件系统小文件 I/O 耗时很久。若安装明显缓慢，推荐把 venv 放在 WSL 的 Linux 文件系统中；后续命令中的 `source .venv-wsl/bin/activate` 相应替换为下面的路径：
-
-```bash
+cd ~/kinova-gen3-pico-teleop-mujoco
 mkdir -p ~/.venvs
 python3 -m venv ~/.venvs/kinova-pico-teleop
 source ~/.venvs/kinova-pico-teleop/bin/activate
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e ".[dev]"
 ```
+
+如果项目位于其他位置，只替换 `cd` 路径。不要在 `/mnt/c`、`/mnt/d`
+等 Windows 挂载盘中创建 venv；跨文件系统小文件 I/O 通常更慢。
 
 先验证 MuJoCo、模型、IK 和无头控制循环：
 
@@ -104,8 +96,8 @@ WSL2 默认使用 NAT，WSL 内的 `127.0.0.1` 通常不是 Windows PC Service�
 项目运行时会延迟导入 `xrobotoolkit_sdk`；dry-run 不需要它，连接真实 PICO 时需要。以下固定使用本项目验证过的 Pybind 提交：
 
 ```bash
-cd /mnt/d/yezq/26.7.24_Kinova_controll
-source .venv-wsl/bin/activate
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
 mkdir -p .local-deps
 git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind.git \
   .local-deps/XRoboToolkit-PC-Service-Pybind
@@ -118,13 +110,14 @@ git checkout c64ccf6acd577a333e03b66fafe8efeeceb511b1
 ```bash
 sed -i 's/pip install pybind11 -y/pip install pybind11/' setup_ubuntu.sh
 bash setup_ubuntu.sh
-cd /mnt/d/yezq/26.7.24_Kinova_controll
+cd ~/kinova-gen3-pico-teleop-mujoco
 ```
 
 每次新开 WSL 终端，激活环境后加入 SDK 动态库目录：
 
 ```bash
-source .venv-wsl/bin/activate
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
 export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
 python -c "import xrobotoolkit_sdk; print('xrobotoolkit_sdk import OK')"
 ```
@@ -213,7 +206,223 @@ python -m kinova_teleop.main --help
 
 实体模式需要从 Kinova 获取与目标机械臂**固件版本和受支持 Python 版本相匹配**的 Kortex Python wheel。该 wheel 不随本项目分发，也不是项目依赖；MuJoCo 模式不需要安装它。机械臂与控制主机应使用受信任的**有线网络**连接，并确认 Kortex TCP 端口 `10000` 可达。
 
-### 上机前安全检查
+### 8.1 推荐部署拓扑
+
+本项目只把下面这套环境作为从零部署的主流程：
+
+```text
+PICO 左手柄
+  └─ PICO 端 XRoboToolkit 应用
+       └─ Windows XRoboToolkit PC Service（TCP 60061）
+            └─ WSL2 Ubuntu 22.04 / Python 3.10 / 同一个 venv
+                 ├─ xrobotoolkit_sdk
+                 ├─ 本项目 kinova_teleop
+                 └─ 与机器人固件匹配的 kortex_api wheel
+                      └─ Windows 有线网卡 → Gen3 TCP 10000
+```
+
+PICO PC Service 和机械臂网卡位于 Windows；Python 程序、XR binding 与
+Kortex API 位于同一个 WSL venv。不要把 Kortex SDK 装在 Windows Python、
+却从 WSL 运行本项目；两个 Python 环境不能共享已安装模块。
+
+### 8.2 第一步：从空白 Windows 安装 WSL
+
+在管理员 PowerShell 中执行：
+
+```powershell
+wsl --install -d Ubuntu-22.04
+wsl --update
+```
+
+首次打开 Ubuntu-22.04并创建 Linux 用户后，在 WSL 中执行：
+
+```bash
+sudo apt update
+sudo apt install -y python3.10 python3.10-venv python3-dev \
+  build-essential cmake git libgl1-mesa-dev libglfw3 netcat-openbsd
+```
+
+### 8.3 第二步：下载实机分支并创建项目环境
+
+本功能尚未合并到 `main`。在 WSL 中克隆公开的实机分支：
+
+```bash
+cd ~
+git clone --branch codex/gen3-hardware-design --single-branch \
+  https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco.git
+cd ~/kinova-gen3-pico-teleop-mujoco
+
+mkdir -p ~/.venvs
+python3.10 -m venv ~/.venvs/kinova-pico-teleop
+source ~/.venvs/kinova-pico-teleop/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+
+cd ~/kinova-gen3-pico-teleop-mujoco
+python -m pip install -e ".[dev]"
+```
+
+也可以从
+[Draft PR #2](https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/pull/2)
+查看改动，或下载
+[该分支 ZIP](https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/archive/refs/heads/codex/gen3-hardware-design.zip)。
+ZIP 解压后，把后续命令中的 `~/kinova-gen3-pico-teleop-mujoco` 替换为实际解压目录。
+
+如果项目实际克隆到了其他目录，把最后的 `cd` 改为该目录。每次新开 WSL
+终端都必须重新激活同一个 venv：
+
+```bash
+source ~/.venvs/kinova-pico-teleop/bin/activate
+```
+
+先完成与实体无关的检查：
+
+```bash
+python --version
+python -m pytest -q
+python -m kinova_teleop.main --dry-run --headless --steps 2000
+```
+
+最后一条必须输出 `finite_state=true`。失败时先修复 Python、项目或 MuJoCo
+环境，不要继续连接机械臂。
+
+### 8.4 第三步：安装和验证 PICO/XR 链路
+
+严格按第 2～4 节完成以下工作：
+
+1. 在 Windows 安装并启动 XRoboToolkit PC Service，设置
+   `listenAddr=0.0.0.0`、`listenPort=60061`。
+2. 在 PICO 中启动 XRoboToolkit 应用并确认左手柄在线。
+3. 在当前 **同一个 venv** 中构建
+   `XRoboToolkit-PC-Service-Pybind`，不要切换到另一个 Python。
+4. 在项目根目录创建 `PXREASetting.ini`，指向 Windows WSL 网关地址。
+5. 每次运行前设置 native library 路径：
+
+```bash
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
+export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
+
+python -c "import xrobotoolkit_sdk; print('xrobotoolkit_sdk import OK')"
+python -m kinova_teleop.main --check-xr --samples 100
+```
+
+移动左手柄、旋转手柄并按 Grip，确认位置、四元数、Grip 和递增时间戳都在变化。
+时间戳不递增时不得进入实体模式。
+
+### 8.5 第四步：获取并安装 Kinova Kortex Python SDK
+
+1. 打开目标机械臂的 Kinova Web App，记录**完整固件版本**和机器人型号
+   （Gen3、7DoF）。不要仅凭仓库示例猜 SDK 版本。
+2. 从 Kinova 官方
+   [Kortex API 安装页](https://docs.kinovarobotics.com/getting_started/installation.html)
+   或 Kinova 支持渠道下载与该固件、操作系统和 Python 版本匹配的
+   `kortex_api-*.whl`。
+3. 官方
+   [Kinova-kortex2_Gen3_G3L](https://github.com/Kinovarobotics/Kinova-kortex2_Gen3_G3L)
+   仓库主要提供示例和 API 文档，不等同于已经安装 SDK。其
+   [Python 示例说明](https://github.com/Kinovarobotics/Kinova-kortex2_Gen3_G3L/blob/master/api_python/examples/readme.md)
+   展示了 wheel 安装方法，但其中固定版本链接不应覆盖现场固件匹配要求。
+4. 把下载的 wheel 放到 WSL 可读路径，然后在项目使用的同一个 venv 中安装。
+   例如 wheel 位于 Windows 下载目录时：
+
+```bash
+source ~/.venvs/kinova-pico-teleop/bin/activate
+python -m pip install \
+  "/mnt/c/Users/<Windows用户名>/Downloads/<实际Kortex-wheel文件名>.whl"
+python -m pip check
+```
+
+尖括号内容必须替换为真实用户名和文件名。不要复制示例占位符原样执行。
+
+验证本项目需要的 SDK 接口：
+
+```bash
+python - <<'PY'
+import kortex_api
+from kortex_api.TCPTransport import TCPTransport
+from kortex_api.RouterClient import RouterClient, RouterClientSendOptions
+from kortex_api.SessionManager import SessionManager
+from kortex_api.autogen.client_stubs.BaseClientRpc import BaseClient
+from kortex_api.autogen.client_stubs.BaseCyclicClientRpc import BaseCyclicClient
+from kortex_api.autogen.messages import Base_pb2, Session_pb2
+
+print("kortex_api import OK:", kortex_api.__file__)
+print("required Kortex TCP interfaces OK")
+PY
+```
+
+如果 pip 报 `not a supported wheel on this platform`，或上述 import 失败：
+
+- 核对 wheel 是否为 Linux/Python wheel，而不是其他平台的包。
+- 核对 Kinova 发布说明中该 wheel 支持的 Python 版本。
+- 本项目要求 Python `>=3.10`。如果与现场固件匹配的 wheel 不支持 Python
+  3.10 或其他项目支持的 `>=3.10` 版本，则当前组合**不受支持**：停止部署并
+  联系 Kinova 或项目维护者，不要退回 Python 3.9 以下强装本项目。
+- 如果改用 wheel 明确支持的另一个 Python `>=3.10` 版本，必须重新创建干净
+  venv，并在其中重新安装本项目、重新构建 XRoboToolkit binding；不要在两个
+  Python 环境之间复制 `.so` 或 `site-packages`。
+- 如果固件与可下载 wheel 的对应关系不明确，先联系 Kinova 支持，不要用
+  “能 import”的其他版本直接控制机械臂。
+
+### 8.6 第五步：配置 Gen3 有线网络
+
+Kinova 官方 Python 示例假定机器人默认地址为 `192.168.1.10`，并建议主机有线
+接口使用同网段静态地址，例如 `192.168.1.11/24`。如果现场已修改机器人地址，
+下面所有地址都要相应替换。
+
+1. 使用独立网线连接电脑与机械臂控制器。
+2. 在 Windows“设置 → 网络和 Internet → 以太网 → IP 分配”中手动配置该
+   **有线网卡**：
+   - IPv4：`192.168.1.11`
+   - 子网前缀长度：`24`
+   - 网关和 DNS：直连场景通常留空
+3. 不要修改 PICO 所用 Wi-Fi 网卡，也不要让两个 Windows 网卡使用相同静态 IP。
+4. 先在 Windows 浏览器打开机械臂地址进入 Web App；只能确认页面可达和状态，
+   不执行运动动作。
+5. 在 WSL 中检查路由和 Kortex TCP 端口：
+
+```bash
+ip route get 192.168.1.10
+nc -vz -w 2 192.168.1.10 10000
+```
+
+`nc` 必须显示端口连接成功。如果 Windows 能打开 Web App、但 WSL 无法访问：
+
+```powershell
+wsl --update
+wsl --shutdown
+```
+
+重新进入 WSL 后再检查。仍失败时检查 Windows 防火墙、VPN、虚拟网卡优先级和
+WSL 网络模式；在 TCP `10000` 可达前不要运行实体命令。
+
+### 8.7 第六步：按顺序完成上机前分层检查
+
+每次首次部署或更换电脑、Python、固件、wheel 后，严格按顺序执行：
+
+```bash
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
+export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
+
+# 1. 项目和 MuJoCo
+python -m pytest -q
+python -m kinova_teleop.main --dry-run --headless --steps 2000
+
+# 2. PICO 左手柄
+python -m kinova_teleop.main --check-xr --samples 100
+
+# 3. Kortex SDK
+python -c "import kortex_api; print(kortex_api.__file__)"
+
+# 4. 机器人 TCP
+nc -vz -w 2 192.168.1.10 10000
+```
+
+上述四层任一失败都必须停止排障，不能输入 `MOVE`。这些检查只证明软件、输入和
+端口基本可用，不证明机械臂已经安全或程序已通过实机验证。
+
+### 8.8 第七步：上机前安全检查
 
 1. 固定机械臂并清空工作空间；人员离开危险区域，实体急停保持可触及且已验证可用。
 2. 先在 Kinova Web App 中将机械臂设为安全姿态、配置低速和工作空间限制；不要依赖本程序替代实体急停或机械臂安全配置。
@@ -225,11 +434,15 @@ read -rsp "Kortex password: " KINOVA_PASSWORD; echo
 export KINOVA_PASSWORD
 ```
 
-### 实体模式启动与操作
+### 8.9 第八步：首次低速启动和操作
 
 首次上机从低速开始：线速度 `0.01 m/s`、角速度 `2 deg/s`。以下命令中的 IP 和用户必须替换为目标机械臂的实际值：
 
 ```bash
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
+export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
+
 python -m kinova_teleop.main \
   --backend kortex \
   --enable-hardware \
@@ -239,11 +452,27 @@ python -m kinova_teleop.main \
   --max-angular-speed-deg 2
 ```
 
-命令会要求在终端中**精确输入 `MOVE`**；只有输入完全匹配后才会建立 Kortex 连接。程序没有自动 Home：连接后且 Grip 未按下时，机械臂应保持静止。首次检测到左手柄 Grip 的新鲜按下沿时，程序读取当前实体末端位姿作为机械臂锚点，并以当时手柄位姿建立相对 6DoF 映射；因此先确认手柄处于舒适、安全的位置，再按住 Grip。
+命令会要求在终端中**精确输入 `MOVE`**；只有输入完全匹配后才会建立 Kortex
+连接。输入 `MOVE` 前必须完全松开左 Grip，并确认手柄没有被挤压或误触。程序
+没有自动 Home：连接后且 Grip 未按下时，机械臂应保持静止。程序首次收到
+`Grip > 0.9` 的新鲜有效输入时，会读取当前实体末端位姿作为机械臂锚点，并以
+当时手柄位姿建立相对 6DoF 映射；因此先松开 Grip，把手柄移动到舒适位置，
+再按住 Grip。
+
+实体模式不会打开 MuJoCo Viewer；终端保持运行是正常现象。操作顺序：
+
+1. 不按 Grip，确认机械臂保持静止。
+2. 左手柄放到舒适位置后按住 Grip，只做毫米级平移和小角度旋转。
+3. 确认六个方向与预期一致；方向或姿态不正确时立即松开 Grip。
+4. 松开 Grip 后确认实体停止；不要靠持续按 Grip 调整异常方向。
+5. 按 `Ctrl+C` 退出并观察 Stop/cleanup 结果。出现
+   `Stop unconfirmed` 或 cleanup failure 时，使用实体急停/Web App 确认安全，
+   不要直接重启程序继续运动。
+6. 每次试验结束后可以关闭程序；下一次重新执行密码设置和启动命令即可。
 
 Grip 松开、XR 输入陈旧/无效、发送错误或程序退出时，软件会请求 Stop。`200 ms` 仅是主机侧的 stop-request/admission guarantee：它限制主机何时接受或继续发送控制，不足以证明机械臂在 200 ms 内完成物理停止。实体急停、Web App 限速和清空工作空间仍是必需的独立安全层。
 
-### 首次实体验收清单
+### 8.10 首次实体验收清单
 
 - [ ] 已记录本次为“实体测试”，且未把离线测试结果误记为实机验证。
 - [ ] 实体急停、固定安装、清空工作空间和 Kinova Web App 的安全姿态/低速设置均已确认。
@@ -251,10 +480,81 @@ Grip 松开、XR 输入陈旧/无效、发送错误或程序退出时，软件�
 - [ ] 密码仅通过 `KINOVA_PASSWORD` 环境变量提供，未出现在文件或命令历史中。
 - [ ] 使用上述 `0.01 m/s`、`2 deg/s` 命令启动，并仅在提示时精确输入 `MOVE`。
 - [ ] 连接后、未按 Grip 时无运动，且程序未执行自动 Home。
-- [ ] 第一次 Grip 按下仅建立手柄—当前实体末端锚点，无初始跳变。
+- [ ] 输入 `MOVE` 前 Grip 已完全松开；首次收到 `Grip > 0.9` 的有效输入时仅
+      建立手柄—当前实体末端锚点，无初始跳变。
 - [ ] 分别验证 Grip 松开、XR 断流、网络异常和程序退出时的 Stop 行为；记录观察到的实体停止结果。
 
+### 8.11 一次完整启动的最短命令清单
+
+环境已经按本节配置完成后，每次开机只需：
+
+```bash
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
+export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
+
+python -m kinova_teleop.main --check-xr --samples 20
+nc -vz -w 2 192.168.1.10 10000
+
+read -rsp "Kortex password: " KINOVA_PASSWORD; echo
+export KINOVA_PASSWORD
+
+python -m kinova_teleop.main \
+  --backend kortex \
+  --enable-hardware \
+  --robot-ip 192.168.1.10 \
+  --robot-user admin \
+  --max-linear-speed 0.01 \
+  --max-angular-speed-deg 2
+```
+
+最后一条命令提示后，由现场操作者确认安全条件，再精确输入 `MOVE`。
+
 ## 9. 故障排查
+
+### `No module named 'kortex_api'`
+
+- 确认已激活安装 wheel 时使用的同一个 venv：
+  `which python` 和 `python -m pip --version` 应指向
+  `~/.venvs/kinova-pico-teleop/`。
+- 用 `python -m pip list | grep -i kortex` 和
+  `python -c "import kortex_api; print(kortex_api.__file__)"`
+  检查实际安装位置。
+- 不要只克隆 Kinova examples 仓库；必须按第 8.5 节安装官方 wheel。
+
+### Kortex wheel 无法安装或 import protobuf 失败
+
+- 重新核对机器人固件、wheel 版本和 wheel 支持的 Python 版本。
+- 使用 `python -m pip check` 查看依赖冲突。
+- 不要单独升级/downgrade `protobuf` 来强行消除错误；优先重新创建干净 venv，
+  再安装匹配 wheel 和本项目。
+- 如果匹配 wheel 不支持任何 Python `>=3.10` 版本，则当前项目组合不受支持，
+  停止部署；不要退回 Python 3.9 以下强装。
+- 如果改用另一个受支持的 Python `>=3.10` 版本，XR binding 也必须在那个
+  venv 中重新构建。
+
+### TCP `10000` 超时或拒绝连接
+
+- 确认网线连接的是机械臂控制器和配置了静态地址的 Windows 有线网卡。
+- 确认主机与机器人位于同一子网，且没有给 Wi-Fi 和有线网卡配置相同 IP。
+- 先确认 Windows 能访问 Web App，再在 WSL 运行
+  `ip route get <机器人IP>` 和 `nc -vz -w 2 <机器人IP> 10000`。
+- 暂停会改写路由的 VPN；检查 Windows 防火墙和虚拟网卡优先级。
+- 端口不通时不要反复输入 `MOVE`。
+
+### Kortex 登录或 session 创建失败
+
+- 核对 `--robot-user` 和 Web App 中可用的账户；不要假定现场密码仍是默认值。
+- 重新用 `read -rsp` 设置 `KINOVA_PASSWORD`，不要把密码直接放在命令行。
+- 核对 wheel 与固件；API 不匹配也可能表现为 session/RPC 错误。
+- 本项目不会打印密码。排障日志如来自第三方 SDK，分享前仍应人工检查并脱敏。
+
+### `Stop unconfirmed`、cleanup failure 或机器人状态异常
+
+- 立即停止试验，松开 Grip；必要时按实体急停。
+- 在 Web App 中确认机械臂实际状态、故障码和伺服状态。
+- 不要通过提高 timeout、删除 watchdog、跳过 `MOVE` 或注释 Stop 逻辑来继续。
+- 只有现场安全负责人确认机器人已静止并处理故障后，才能关闭程序重新开始。
 
 ### `nc` 连接失败
 
@@ -265,7 +565,7 @@ Grip 松开、XR 输入陈旧/无效、发送错误或程序退出时，软件�
 
 ### `xrobotoolkit_sdk is unavailable` 或共享库错误
 
-- 确认当前终端激活的是 `.venv-wsl`。
+- 确认当前终端激活的是 `~/.venvs/kinova-pico-teleop`。
 - 重新运行 `python -c "import xrobotoolkit_sdk"` 查看底层错误。
 - 确认 `LD_LIBRARY_PATH` 包含 Pybind 仓库的 `lib/`。
 - 用 `ldd "$(python -c 'import xrobotoolkit_sdk; print(xrobotoolkit_sdk.__file__)')"` 检查缺失的 `.so`。
@@ -315,7 +615,8 @@ python -m kinova_teleop.main --dry-run --headless --steps 5000
 当前本地环境可继续按既有 MuJoCo/PICO 流程启动；默认后端就是 MuJoCo：
 
 ```bash
-source .venv-wsl/bin/activate
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
 export LD_LIBRARY_PATH="$PWD/.local-deps/XRoboToolkit-PC-Service-Pybind/lib:${LD_LIBRARY_PATH:-}"
 python -m kinova_teleop.main --model kinova_gen3_mujoco/teleop_scene.xml
 ```
@@ -323,7 +624,8 @@ python -m kinova_teleop.main --model kinova_gen3_mujoco/teleop_scene.xml
 不接 PICO 或仅验证本地环境时，使用离线 MuJoCo dry-run：
 
 ```bash
-source .venv-wsl/bin/activate
+cd ~/kinova-gen3-pico-teleop-mujoco
+source ~/.venvs/kinova-pico-teleop/bin/activate
 python -m kinova_teleop.main --dry-run --headless --steps 2000
 ```
 
@@ -333,5 +635,9 @@ python -m kinova_teleop.main --dry-run --headless --steps 2000
 
 - 遥操接口设计参考 [XR-Robotics/XRoboToolkit-Teleop-Sample-Python](https://github.com/XR-Robotics/XRoboToolkit-Teleop-Sample-Python)。
 - XR Python 绑定来自 [XRoboToolkit-PC-Service-Pybind](https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind)。
+- Kortex wheel 安装方式参考
+  [Kinova 官方 Kortex API 安装页](https://docs.kinovarobotics.com/getting_started/installation.html)
+  和
+  [官方 Python examples 说明](https://github.com/Kinovarobotics/Kinova-kortex2_Gen3_G3L/blob/master/api_python/examples/readme.md)。
 - Gen3 MJCF 来自 [MuJoCo Menagerie 的 Kinova Gen3](https://github.com/google-deepmind/mujoco_menagerie/tree/main/kinova_gen3)。
 - 本项目 Python 代码采用根目录 MIT License；`kinova_gen3_mujoco/` 内模型资产保留其 BSD-3-Clause License。
