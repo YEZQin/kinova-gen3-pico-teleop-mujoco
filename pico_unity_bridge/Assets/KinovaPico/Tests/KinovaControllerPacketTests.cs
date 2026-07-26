@@ -16,9 +16,10 @@ namespace Yezqin.KinovaPico.Tests
                 true,
                 new Vector3(1.0f, -2.0f, 0.5f),
                 Quaternion.identity,
-                0.25f);
+                0.25f,
+                0.5f);
 
-            Assert.AreEqual(56, payload.Length);
+            Assert.AreEqual(60, payload.Length);
             CollectionAssert.AreEqual(
                 new byte[]
                 {
@@ -29,7 +30,7 @@ namespace Yezqin.KinovaPico.Tests
             CollectionAssert.AreEqual(
                 new byte[]
                 {
-                    1, 1, 0, 0,
+                    2, 1, 0, 0,
                     42, 0, 0, 0,
                     0x87, 0xD6, 0x12, 0, 0, 0, 0, 0,
                     0, 0, 0x80, 0x3F,
@@ -40,6 +41,7 @@ namespace Yezqin.KinovaPico.Tests
                     0, 0, 0, 0,
                     0, 0, 0x80, 0x3F,
                     0, 0, 0x80, 0x3E,
+                    0, 0, 0, 0x3F,
                 },
                 payload.Skip(8).ToArray());
             Assert.AreEqual(42u, BitConverter.ToUInt32(payload, 12));
@@ -55,7 +57,8 @@ namespace Yezqin.KinovaPico.Tests
                 false,
                 new Vector3(1.0f, 2.0f, 3.0f),
                 Quaternion.Euler(20.0f, 30.0f, 40.0f),
-                0.75f);
+                0.75f,
+                0.6f);
 
             Assert.AreEqual(0, payload[9]);
             CollectionAssert.AreEqual(new byte[12], payload.Skip(24).Take(12).ToArray());
@@ -64,6 +67,7 @@ namespace Yezqin.KinovaPico.Tests
                 new byte[] { 0, 0, 0x80, 0x3F },
                 payload.Skip(48).Take(4).ToArray());
             CollectionAssert.AreEqual(new byte[4], payload.Skip(52).Take(4).ToArray());
+            CollectionAssert.AreEqual(new byte[4], payload.Skip(56).Take(4).ToArray());
         }
 
         [Test]
@@ -75,6 +79,7 @@ namespace Yezqin.KinovaPico.Tests
                 true,
                 new Vector3(float.NaN, 0.0f, 0.0f),
                 Quaternion.identity,
+                0.0f,
                 0.0f));
         }
 
@@ -87,6 +92,7 @@ namespace Yezqin.KinovaPico.Tests
                 true,
                 Vector3.zero,
                 new Quaternion(0.0f, float.PositiveInfinity, 0.0f, 1.0f),
+                0.0f,
                 0.0f));
         }
 
@@ -99,6 +105,7 @@ namespace Yezqin.KinovaPico.Tests
                 true,
                 Vector3.zero,
                 new Quaternion(0.0f, 0.0f, 0.0f, 0.0f),
+                0.0f,
                 0.0f));
         }
 
@@ -114,7 +121,24 @@ namespace Yezqin.KinovaPico.Tests
                 true,
                 Vector3.zero,
                 Quaternion.identity,
-                grip));
+                grip,
+                0.0f));
+        }
+
+        [TestCase(-0.001f)]
+        [TestCase(1.001f)]
+        [TestCase(float.NaN)]
+        [TestCase(float.PositiveInfinity)]
+        public void TrackedPacketRejectsInvalidTrigger(float trigger)
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => KinovaControllerPacket.Encode(
+                0u,
+                0ul,
+                true,
+                Vector3.zero,
+                Quaternion.identity,
+                0.0f,
+                trigger));
         }
 
         [TestCase(-2.0f, 0.0f)]
@@ -140,7 +164,59 @@ namespace Yezqin.KinovaPico.Tests
                 sample.Tracked,
                 sample.Position,
                 sample.Rotation,
-                sample.Grip));
+                sample.Grip,
+                sample.Trigger));
+        }
+
+        [TestCase(-2.0f, 0.0f)]
+        [TestCase(0.375f, 0.375f)]
+        [TestCase(3.0f, 1.0f)]
+        [TestCase(float.NaN, 0.0f)]
+        public void SamplingLayerClampsTriggerBeforePacketCreation(
+            float rawTrigger,
+            float expected)
+        {
+            var sample = KinovaControllerSample.FromFeatureValues(
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                Vector3.zero,
+                Quaternion.identity,
+                0.5f,
+                true,
+                rawTrigger);
+
+            Assert.IsTrue(sample.Tracked);
+            Assert.AreEqual(expected, sample.Trigger);
+            Assert.DoesNotThrow(() => KinovaControllerPacket.Encode(
+                1u,
+                1ul,
+                sample.Tracked,
+                sample.Position,
+                sample.Rotation,
+                sample.Grip,
+                sample.Trigger));
+        }
+
+        [Test]
+        public void SamplingLayerWithoutTriggerFeatureStaysTracked()
+        {
+            var sample = KinovaControllerSample.FromFeatureValues(
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                Vector3.zero,
+                Quaternion.identity,
+                0.5f);
+
+            Assert.IsTrue(sample.Tracked);
+            Assert.AreEqual(0.0f, sample.Trigger);
         }
 
         [Test]
@@ -169,7 +245,8 @@ namespace Yezqin.KinovaPico.Tests
                 sample.Tracked,
                 sample.Position,
                 sample.Rotation,
-                sample.Grip);
+                sample.Grip,
+                sample.Trigger);
             Assert.AreEqual(0.0f, BitConverter.ToSingle(payload, 36));
             Assert.AreEqual(0.0f, BitConverter.ToSingle(payload, 40));
             Assert.That(
@@ -192,11 +269,14 @@ namespace Yezqin.KinovaPico.Tests
                 true,
                 Vector3.zero,
                 new Quaternion(0.00000001f, 0.0f, 0.0f, 0.0f),
-                0.5f);
+                0.5f,
+                true,
+                0.75f);
 
             Assert.IsFalse(sample.Tracked);
             Assert.AreEqual(Quaternion.identity, sample.Rotation);
             Assert.AreEqual(0.0f, sample.Grip);
+            Assert.AreEqual(0.0f, sample.Trigger);
         }
 
         [Test]

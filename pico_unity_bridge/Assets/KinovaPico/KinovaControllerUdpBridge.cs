@@ -31,6 +31,7 @@ namespace Yezqin.KinovaPico
         uint _sequence;
         bool _tracked;
         float _grip;
+        float _trigger;
         double _rateWindowStartedAt;
         int _rateWindowPackets;
         int _packetsPerSecond;
@@ -40,6 +41,7 @@ namespace Yezqin.KinovaPico
         public uint Sequence => _sequence;
         public bool Tracked => _tracked;
         public float Grip => _grip;
+        public float Trigger => _trigger;
         public int PacketsPerSecond => _packetsPerSecond;
         public string Status { get; private set; } = "Stopped";
 
@@ -48,6 +50,7 @@ namespace Yezqin.KinovaPico
                 HostEndpoint,
                 _tracked,
                 _grip,
+                _trigger,
                 _sequence,
                 _packetsPerSecond);
 
@@ -219,6 +222,7 @@ namespace Yezqin.KinovaPico
             var sample = ReadLeftController();
             _tracked = sample.Tracked;
             _grip = sample.Grip;
+            _trigger = sample.Trigger;
             _sequence = KinovaControllerSequence.Next(_sequence);
 
             try
@@ -229,7 +233,8 @@ namespace Yezqin.KinovaPico
                     sample.Tracked,
                     sample.Position,
                     sample.Rotation,
-                    sample.Grip);
+                    sample.Grip,
+                    sample.Trigger);
                 _udp.Send(packet, packet.Length, _discovery.HostEndpoint);
                 _rateWindowPackets++;
                 Status = sample.Tracked ? "Streaming tracked controller" : "Streaming untracked safety state";
@@ -250,6 +255,7 @@ namespace Yezqin.KinovaPico
             {
                 _tracked = false;
                 _grip = 0.0f;
+                _trigger = 0.0f;
                 Status = $"Invalid XR controller pose: {error.Message}";
             }
         }
@@ -261,6 +267,7 @@ namespace Yezqin.KinovaPico
             var position = Vector3.zero;
             var rotation = Quaternion.identity;
             var grip = 0.0f;
+            var trigger = 0.0f;
             var hasTracking = device.isValid
                 && device.TryGetFeatureValue(CommonUsages.isTracked, out isTracked);
             var hasPosition = device.isValid
@@ -269,6 +276,8 @@ namespace Yezqin.KinovaPico
                 && device.TryGetFeatureValue(CommonUsages.deviceRotation, out rotation);
             var hasGrip = device.isValid
                 && device.TryGetFeatureValue(CommonUsages.grip, out grip);
+            var hasTrigger = device.isValid
+                && device.TryGetFeatureValue(CommonUsages.trigger, out trigger);
 
             return KinovaControllerSample.FromFeatureValues(
                 device.isValid,
@@ -279,7 +288,9 @@ namespace Yezqin.KinovaPico
                 hasGrip,
                 position,
                 rotation,
-                grip);
+                grip,
+                hasTrigger,
+                trigger);
         }
 
         void UpdatePacketRate(double now)
@@ -346,6 +357,7 @@ namespace Yezqin.KinovaPico
             _running = false;
             _tracked = false;
             _grip = 0.0f;
+            _trigger = 0.0f;
             _packetsPerSecond = 0;
             Status = "Stopped";
         }
@@ -391,6 +403,7 @@ namespace Yezqin.KinovaPico
             IPEndPoint hostEndpoint,
             bool tracked,
             float grip,
+            float trigger,
             uint sequence,
             int packetsPerSecond)
         {
@@ -403,11 +416,13 @@ namespace Yezqin.KinovaPico
                 + "host: {0}\n"
                 + "tracking: {1}\n"
                 + "grip: {2:F3}\n"
-                + "sequence: {3}\n"
-                + "rate: {4}",
+                + "trigger: {3:F3}\n"
+                + "sequence: {4}\n"
+                + "rate: {5}",
                 host,
                 tracked ? "tracked" : "untracked",
                 grip,
+                trigger,
                 sequence,
                 packetsPerSecond);
         }

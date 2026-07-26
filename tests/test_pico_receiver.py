@@ -55,5 +55,5 @@ def test_receiver_ignores_unrelated_ascii_and_propagates_bad_protocol() -> None:
             sender.sendto(b"unrelated", receiver.address)
             assert receiver.receive_once(timeout=1.0) is None
             sender.sendto(b"KINVPICO", receiver.address)
-            with pytest.raises(ValueError, match="56 bytes"):
+            with pytest.raises(ValueError, match="56 or 60 bytes"):
                 receiver.receive_once(timeout=1.0)

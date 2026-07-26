@@ -211,12 +211,14 @@ namespace Yezqin.KinovaPico.Tests
                 + "host: 192.168.1.20:15031\n"
                 + "tracking: tracked\n"
                 + "grip: 0.375\n"
+                + "trigger: 0.500\n"
                 + "sequence: 42\n"
                 + "rate: 72",
                 KinovaBridgeStatus.Format(
                     new IPEndPoint(IPAddress.Parse("192.168.1.20"), 15031),
                     true,
                     0.375f,
+                    0.5f,
                     42u,
                     72));
         }
@@ -229,9 +231,10 @@ namespace Yezqin.KinovaPico.Tests
                 + "host: searching\n"
                 + "tracking: untracked\n"
                 + "grip: 0.000\n"
+                + "trigger: 0.000\n"
                 + "sequence: 0\n"
                 + "rate: 0",
-                KinovaBridgeStatus.Format(null, false, 0.0f, 0u, 0));
+                KinovaBridgeStatus.Format(null, false, 0.0f, 0.0f, 0u, 0));
         }
     }
 }

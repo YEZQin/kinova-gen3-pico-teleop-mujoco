@@ -8,7 +8,7 @@ import math
 import time
 
 from .backend import BackendResult, EndEffectorTargetBackend
-from .pose_mapping import ClutchState, MappingConfig, RelativePoseMapper
+from .pose_mapping import ClutchState, MappingConfig, Pose, RelativePoseMapper
 from .xr_input import XrInputSource
 
 
@@ -18,6 +18,7 @@ class TeleopConfig:
     realtime: bool = True
     translation_scale: float = 0.5
     stale_timeout: float = 0.2
+    gripper: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,8 @@ class TeleopController:
             raise ValueError("control_hz must be positive and finite")
         if not math.isfinite(config.translation_scale) or config.translation_scale <= 0:
             raise ValueError("translation_scale must be positive and finite")
+        if config.gripper and getattr(backend, "command_gripper", None) is None:
+            raise ValueError("The selected backend does not support a gripper")
 
         self.config = config
         self.source = source
@@ -55,6 +58,18 @@ class TeleopController:
         self.mapper.reset(backend.current_pose())
         self.steps = 0
         self._closed = False
+        self._backend_closed = False
+        self._source_closed = False
+
+    def _begin_anchor_transaction(self) -> Pose:
+        """Run the backend's begin-control transaction and return the anchor.
+
+        ``begin_control`` must precede ``current_pose`` so that hardware
+        backends can re-arm their feedback gate before the anchor read.
+        """
+
+        self.backend.begin_control()
+        return self.backend.current_pose()
 
     def step_once(self) -> StepDiagnostics:
         sample = self.source.read()
@@ -63,15 +78,17 @@ class TeleopController:
             if self.config.realtime
             else float(sample.received_monotonic)
         )
-        mapping = self.mapper.update(sample, self.backend.current_pose(), now)
-        if mapping.activated:
-            self.backend.begin_control()
+        mapping = self.mapper.update(sample, self._begin_anchor_transaction, now)
 
         if mapping.active:
             result = self.backend.command_pose(mapping.target)
         else:
-            self.backend.hold()
+            if mapping.deactivated:
+                self.backend.hold()
             result = BackendResult(False, False, 0.0, 0.0, "")
+
+        if self.config.gripper and mapping.active and sample.valid:
+            self.backend.command_gripper(float(sample.trigger))
 
         self.backend.step()
         self.steps += 1
@@ -126,10 +143,32 @@ class TeleopController:
             self.close()
 
     def close(self) -> None:
+        """Close the backend first so hardware motion stops before the input.
+
+        Both resources are always attempted; the first error is re-raised
+        after both close attempts complete.
+        """
+
         if self._closed:
             return
-        self._closed = True
-        try:
-            self.source.close()
-        finally:
-            self.backend.close()
+
+        first_error: BaseException | None = None
+        if not self._backend_closed:
+            try:
+                self.backend.close()
+            except BaseException as error:
+                first_error = error
+            else:
+                self._backend_closed = True
+        if not self._source_closed:
+            try:
+                self.source.close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                self._source_closed = True
+
+        self._closed = self._backend_closed and self._source_closed
+        if first_error is not None:
+            raise first_error

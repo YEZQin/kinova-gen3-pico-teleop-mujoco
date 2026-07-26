@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -280,9 +280,28 @@ class RelativePoseMapper:
             stale=stale,
         )
 
-    def update(self, sample: Any, ee_pose: Pose, now: float) -> MappingOutput:
+    def update(
+        self,
+        sample: Any,
+        anchor_pose: Pose | Callable[[], Pose],
+        now: float,
+    ) -> MappingOutput:
+        """Advance the clutch state machine with one controller sample.
+
+        ``anchor_pose`` provides the end-effector pose used as the relative
+        anchor. Passing a callable defers the read to the moment the clutch
+        engages, which lets hardware backends run their begin-control
+        transaction exactly once per activation. If the callable raises, the
+        clutch state is left unchanged.
+        """
+
         if self._last_target is None:
-            self._last_target = _copy_pose(ee_pose)
+            if callable(anchor_pose):
+                raise RuntimeError(
+                    "reset() must be called before update() when the anchor "
+                    "is deferred; a deferred anchor may only run on activation"
+                )
+            self._last_target = _copy_pose(anchor_pose)
 
         sample_valid = bool(getattr(sample, "valid", False))
         sample_valid = sample_valid and np.isfinite(getattr(sample, "grip", np.nan))
@@ -356,6 +375,7 @@ class RelativePoseMapper:
             )
 
         if self.clutch_state is not ClutchState.ACTIVE:
+            ee_pose = anchor_pose() if callable(anchor_pose) else anchor_pose
             self.clutch_state = ClutchState.ACTIVE
             self._controller_reference = controller_pose
             self._ee_reference = _copy_pose(ee_pose)

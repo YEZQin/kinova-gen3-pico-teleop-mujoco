@@ -1,4 +1,4 @@
-# PICO 左手柄遥操作 Kinova Gen3（仅 MuJoCo）
+# PICO 左手柄遥操作 Kinova Gen3（MuJoCo 仿真 + 门禁式 Kortex 实体后端）
 
 本项目在 **Windows 原生 Python** 中接收 PICO 左手柄位姿，通过局域网
 UDP 自动发现链路控制 MuJoCo 中的 Kinova Gen3 7DoF 模型。首次构建并安装
@@ -10,12 +10,16 @@ $unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
 .\scripts\start_pico_udp_teleop.ps1
 ```
 
-> **安全边界：** 当前实现只控制
+> **安全边界：** 默认命令只控制
 > `kinova_gen3_mujoco/teleop_scene.xml` 仿真，不连接、初始化或命令任何
-> Kinova 实体机器人。仓库没有 Kortex 后端。
+> Kinova 实体机器人。仓库包含一个门禁式 Kortex 实体后端：它**未在真机
+> 验证**，且只有同时给出 `--backend kortex --enable-hardware`、设置
+> `KINOVA_PASSWORD` 并在终端精确输入 `MOVE` 后才会连接实体机械臂。
 
 详细的首次配置、PICO 手动启动、健康检查和排障步骤见
-[PICO UDP 快速开始](docs/pico-udp-quickstart.md)。
+[PICO UDP 快速开始](docs/pico-udp-quickstart.md)；实体模式的前置条件、
+安全行为和首次验收清单见
+[Kortex 实体模式快速开始](docs/kortex-hardware-quickstart.md)。
 
 ## 推荐链路和操作语义
 
@@ -26,11 +30,13 @@ PICO 左手柄
   -> PicoUdpInput
   -> Grip 安全离合与相对 6DoF 映射
   -> EndEffectorTargetBackend
-  -> MuJoCoBackend
-  -> Kinova Gen3 MJCF 仿真
+  -> MuJoCoBackend（默认）或 KortexBackend（显式门禁）
+  -> Kinova Gen3 MJCF 仿真 / 实体机械臂
 ```
 
-- 只读取左手柄；Trigger、摇杆、A/B/X/Y 和夹爪均不使用。
+- 只读取左手柄；摇杆和 A/B/X/Y 不使用。MuJoCo 模式下 Trigger 也不
+  使用；Kortex 实体模式下可选 `--gripper`，由 Trigger 按比例驱动夹爪
+  （需要发送协议 V2 的 PICO 应用，旧 V1 应用按 Trigger=0 处理）。
 - 启动或链路恢复后必须先把 Grip 松到 `< 0.8`，再按到 `> 0.9` 才能运动。
 - 按下时捕获手柄和仿真末端当前位姿，因此激活瞬间不跳变。
 - 持续按住时映射完整相对 6DoF：平移默认缩放 `0.5`，相对旋转为 1:1。
@@ -162,10 +168,12 @@ PICO 应用库中手动打开 **Kinova PICO Bridge**，再运行：
 旧工作区中的 `kinova/kinova.urdf` 实际描述 JACO2 J2S6S200，不得作为
 Gen3 模型使用。
 
-`EndEffectorTargetBackend` 把控制逻辑与 `MuJoCoBackend` 分离，但这不是
-实体机器人实现。未来若开发 RobotBackend/Kortex 后端，必须作为独立项目
-完成明确授权、工作空间及速度/加速度限制、急停、网络看门狗、模式切换和
-真机验证；当前仓库没有该能力。
+`EndEffectorTargetBackend` 把控制逻辑与具体后端分离。`MuJoCoBackend`
+是默认后端；`KortexBackend` 是门禁式实体后端，内建 0.03 m/s、5 deg/s
+硬限速、0.2 s 命令看门狗、Stop 级联和启动期 `ClearFaults` 故障恢复，
+但**尚未在真机验证**。启用条件、默认参数和首次验收清单见
+[Kortex 实体模式快速开始](docs/kortex-hardware-quickstart.md)；不满足
+其中安全条件时，不要使用实体模式。
 
 ## XRoboToolkit 兼容入口（非推荐）
 
@@ -241,4 +249,5 @@ MuJoCo 资源。
 即使日常口头称其为“机械臂 URDF”，本控制实现实际加载的是
 `kinova_gen3_mujoco/teleop_scene.xml`：其中为 MuJoCo 生成/整理的 Kinova Gen3 7DoF **MJCF**
 模型。它不是旧目录 `kinova/kinova.urdf` 所描述的 JACO2 J2S6S200，后者不得作为 Gen3 使用。
-本仓库仅控制该 MuJoCo 仿真，绝不连接、初始化或命令任何实体 Kinova 机器人。
+以上默认命令仅控制该 MuJoCo 仿真，绝不连接、初始化或命令任何实体 Kinova 机器人；
+实体模式必须显式走 [Kortex 实体模式快速开始](docs/kortex-hardware-quickstart.md) 的门禁流程。

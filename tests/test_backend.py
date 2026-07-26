@@ -2,7 +2,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from kinova_teleop.backend import MuJoCoBackend
+from kinova_teleop.mujoco_backend import MuJoCoBackend
 
 
 def test_mujoco_backend_reports_current_pose_and_finite_state(

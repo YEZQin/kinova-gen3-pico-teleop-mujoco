@@ -25,6 +25,7 @@ class ControllerSample:
     timestamp_ns: int
     received_monotonic: float
     valid: bool = True
+    trigger: float = 0.0
 
 
 class XrInputSource(Protocol):
@@ -90,6 +91,19 @@ class SdkXrInput:
             grip = 0.0
             valid = False
 
+        # The trigger channel is optional; missing or bad values degrade to
+        # 0.0 without invalidating the pose sample.
+        trigger = 0.0
+        trigger_getter = getattr(self._sdk, "get_left_trigger", None)
+        if trigger_getter is not None:
+            try:
+                trigger = float(trigger_getter())
+            except (TypeError, ValueError, OverflowError):
+                trigger = 0.0
+            if not math.isfinite(trigger):
+                trigger = 0.0
+            trigger = min(1.0, max(0.0, trigger))
+
         return ControllerSample(
             position=position,
             quaternion_xyzw=quaternion,
@@ -97,6 +111,7 @@ class SdkXrInput:
             timestamp_ns=timestamp_ns,
             received_monotonic=self._monotonic(),
             valid=valid,
+            trigger=trigger,
         )
 
     def close(self) -> None:

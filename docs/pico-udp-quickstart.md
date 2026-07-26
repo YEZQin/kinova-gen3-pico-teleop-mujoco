@@ -187,12 +187,12 @@ completed steps=5000 finite_state=true
 项目使用 `kinova_gen3_mujoco/teleop_scene.xml` 的 Gen3 7DoF MJCF。
 旧 `kinova/kinova.urdf` 是 JACO2 J2S6S200，不可当作 Gen3 使用。
 
-## 9. 当前限制和未来后端边界
+## 9. 当前限制和实体后端边界
 
-当前只有 `MuJoCoBackend`。`EndEffectorTargetBackend` 提供后端边界，
-但没有 Kortex 或实体 RobotBackend 实现。未来实体机器人工作必须单独设计
-并验证授权、工作空间、速度/加速度限制、急停、网络看门狗和错误恢复；
-本快速开始不适用于实体 Kinova。
+本快速开始只覆盖默认的 `MuJoCoBackend` 仿真路径。仓库另含门禁式
+`KortexBackend` 实体后端（未真机验证），启用条件、安全行为与验收清单见
+[Kortex 实体模式快速开始](kortex-hardware-quickstart.md)；未满足其安全
+条件时，不要使用 `--backend kortex`。
 
 旧 `--input xrobotoolkit` 是非推荐兼容入口，需要 WSL、XRoboToolkit
 PC Service 和 `xrobotoolkit_sdk`；推荐路径始终是 Windows 原生

@@ -3,7 +3,7 @@ from collections.abc import Iterable
 import mujoco
 import numpy as np
 
-from kinova_teleop.backend import MuJoCoBackend
+from kinova_teleop.mujoco_backend import MuJoCoBackend
 from kinova_teleop.pose_mapping import Pose
 from kinova_teleop.teleop_controller import TeleopConfig, TeleopController
 from kinova_teleop.xr_input import ControllerSample, DryRunXrInput
@@ -173,7 +173,9 @@ def test_controller_uses_only_backend_contract_and_owns_resources() -> None:
 
     assert backend.begin_calls == 1
     assert len(backend.commands) == 2
-    assert backend.holds == 2
+    # hold() fires only on the deactivation edge so idle cycles do not spam
+    # hardware backends with Stop commands.
+    assert backend.holds == 1
     assert backend.steps == 4
     assert [diagnostic.active for diagnostic in diagnostics] == [
         False,

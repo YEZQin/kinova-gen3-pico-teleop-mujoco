@@ -1,0 +1,363 @@
+"""Controller-to-backend contract tests focused on hardware-safe RPC ordering."""
+
+from collections.abc import Iterable
+from dataclasses import replace
+
+import numpy as np
+import pytest
+
+from kinova_teleop.backend import BackendResult
+from kinova_teleop.pose_mapping import Pose
+from kinova_teleop.teleop_controller import TeleopConfig, TeleopController
+from kinova_teleop.xr_input import ControllerSample
+
+
+class ScriptedInput:
+    def __init__(self, samples: Iterable[ControllerSample]) -> None:
+        self._samples = iter(samples)
+        self.close_calls = 0
+
+    def read(self) -> ControllerSample:
+        return next(self._samples)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class RecordingBackend:
+    def __init__(self) -> None:
+        self.pose = Pose(
+            np.array([0.4, -0.2, 0.3], dtype=np.float64),
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+        )
+        self.events: list[str] = []
+        self.targets: list[Pose] = []
+        self.steps = 0
+        self.close_calls = 0
+
+    def current_pose(self) -> Pose:
+        return self.pose
+
+    def begin_control(self) -> None:
+        self.events.append("begin_control")
+
+    def command_pose(self, target: Pose) -> BackendResult:
+        self.events.append("command_pose")
+        self.targets.append(target)
+        return BackendResult(
+            accepted=True,
+            converged=True,
+            position_error=0.01,
+            rotation_error=0.02,
+            reason="",
+        )
+
+    def hold(self) -> None:
+        self.events.append("hold")
+
+    def step(self) -> None:
+        self.events.append("step")
+        self.steps += 1
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class RpcOrderingBackend(RecordingBackend):
+    def current_pose(self) -> Pose:
+        self.events.append("current_pose")
+        return self.pose
+
+
+def sample(position: list[float], grip: float, timestamp_ns: int, received: float) -> ControllerSample:
+    return ControllerSample(
+        position=np.asarray(position, dtype=np.float64),
+        quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+        grip=grip,
+        timestamp_ns=timestamp_ns,
+        received_monotonic=received,
+    )
+
+
+def test_controller_orchestrates_backend_clutch_lifecycle() -> None:
+    """Removing clutch transitions or per-cycle stepping must break this test."""
+
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+            sample([0.01, 0.0, 0.0], 1.0, 3, 1.02),
+            sample([0.01, 0.0, 0.0], 0.0, 4, 1.03),
+        ],
+    )
+    backend = RecordingBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False),
+        source,
+        backend,
+    )
+
+    for _ in range(4):
+        controller.step_once()
+
+    assert backend.events == [
+        "step",
+        "begin_control",
+        "command_pose",
+        "step",
+        "command_pose",
+        "step",
+        "hold",
+        "step",
+    ]
+    assert len(backend.targets) == 2
+    assert backend.targets[0].position.tolist() == [0.4, -0.2, 0.3]
+    assert controller.steps == 4
+
+    controller.close()
+    controller.close()
+
+    assert backend.close_calls == 1
+    assert source.close_calls == 1
+
+
+def test_controller_close_orders_backend_before_source_and_is_idempotent() -> None:
+    """Closing XR before the motion backend must break this test."""
+
+    events: list[str] = []
+
+    class OrderedSource(ScriptedInput):
+        def close(self) -> None:
+            events.append("source.close")
+            super().close()
+
+    class OrderedBackend(RecordingBackend):
+        def close(self) -> None:
+            events.append("backend.close")
+            super().close()
+
+    source = OrderedSource([])
+    backend = OrderedBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False),
+        source,
+        backend,
+    )
+
+    controller.close()
+    controller.close()
+
+    assert events == ["backend.close", "source.close"]
+    assert backend.close_calls == 1
+    assert source.close_calls == 1
+
+
+def test_controller_close_attempts_source_after_backend_failure() -> None:
+    """A backend close failure must not strand the XR input resource."""
+
+    events: list[str] = []
+
+    class OrderedSource(ScriptedInput):
+        def close(self) -> None:
+            events.append("source.close")
+            super().close()
+
+    class FailingBackend(RecordingBackend):
+        def close(self) -> None:
+            events.append("backend.close")
+            raise RuntimeError("backend cleanup failed")
+
+    controller = TeleopController(
+        TeleopConfig(realtime=False),
+        OrderedSource([]),
+        FailingBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="backend cleanup failed"):
+        controller.close()
+
+    assert events == ["backend.close", "source.close"]
+
+
+def test_first_grip_reads_anchor_after_begin_and_active_cycle_adds_no_feedback() -> None:
+    """Eager or per-active-cycle controller feedback must break this test."""
+
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+            sample([0.01, 0.0, 0.0], 1.0, 3, 1.02),
+        ],
+    )
+    backend = RpcOrderingBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False),
+        source,
+        backend,
+    )
+
+    # Construction seeds the mapper with exactly one feedback read.
+    assert backend.events == ["current_pose"]
+    backend.events.clear()
+
+    controller.step_once()
+    assert backend.events == ["step"]
+
+    backend.events.clear()
+    controller.step_once()
+    assert backend.events == [
+        "begin_control",
+        "current_pose",
+        "command_pose",
+        "step",
+    ]
+    np.testing.assert_allclose(backend.targets[0].position, backend.pose.position)
+
+    backend.events.clear()
+    controller.step_once()
+    assert backend.events == ["command_pose", "step"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_sample",
+    [
+        sample([1.0, 2.0, 3.0], 0.0, 3, 1.02),
+        replace(sample([1.0, 2.0, 3.0], 1.0, 3, 1.02), valid=False),
+        sample([1.0, 2.0, 3.0], 1.0, 2, 1.22),
+    ],
+    ids=("released", "invalid", "stale"),
+)
+def test_unsafe_input_holds_without_preceding_feedback(
+    unsafe_sample: ControllerSample,
+) -> None:
+    """Release, invalidity, or staleness must Stop before any feedback RPC."""
+
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+            unsafe_sample,
+        ],
+    )
+    backend = RpcOrderingBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False),
+        source,
+        backend,
+    )
+    controller.step_once()
+    controller.step_once()
+    backend.events.clear()
+
+    controller.step_once()
+
+    assert backend.events == ["hold", "step"]
+
+
+def test_controller_runs_generic_backend_without_a_mujoco_viewer() -> None:
+    """Reintroducing a controller-level viewer/model dependency must fail here."""
+
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+        ],
+    )
+    backend = RecordingBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False),
+        source,
+        backend,
+    )
+
+    controller.run(max_steps=2)
+
+    assert backend.events == ["step", "begin_control", "command_pose", "step"]
+    assert backend.close_calls == 1
+    assert source.close_calls == 1
+
+
+class GripperRecordingBackend(RecordingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gripper_values: list[float] = []
+
+    def command_gripper(self, position: float) -> bool:
+        self.events.append("command_gripper")
+        self.gripper_values.append(position)
+        return True
+
+
+def gripper_sample(
+    grip: float,
+    trigger: float,
+    timestamp_ns: int,
+    received: float,
+) -> ControllerSample:
+    return ControllerSample(
+        position=np.zeros(3, dtype=np.float64),
+        quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+        grip=grip,
+        timestamp_ns=timestamp_ns,
+        received_monotonic=received,
+        trigger=trigger,
+    )
+
+
+def test_gripper_config_requires_backend_support() -> None:
+    with pytest.raises(ValueError, match="gripper"):
+        TeleopController(
+            TeleopConfig(realtime=False, gripper=True),
+            ScriptedInput([]),
+            RecordingBackend(),
+        )
+
+
+def test_gripper_disabled_by_default_never_calls_backend() -> None:
+    source = ScriptedInput(
+        [
+            gripper_sample(0.0, 0.9, 1, 1.00),
+            gripper_sample(1.0, 0.9, 2, 1.01),
+        ],
+    )
+    backend = GripperRecordingBackend()
+    controller = TeleopController(TeleopConfig(realtime=False), source, backend)
+
+    controller.step_once()
+    controller.step_once()
+
+    assert "command_gripper" not in backend.events
+
+
+def test_gripper_forwards_trigger_only_while_clutch_is_active() -> None:
+    source = ScriptedInput(
+        [
+            gripper_sample(0.0, 0.3, 1, 1.00),
+            gripper_sample(1.0, 0.5, 2, 1.01),
+            gripper_sample(1.0, 0.7, 3, 1.02),
+            gripper_sample(0.0, 0.9, 4, 1.03),
+        ],
+    )
+    backend = GripperRecordingBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False, gripper=True),
+        source,
+        backend,
+    )
+
+    for _ in range(4):
+        controller.step_once()
+
+    assert backend.gripper_values == [0.5, 0.7]
+    assert backend.events == [
+        "step",
+        "begin_control",
+        "command_pose",
+        "command_gripper",
+        "step",
+        "command_pose",
+        "command_gripper",
+        "step",
+        "hold",
+        "step",
+    ]

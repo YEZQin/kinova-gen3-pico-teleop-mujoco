@@ -191,6 +191,7 @@ class PicoUdpInput:
             timestamp_ns=0,
             received_monotonic=now,
             valid=False,
+            trigger=0.0,
         )
 
     @staticmethod
@@ -202,4 +203,5 @@ class PicoUdpInput:
             timestamp_ns=frame.source_time_us * 1000,
             received_monotonic=frame.received_at,
             valid=True,
+            trigger=float(frame.trigger),
         )
