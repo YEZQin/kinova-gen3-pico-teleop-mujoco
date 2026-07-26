@@ -407,3 +407,71 @@ def test_position_and_rotation_steps_are_limited() -> None:
 
     assert np.linalg.norm(output.target.position - ee.position) == pytest.approx(0.01)
     assert np.linalg.norm(quat_to_rotvec(output.target.quaternion)) == pytest.approx(0.05)
+
+
+class CountingAnchor:
+    """Callable anchor that records how often activation resolves it."""
+
+    def __init__(self, pose, error=None):
+        self.pose = pose
+        self.error = error
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.pose
+
+
+def test_deferred_anchor_resolves_exactly_once_per_activation() -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    mapper.reset(identity_pose())
+    anchor = CountingAnchor(identity_pose((0.4, -0.2, 0.3)))
+
+    mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), anchor, now=0.0)
+    assert anchor.calls == 0
+
+    activated = mapper.update(sample([0, 0, 0], grip=1.0, stamp=2), anchor, now=0.01)
+    assert activated.activated
+    assert anchor.calls == 1
+    np.testing.assert_allclose(activated.target.position, [0.4, -0.2, 0.3])
+
+    mapper.update(sample([0.01, 0, 0], grip=1.0, stamp=3), anchor, now=0.02)
+    mapper.update(sample([0.01, 0, 0], grip=1.0, stamp=4), anchor, now=0.03)
+    assert anchor.calls == 1
+
+    # Release and re-clutch: the anchor resolves exactly once more.
+    mapper.update(sample([0.01, 0, 0], grip=0.0, stamp=5), anchor, now=0.04)
+    mapper.update(sample([0.01, 0, 0], grip=1.0, stamp=6), anchor, now=0.05)
+    assert anchor.calls == 2
+
+
+def test_deferred_anchor_failure_leaves_clutch_ready_and_retryable() -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    mapper.reset(identity_pose())
+    failing = CountingAnchor(None, error=RuntimeError("begin_control rejected"))
+
+    mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), failing, now=0.0)
+    with pytest.raises(RuntimeError, match="begin_control rejected"):
+        mapper.update(sample([0, 0, 0], grip=1.0, stamp=2), failing, now=0.01)
+
+    # The clutch state machine must be untouched: still READY, no half
+    # captured references, and a later working anchor can activate.
+    assert mapper.clutch_state is ClutchState.READY
+    assert mapper._controller_reference is None
+    assert mapper._ee_reference is None
+
+    working = CountingAnchor(identity_pose((0.1, 0.2, 0.3)))
+    activated = mapper.update(sample([0, 0, 0], grip=1.0, stamp=3), working, now=0.02)
+    assert activated.activated
+    np.testing.assert_allclose(activated.target.position, [0.1, 0.2, 0.3])
+
+
+def test_deferred_anchor_requires_reset_before_update() -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    anchor = CountingAnchor(identity_pose())
+
+    with pytest.raises(RuntimeError, match="reset"):
+        mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), anchor, now=0.0)
+    assert anchor.calls == 0

@@ -141,6 +141,19 @@ class PicoUdpInput:
             self._clear_session()
 
         if not frame.tracked:
+            # Advance the sequence for in-order untracked frames from the
+            # locked source so packets that did arrive (but were rejected as
+            # untracked) are not later misreported as network drops.
+            if (
+                self._active_source is not None
+                and frame.source == self._active_source
+                and self._last_sequence is not None
+                and sequence_is_newer(frame.sequence, self._last_sequence)
+            ):
+                self._dropped += (
+                    sequence_delta(frame.sequence, self._last_sequence) - 1
+                )
+                self._last_sequence = frame.sequence
             self._rejected += 1
             self._last_error = "controller is untracked"
             return False

@@ -478,14 +478,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.backend == "mujoco":
             finite = backend.state_is_finite()
+            exit_code = 0 if finite else 2
             completion = (
                 f"completed steps={controller.steps} "
                 f"finite_state={str(finite).lower()}"
             )
-            exit_code = 0 if finite else 2
         else:
-            completion = f"completed steps={controller.steps}"
             exit_code = 0
+            completion = f"completed steps={controller.steps}"
     except KeyboardInterrupt:
         print("stopped by user", file=sys.stderr)
         exit_code = 130
@@ -500,10 +500,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             connection,
             hardware=args.backend == "kortex",
         )
-        if args.backend == "kortex" and not cleanup_succeeded and exit_code != 130:
+        # A failed close is fatal for every backend; Ctrl+C keeps 130 so the
+        # interruption stays visible in the exit status.
+        if not cleanup_succeeded and exit_code != 130:
             exit_code = 2
 
-    if completion is not None and exit_code in (0, 130):
+    # Never print a completion line when cleanup failed: for hardware that
+    # would contradict a possible "motion stop may be unconfirmed" error.
+    if completion is not None and cleanup_succeeded and exit_code in (0, 130):
         print(completion)
     return exit_code
 

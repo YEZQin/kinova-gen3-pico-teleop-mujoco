@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -201,8 +202,9 @@ def test_init_skips_clear_faults_when_arm_is_ready():
 
     _backend(connection)
 
+    # One read before SetServoingMode (fault check), one after (ready check).
     assert connection.base.clear_faults_count == 0
-    assert connection.base.arm_state_reads == 1
+    assert connection.base.arm_state_reads == 2
     assert connection.base.servo_modes == [23]
 
 
@@ -213,7 +215,7 @@ def test_init_clears_preexisting_fault_and_waits_for_ready():
     _backend(connection)
 
     assert connection.base.clear_faults_count == 1
-    assert connection.base.arm_state_reads == 3
+    assert connection.base.arm_state_reads == 4
     assert connection.base.servo_modes == [23]
 
 
@@ -222,7 +224,7 @@ def test_init_fails_safely_when_fault_never_clears():
     connection.base.arm_states = [FAULT]
     clock = _Clock()
 
-    with pytest.raises(KortexSafetyError, match="SERVOING_READY"):
+    with pytest.raises(KortexSafetyError, match="in fault"):
         _backend(connection, clock)
 
     # The failed initialization must still attempt a Stop.
@@ -239,6 +241,28 @@ def test_init_waits_for_transient_non_fault_state_without_clearing():
 
     assert connection.base.clear_faults_count == 0
     assert connection.base.arm_state_reads == 3
+
+
+def test_init_recovers_leftover_low_level_servoing_mode():
+    """SetServoingMode itself is the recovery for a stale non-fault mode."""
+
+    LOW_LEVEL = 6
+    connection = _Connection()
+    base = connection.base
+    base.arm_states = [LOW_LEVEL]
+    original_set_mode = base.SetServoingMode
+
+    def set_mode_recovers(mode, *, options=None):
+        original_set_mode(mode, options=options)
+        base.arm_states = [READY]
+
+    base.SetServoingMode = set_mode_recovers
+
+    _backend(connection)
+
+    assert base.clear_faults_count == 0
+    assert base.servo_modes == [23]
+    assert base.stop_count == 0
 
 
 def test_running_fault_is_not_cleared_automatically():
@@ -386,3 +410,124 @@ def test_gripper_after_rearm_is_accepted_again():
     backend.current_pose()
     clock.now += GRIPPER_MIN_INTERVAL + 0.01
     assert backend.command_gripper(0.9) is True
+
+
+# --- concurrency on the new paths ------------------------------------------
+
+
+def _capture(call, results, errors):
+    try:
+        results.append(call())
+    except BaseException as error:
+        errors.append(error)
+
+
+def test_first_nonzero_twist_is_watchdog_covered_during_send():
+    """The deadline must be armed before SendTwistCommand, not after."""
+
+    clock = _Clock()
+    connection = _Connection()
+    backend = _backend(connection, clock)
+    backend.begin_control()
+
+    send_started = threading.Event()
+    release_send = threading.Event()
+    original_send = connection.base.SendTwistCommand
+
+    def blocking_send(command, *, options=None):
+        send_started.set()
+        assert release_send.wait(timeout=2.0)
+        original_send(command, options=options)
+
+    connection.base.SendTwistCommand = blocking_send
+    results, errors = [], []
+    worker = threading.Thread(
+        target=_capture,
+        args=(
+            lambda: backend.command_pose(_target(position=(0.01, 0.0, 0.0))),
+            results,
+            errors,
+        ),
+    )
+    worker.start()
+    assert send_started.wait(timeout=2.0)
+
+    # The control thread is stalled inside the send. The watchdog must
+    # already see an armed deadline and latch a stop request.
+    clock.now = 0.21
+    backend.check_watchdog()
+    assert backend.stop_requested is True
+
+    release_send.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    assert errors == []
+    assert results and results[0].accepted is False
+
+    backend.check_watchdog()
+    assert backend.stop_confirmed is True
+    assert connection.base.stop_count == 1
+
+
+class _GateLock:
+    """Lock stand-in that parks the first acquire until released by the test."""
+
+    def __init__(self):
+        self.attempted = threading.Event()
+        self.permit = threading.Event()
+
+    def acquire(self, timeout=None):
+        self.attempted.set()
+        return self.permit.wait(timeout=timeout)
+
+    def release(self):
+        pass
+
+
+def test_gripper_queued_behind_stop_is_dropped():
+    """A stop landing while the gripper RPC waits for the lock must win."""
+
+    connection = _Connection()
+    backend = _backend(connection)
+    backend.begin_control()
+
+    gate = _GateLock()
+    backend._rpc_lock = gate
+    results, errors = [], []
+    worker = threading.Thread(
+        target=_capture,
+        args=(lambda: backend.command_gripper(0.5), results, errors),
+    )
+    worker.start()
+    assert gate.attempted.wait(timeout=2.0)
+
+    backend._request_stop(force=True)
+    gate.permit.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results == [False]
+    assert connection.base.gripper_sent == []
+
+
+class _NeverLock:
+    def acquire(self, timeout=None):
+        return False
+
+    def release(self):
+        pass
+
+
+def test_gripper_rpc_lock_timeout_attempts_stop():
+    connection = _Connection()
+    backend = _backend(connection)
+    backend.begin_control()
+    backend._rpc_lock = _NeverLock()
+
+    with pytest.raises(KortexSafetyError, match="Timed out"):
+        backend.command_gripper(0.5)
+
+    assert backend.stop_requested is True
+    assert backend.stop_confirmed is False
+    assert connection.base.gripper_sent == []

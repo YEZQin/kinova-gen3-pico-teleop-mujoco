@@ -138,7 +138,7 @@ class KortexBackend:
         self._gripper_last_time: float | None = None
 
         try:
-            self._ensure_servo_ready()
+            self._clear_startup_fault()
             servoing_mode = self.connection.base_pb2.ServoingModeInformation()
             servoing_mode.servoing_mode = (
                 self.connection.base_pb2.SINGLE_LEVEL_SERVOING
@@ -152,6 +152,7 @@ class KortexBackend:
                 )
             finally:
                 self._rpc_lock.release()
+            self._wait_until_servo_ready()
         except BaseException:
             token = self._request_stop(force=True)
             self._attempt_stop(token=token, raise_on_failure=False)
@@ -167,30 +168,48 @@ class KortexBackend:
         finally:
             self._rpc_lock.release()
 
-    def _ensure_servo_ready(self) -> None:
-        """Clear a pre-existing fault once, then wait for SERVOING_READY.
+    def _clear_startup_fault(self) -> None:
+        """Clear a pre-existing fault once and wait for it to drop.
 
-        Faults that appear while teleoperation is running are never cleared
-        automatically; the backend stops and the operator must restart.
+        Runs before ``SetServoingMode`` so that a faulted arm can be
+        recovered; a leftover non-fault mode (for example low-level servoing
+        from a crashed client) is instead recovered by the subsequent
+        ``SetServoingMode`` call. Faults that appear while teleoperation is
+        running are never cleared automatically; the backend stops and the
+        operator must restart.
         """
 
         base_pb2 = self.connection.base_pb2
-        ready_state = base_pb2.ARMSTATE_SERVOING_READY
         fault_state = base_pb2.ARMSTATE_IN_FAULT
-
-        state = self._read_arm_state()
-        if state == ready_state:
+        if self._read_arm_state() != fault_state:
             return
-        if state == fault_state:
-            if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
-                raise KortexSafetyError("Timed out clearing Kortex faults")
-            try:
-                self.connection.base.ClearFaults(
-                    options=self.connection.rpc_options()
-                )
-            finally:
-                self._rpc_lock.release()
 
+        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
+            raise KortexSafetyError("Timed out clearing Kortex faults")
+        try:
+            self.connection.base.ClearFaults(
+                options=self.connection.rpc_options()
+            )
+        finally:
+            self._rpc_lock.release()
+
+        deadline = self._monotonic() + FAULT_CLEAR_TIMEOUT
+        while True:
+            state = self._read_arm_state()
+            if state != fault_state:
+                return
+            if self._monotonic() >= deadline:
+                raise KortexSafetyError(
+                    f"Kortex arm is still in fault (state={state}); "
+                    "clear the fault from the Kinova Web App and retry"
+                )
+            self._sleep(FAULT_POLL_INTERVAL)
+
+    def _wait_until_servo_ready(self) -> None:
+        """Wait for SERVOING_READY after single-level servoing was requested."""
+
+        base_pb2 = self.connection.base_pb2
+        ready_state = base_pb2.ARMSTATE_SERVOING_READY
         deadline = self._monotonic() + FAULT_CLEAR_TIMEOUT
         while True:
             state = self._read_arm_state()
@@ -199,7 +218,8 @@ class KortexBackend:
             if self._monotonic() >= deadline:
                 raise KortexSafetyError(
                     f"Kortex arm did not reach SERVOING_READY (state={state}); "
-                    "clear the fault from the Kinova Web App and retry"
+                    "check faults and the servoing mode in the Kinova Web App "
+                    "and retry"
                 )
             self._sleep(FAULT_POLL_INTERVAL)
 
@@ -370,6 +390,12 @@ class KortexBackend:
             with self._state_lock:
                 if not self._state_allows_command_locked(generation):
                     return _inactive_result()
+                if nonzero and self._deadline is None:
+                    # Arm pessimistically before the send: the very first
+                    # nonzero twist of a control epoch must be watchdog-covered
+                    # even if this thread stalls right after SendTwistCommand.
+                    # Later commands stay covered by the previous deadline.
+                    self._deadline = self._monotonic() + WATCHDOG_TIMEOUT
             try:
                 self.connection.base.SendTwistCommand(
                     command,

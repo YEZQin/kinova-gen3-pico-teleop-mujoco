@@ -353,3 +353,59 @@ def test_sequence_wraparound_is_newer() -> None:
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
     assert source.read().valid
     assert source.health().dropped == 0
+
+
+def test_v2_trigger_propagates_into_controller_sample() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, trigger=0.6, received_at=5.0),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.0)
+    sample = source.read()
+    assert sample.valid
+    assert sample.trigger == pytest.approx(0.6)
+
+
+def test_legacy_frame_without_trigger_yields_zero_trigger() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, trigger=0.9, received_at=5.0),
+        make_frame(sequence=2, received_at=5.01),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
+    sample = source.read()
+    assert sample.valid
+    assert sample.trigger == 0.0
+
+
+def test_inactive_sample_has_zero_trigger() -> None:
+    source = PicoUdpInput(receiver=FakeReceiver(), monotonic=lambda: 5.0)
+    sample = source.read()
+    assert not sample.valid
+    assert sample.trigger == 0.0
+
+
+def test_untracked_burst_is_not_counted_as_network_loss() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, received_at=5.0),
+        make_frame(sequence=2, tracked=False, received_at=5.01),
+        make_frame(sequence=3, tracked=False, received_at=5.02),
+        make_frame(sequence=4, tracked=False, received_at=5.03),
+        make_frame(sequence=5, received_at=5.04),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.04)
+    # The untracked frames in the drain invalidate this read (safety
+    # boundary); the subject here is only the health counters.
+    source.read()
+    health = source.health()
+    assert health.dropped == 0
+    assert health.rejected == 3
+
+
+def test_real_gap_before_untracked_frame_still_counts_as_loss() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, received_at=5.0),
+        make_frame(sequence=4, tracked=False, received_at=5.01),
+        make_frame(sequence=5, received_at=5.02),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.02)
+    source.read()
+    assert source.health().dropped == 2
