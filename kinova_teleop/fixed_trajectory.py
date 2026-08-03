@@ -235,7 +235,7 @@ class FixedTrajectoryRunner:
                     "MOVING",
                     {"segment": segment.name, "index": index},
                 )
-                for point in segment.offsets_xyz:
+                for point_index, point in enumerate(segment.offsets_xyz):
                     target = Pose(
                         np.asarray(anchor.position, dtype=float) + np.asarray(point, dtype=float),
                         np.asarray(anchor.quaternion, dtype=float).copy(),
@@ -246,6 +246,11 @@ class FixedTrajectoryRunner:
                         stopped = self._stop_once(stopped)
                         return FixedTrajectoryResult(completed, len(spec.segments), segment.name, result.reason)
                     self.backend.step()
+                    # Pace the bounded stream at the declared control rate;
+                    # the injected sleeper keeps tests deterministic and lets
+                    # callers use a monotonic scheduler instead of wall time.
+                    if point_index + 1 < len(segment.offsets_xyz):
+                        self.sleep(1.0 / self.control_hz)
                 confirmer = getattr(self.backend, "confirm_stationary", None)
                 if not callable(confirmer):
                     reason = "stationary confirmation is unavailable"

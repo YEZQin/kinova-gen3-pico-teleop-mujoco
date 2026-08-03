@@ -15,6 +15,7 @@ def _motion_gate_args(arguments: list[str]) -> list[str]:
         "--workspace-min", "-1", "-1", "-1",
         "--workspace-max", "1", "1", "1",
         "--motion-lease", "fixture-motion.lock",
+        "--preflight-report", "fixture-preflight.json",
     ]
 
 
@@ -198,6 +199,36 @@ def test_workspace_gate_precedes_password_and_prompt(monkeypatch) -> None:
     )
     monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(AssertionError("prompted")))
     assert main(["--backend", "kortex", "--enable-hardware"]) == 2
+    assert calls == []
+
+
+def test_preflight_report_gate_precedes_password_and_prompt(monkeypatch) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("prompted")),
+    )
+    args = [
+        "--backend",
+        "kortex",
+        "--enable-hardware",
+        "--workspace-min",
+        "-1",
+        "-1",
+        "-1",
+        "--workspace-max",
+        "1",
+        "1",
+        "1",
+        "--motion-lease",
+        "fixture-motion.lock",
+    ]
+    assert main(args) == 2
     assert calls == []
 
 
@@ -388,6 +419,7 @@ def _install_valid_kortex_fakes(monkeypatch, created: dict) -> None:
     )
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
@@ -489,6 +521,7 @@ def test_backend_construction_fallback_reports_false_connection_cleanup(
     )
     monkeypatch.setenv("KINOVA_PASSWORD", "top-secret")
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
     assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 2
@@ -555,6 +588,7 @@ def test_kortex_errors_close_controller_and_backend(
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
     assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == expected_code
@@ -610,6 +644,7 @@ def test_kortex_cleanup_failure_blocks_success_and_closes_remaining_resources(
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
     assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 2

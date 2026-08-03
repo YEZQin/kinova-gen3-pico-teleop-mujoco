@@ -16,7 +16,11 @@ from .pico_udp_input import PicoUdpInput
 from .evidence_log import EvidenceLogger, logger_event_sink
 from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
 from .motion_lease import validate_motion_lease
-from .preflight import PreflightContext, run_kortex_readonly_preflight
+from .preflight import (
+    PreflightContext,
+    load_passing_preflight_report,
+    run_kortex_readonly_preflight,
+)
 from .teleop_controller import StepDiagnostics, TeleopConfig, TeleopController
 from .workspace import WorkspaceLimits
 from .xr_input import DryRunXrInput, SdkXrInput, XrInputSource
@@ -140,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--preflight-json",
         type=Path,
         help="write the read-only preflight report to this JSON path",
+    )
+    parser.add_argument(
+        "--preflight-report",
+        type=Path,
+        help="supervisor-reviewed passing preflight JSON required for Kortex motion",
     )
     parser.add_argument(
         "--check-timeout",
@@ -325,6 +334,12 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         return "--samples is only valid with --check-input"
     if args.check_kortex and args.backend != "kortex":
         return "--check-kortex requires --backend kortex"
+    if args.preflight_json is not None and not args.check_kortex:
+        return "--preflight-json requires --check-kortex"
+    if args.preflight_report is not None and args.check_kortex:
+        return "--preflight-report cannot be combined with --check-kortex"
+    if args.preflight_report is not None and args.backend != "kortex":
+        return "--preflight-report requires --backend kortex"
     if args.check_kortex and args.fixed_trajectory:
         return "--check-kortex cannot be combined with --fixed-trajectory"
     if args.fixed_trajectory and args.input != "none":
@@ -393,6 +408,12 @@ def _validate_kortex_args(
             validate_motion_lease(args.motion_lease, args.run_id, args.lease_owner)
         except (OSError, ValueError) as error:
             return f"invalid motion lease: {error}"
+        if args.preflight_report is None:
+            return "--preflight-report is required for Kortex motion"
+        try:
+            load_passing_preflight_report(args.preflight_report)
+        except (OSError, ValueError) as error:
+            return f"invalid preflight report: {error}"
         if args.fixed_trajectory is not None:
             try:
                 load_trajectory(args.fixed_trajectory)

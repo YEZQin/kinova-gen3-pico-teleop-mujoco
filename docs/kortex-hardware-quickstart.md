@@ -62,9 +62,16 @@ python -m kinova_teleop.main `
   --workspace-min -0.20 -0.20 0.10 `
   --workspace-max 0.20 0.20 0.60 `
   --motion-lease C:\path\to\motion.lock `
+  --preflight-report C:\path\to\gen3-preflight-passed.json `
   --run-id gen3-first-hardware --lease-owner kinova-teleop `
   --max-linear-speed 0.01 --max-angular-speed-deg 2
 ```
+
+The motion report must be a separately reviewed central-schema JSON with
+`passed=true`, every software check passing, and every Gen3 physical check
+confirmed. The report emitted by `--check-kortex --preflight-json` is
+read-only and intentionally fails until the onsite checklist is completed;
+pass that reviewed file as `--preflight-report`.
 
 Grip must be released below 0.8 before motion authorization and pressed above
 0.9 to activate the clutch. The first valid press anchors the current
@@ -84,6 +91,7 @@ python -m kinova_teleop.main `
   --workspace-min -0.20 -0.20 0.10 `
   --workspace-max 0.20 0.20 0.60 `
   --motion-lease C:\path\to\motion.lock `
+  --preflight-report C:\path\to\gen3-preflight-passed.json `
   --run-id gen3-first-hardware --lease-owner kinova-teleop `
   --max-linear-speed 0.01 --max-angular-speed-deg 2
 ```

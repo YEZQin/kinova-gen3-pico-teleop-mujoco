@@ -143,9 +143,11 @@ def test_runner_emits_segment_completion_only_after_software_stationary():
         spec.operator_approval_each_segment,
     )
     events: list[str] = []
+    sleeps: list[float] = []
     result = FixedTrajectoryRunner(
         ConfirmingBackend(True),
         approve_segment=lambda *_: True,
+        sleep=sleeps.append,
         event_sink=lambda kind, _state, _payload: events.append(kind),
     ).run(spec)
 
@@ -155,6 +157,7 @@ def test_runner_emits_segment_completion_only_after_software_stationary():
         "motion_command_completed",
         "device_stationary_confirmed",
     ]
+    assert sleeps == [1.0 / spec.control_hz] * (len(spec.segments[0].offsets_xyz) - 1)
     assert "physical_stop_observed" not in events
 
 

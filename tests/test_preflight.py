@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from kinova_teleop.preflight import (
     PreflightContext,
+    load_passing_preflight_report,
     run_input_preflight,
     run_kortex_readonly_preflight,
 )
@@ -80,6 +83,90 @@ def test_report_mapping_has_central_preflight_fields():
         "runtime", "driver", "firmware", "transport", "calibration", "safety_limits",
         "checks", "physical_checks", "passed",
     }
+
+
+def test_passing_preflight_report_is_strict_and_read_only(tmp_path):
+    payload = run_kortex_readonly_preflight(RecordingConnection(), preflight_context()).to_mapping()
+    payload["passed"] = True
+    report_path = tmp_path / "preflight.json"
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_passing_preflight_report(report_path)
+    assert loaded["device"] == "gen3"
+    assert loaded["passed"] is True
+
+    payload["passed"] = False
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    import pytest
+
+    with pytest.raises(ValueError, match="not passed"):
+        load_passing_preflight_report(report_path)
+
+
+def test_passing_preflight_report_rejects_unknown_physical_check(tmp_path):
+    payload = run_kortex_readonly_preflight(RecordingConnection(), preflight_context()).to_mapping()
+    payload["passed"] = True
+    payload["physical_checks"]["workspace_clear"] = False
+    path = tmp_path / "preflight.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="physical checklist"):
+        load_passing_preflight_report(path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("extra", "unexpected fields"),
+        ("schema", "schema_version"),
+        ("device", "device"),
+        ("timestamp", "timestamp_utc"),
+        ("dirty", "worktree"),
+        ("runtime", "runtime"),
+        ("calibration", "calibration"),
+        ("workspace", "workspace limits"),
+        ("checks", "checks"),
+        ("check_shape", "check shape"),
+        ("check_status", "non-passing check"),
+        ("physical_shape", "physical checklist"),
+        ("physical_value", "physical checklist"),
+    ],
+)
+def test_passing_preflight_report_rejects_invalid_schema_fields(tmp_path, mutation, message):
+    payload = run_kortex_readonly_preflight(RecordingConnection(), preflight_context()).to_mapping()
+    payload["passed"] = True
+    if mutation == "extra":
+        payload["extra"] = 1
+    elif mutation == "schema":
+        payload["schema_version"] = "2.0"
+    elif mutation == "device":
+        payload["device"] = "ur5e"
+    elif mutation == "timestamp":
+        payload["timestamp_utc"] = ""
+    elif mutation == "dirty":
+        payload["dirty_worktree"] = True
+    elif mutation == "runtime":
+        payload["runtime"] = {}
+    elif mutation == "calibration":
+        payload["calibration"] = []
+    elif mutation == "workspace":
+        payload["safety_limits"] = {"max_speed": 0.01}
+    elif mutation == "checks":
+        payload["checks"] = []
+    elif mutation == "check_shape":
+        payload["checks"] = [{"name": "arm_state"}]
+    elif mutation == "check_status":
+        payload["checks"][0]["status"] = "fail"
+    elif mutation == "physical_shape":
+        payload["physical_checks"].pop("load_tcp_checked")
+    elif mutation == "physical_value":
+        payload["physical_checks"]["load_tcp_checked"] = False
+    path = tmp_path / f"{mutation}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        load_passing_preflight_report(path)
 
 
 class FakeInput:

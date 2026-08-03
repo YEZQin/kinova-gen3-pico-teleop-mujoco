@@ -10,7 +10,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import math
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -354,3 +356,131 @@ def build_schema_compatible_report(
     """Public construction seam for adapters that add pure checks."""
 
     return _make_report(context, checks)
+
+
+_PREFLIGHT_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "device",
+        "timestamp_utc",
+        "code_revision",
+        "dirty_worktree",
+        "runtime",
+        "driver",
+        "firmware",
+        "transport",
+        "calibration",
+        "safety_limits",
+        "checks",
+        "physical_checks",
+        "passed",
+    }
+)
+
+
+def _strict_report_json(path: Path) -> Mapping[str, object]:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant is not allowed: {value}")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("preflight report contains duplicate fields")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("preflight report JSON is invalid") from error
+    if not isinstance(payload, Mapping):
+        raise ValueError("preflight report must be a JSON object")
+    return payload
+
+
+def load_passing_preflight_report(
+    path: str | Path,
+    *,
+    expected_device: Literal["gen3"] = "gen3",
+) -> Mapping[str, object]:
+    """Read-only strict admission gate for a supervisor-confirmed report.
+
+    The read-only ``--check-kortex`` command deliberately writes a report with
+    the physical checklist unconfirmed.  Motion accepts only a separately
+    reviewed report whose central-schema fields are exact, every software and
+    physical check passes, and ``passed`` is the JSON boolean ``true``.
+    """
+
+    report_path = Path(path)
+    if report_path.is_symlink():
+        raise ValueError("preflight report must not be a symlink")
+    payload = _strict_report_json(report_path)
+    keys = set(payload)
+    missing = _PREFLIGHT_REQUIRED_FIELDS - keys
+    extra = keys - _PREFLIGHT_REQUIRED_FIELDS
+    if missing:
+        raise ValueError("preflight report is missing required fields")
+    if extra:
+        raise ValueError("preflight report has unexpected fields")
+    if payload["schema_version"] != "1.0":
+        raise ValueError("preflight report schema_version must be 1.0")
+    if payload["device"] != expected_device:
+        raise ValueError("preflight report device does not match gen3")
+    if payload["passed"] is not True:
+        raise ValueError("preflight report is not passed")
+    if not isinstance(payload["timestamp_utc"], str) or not payload["timestamp_utc"].strip():
+        raise ValueError("preflight report timestamp_utc is invalid")
+    if not isinstance(payload["code_revision"], str) or not payload["code_revision"].strip():
+        raise ValueError("preflight report code_revision is invalid")
+    if not isinstance(payload["dirty_worktree"], bool) or payload["dirty_worktree"]:
+        raise ValueError("preflight report worktree is not clean")
+
+    for field in ("runtime", "driver", "firmware", "transport"):
+        value = payload[field]
+        if not isinstance(value, Mapping) or not value or _unknown(value):
+            raise ValueError(f"preflight report {field} is incomplete")
+    calibration = payload["calibration"]
+    if not isinstance(calibration, list) or not calibration:
+        raise ValueError("preflight report calibration is incomplete")
+    for item in calibration:
+        if (
+            not isinstance(item, Mapping)
+            or not item.get("name")
+            or not item.get("sha256")
+            or _unknown(item.get("sha256"))
+        ):
+            raise ValueError("preflight report calibration is incomplete")
+    limits = payload["safety_limits"]
+    if not isinstance(limits, Mapping) or not limits or _unknown(limits):
+        raise ValueError("preflight report safety_limits is incomplete")
+    if not any("workspace" in str(key).lower() for key in limits):
+        raise ValueError("preflight report workspace limits are missing")
+    if not any("speed" in str(key).lower() for key in limits):
+        raise ValueError("preflight report speed limits are missing")
+
+    checks = payload["checks"]
+    if not isinstance(checks, list) or not checks:
+        raise ValueError("preflight report checks are incomplete")
+    for check in checks:
+        if not isinstance(check, Mapping) or set(check) != {"name", "status", "detail"}:
+            raise ValueError("preflight report check shape is invalid")
+        if (
+            not isinstance(check["name"], str)
+            or not check["name"]
+            or check["status"] != "pass"
+            or not isinstance(check["detail"], str)
+            or not check["detail"]
+        ):
+            raise ValueError("preflight report contains a non-passing check")
+
+    physical = payload["physical_checks"]
+    if not isinstance(physical, Mapping) or set(physical) != set(_GEN3_PHYSICAL_KEYS):
+        raise ValueError("preflight report physical checklist is incomplete")
+    if any(value is not True for value in physical.values()):
+        raise ValueError("preflight report physical checklist is not passed")
+    return MappingProxyType(dict(payload))
