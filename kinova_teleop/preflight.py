@@ -376,6 +376,41 @@ _PREFLIGHT_REQUIRED_FIELDS = frozenset(
         "passed",
     }
 )
+_GEN3_KORTEX_REQUIRED_CHECKS = frozenset(
+    {
+        "code_revision",
+        "dirty_worktree",
+        "runtime",
+        "driver",
+        "firmware",
+        "transport",
+        "calibration",
+        "safety_limits",
+        "arm_state",
+        "feedback_pose",
+    }
+)
+_PLACEHOLDER_MARKERS = (
+    "unknown",
+    "unverified",
+    "read-only",
+    "read only",
+    "fixture",
+    "reported-by-kortex",
+    "not available",
+    "n/a",
+)
+
+
+def _contains_placeholder(value: object) -> bool:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
+    if isinstance(value, Mapping):
+        return any(_contains_placeholder(item) for item in value.values())
+    if isinstance(value, (tuple, list)):
+        return any(_contains_placeholder(item) for item in value)
+    return False
 
 
 def _strict_report_json(path: Path) -> Mapping[str, object]:
@@ -444,6 +479,8 @@ def load_passing_preflight_report(
         value = payload[field]
         if not isinstance(value, Mapping) or not value or _unknown(value):
             raise ValueError(f"preflight report {field} is incomplete")
+    if _contains_placeholder(payload["firmware"]):
+        raise ValueError("preflight report firmware contains placeholder evidence")
     calibration = payload["calibration"]
     if not isinstance(calibration, list) or not calibration:
         raise ValueError("preflight report calibration is incomplete")
@@ -455,6 +492,8 @@ def load_passing_preflight_report(
             or _unknown(item.get("sha256"))
         ):
             raise ValueError("preflight report calibration is incomplete")
+        if _contains_placeholder(item):
+            raise ValueError("preflight report calibration contains placeholder evidence")
     limits = payload["safety_limits"]
     if not isinstance(limits, Mapping) or not limits or _unknown(limits):
         raise ValueError("preflight report safety_limits is incomplete")
@@ -466,6 +505,7 @@ def load_passing_preflight_report(
     checks = payload["checks"]
     if not isinstance(checks, list) or not checks:
         raise ValueError("preflight report checks are incomplete")
+    check_names: list[str] = []
     for check in checks:
         if not isinstance(check, Mapping) or set(check) != {"name", "status", "detail"}:
             raise ValueError("preflight report check shape is invalid")
@@ -477,6 +517,12 @@ def load_passing_preflight_report(
             or not check["detail"]
         ):
             raise ValueError("preflight report contains a non-passing check")
+        check_names.append(check["name"])
+    if len(check_names) != len(set(check_names)):
+        raise ValueError("preflight report checks contain duplicate names")
+    missing_checks = _GEN3_KORTEX_REQUIRED_CHECKS - set(check_names)
+    if missing_checks:
+        raise ValueError("preflight report is missing required software checks")
 
     physical = payload["physical_checks"]
     if not isinstance(physical, Mapping) or set(physical) != set(_GEN3_PHYSICAL_KEYS):

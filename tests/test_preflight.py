@@ -49,10 +49,10 @@ def preflight_context() -> PreflightContext:
         code_revision="ea389a5",
         dirty_worktree=False,
         runtime={"python": "3.13"},
-        driver={"name": "kortex", "version": "fixture"},
-        firmware={"version": "fixture"},
+        driver={"name": "kortex", "version": "2.6.0"},
+        firmware={"version": "6.5.0"},
         transport={"kind": "fixture"},
-        calibration=({"name": "fixture", "sha256": "a" * 64},),
+        calibration=({"name": "gen3-arm", "sha256": "a" * 64},),
         safety_limits={"workspace": "explicit", "max_linear_speed": 0.01},
         physical_checks={
             "workspace_clear": True,
@@ -113,6 +113,43 @@ def test_passing_preflight_report_rejects_unknown_physical_check(tmp_path):
     import pytest
 
     with pytest.raises(ValueError, match="physical checklist"):
+        load_passing_preflight_report(path)
+
+
+def test_passing_preflight_report_requires_complete_kortex_checks(tmp_path):
+    payload = run_kortex_readonly_preflight(RecordingConnection(), preflight_context()).to_mapping()
+    payload["passed"] = True
+    payload["checks"] = [
+        check for check in payload["checks"] if check["name"] != "feedback_pose"
+    ]
+    path = tmp_path / "missing-check.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="required software checks"):
+        load_passing_preflight_report(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("firmware", {"version": "read-only-unverified"}, "firmware.*placeholder"),
+        (
+            "calibration",
+            [{"name": "reported-by-kortex", "sha256": "read-only-unverified"}],
+            "calibration.*placeholder",
+        ),
+    ],
+)
+def test_passing_preflight_report_rejects_placeholder_evidence(
+    tmp_path, field, value, message
+):
+    payload = run_kortex_readonly_preflight(RecordingConnection(), preflight_context()).to_mapping()
+    payload["passed"] = True
+    payload[field] = value
+    path = tmp_path / f"placeholder-{field}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
         load_passing_preflight_report(path)
 
 
