@@ -58,8 +58,24 @@ def _utc_now() -> str:
 def _unknown(value: object) -> bool:
     if value is None or value == "" or value == {} or value == ():
         return True
-    if isinstance(value, str) and value.strip().lower() in {"unknown", "n/a", "not available"}:
-        return True
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"unknown", "n/a", "not available"}:
+            return True
+        # Treat vendor/read-only placeholders as unknown evidence.  This is
+        # intentionally substring-based so values such as
+        # ``read-only-unverified`` cannot be promoted by cosmetic wording.
+        if any(
+            marker in lowered
+            for marker in (
+                "unverified",
+                "read-only",
+                "read only",
+                "fixture",
+                "reported-by-kortex",
+            )
+        ):
+            return True
     if isinstance(value, Mapping):
         return any(_unknown(item) for item in value.values())
     if isinstance(value, (tuple, list)):
@@ -477,23 +493,22 @@ def load_passing_preflight_report(
 
     for field in ("runtime", "driver", "firmware", "transport"):
         value = payload[field]
-        if not isinstance(value, Mapping) or not value or _unknown(value):
+        if not isinstance(value, Mapping) or not value:
             raise ValueError(f"preflight report {field} is incomplete")
         if _contains_placeholder(value):
             raise ValueError(f"preflight report {field} contains placeholder evidence")
+        if _unknown(value):
+            raise ValueError(f"preflight report {field} is incomplete")
     calibration = payload["calibration"]
     if not isinstance(calibration, list) or not calibration:
         raise ValueError("preflight report calibration is incomplete")
     for item in calibration:
-        if (
-            not isinstance(item, Mapping)
-            or not item.get("name")
-            or not item.get("sha256")
-            or _unknown(item.get("sha256"))
-        ):
+        if not isinstance(item, Mapping) or not item.get("name") or not item.get("sha256"):
             raise ValueError("preflight report calibration is incomplete")
         if _contains_placeholder(item):
             raise ValueError("preflight report calibration contains placeholder evidence")
+        if _unknown(item.get("sha256")):
+            raise ValueError("preflight report calibration is incomplete")
     limits = payload["safety_limits"]
     if not isinstance(limits, Mapping) or not limits or _unknown(limits):
         raise ValueError("preflight report safety_limits is incomplete")
