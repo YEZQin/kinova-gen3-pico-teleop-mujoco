@@ -30,6 +30,8 @@ WATCHDOG_POLL_INTERVAL = 0.01
 WATCHDOG_READY_TIMEOUT = 0.1
 SERVO_READY_TIMEOUT = 3.0
 FAULT_POLL_INTERVAL = 0.05
+STATIONARY_MAX_LINEAR_SPEED = 0.001
+STATIONARY_MAX_ANGULAR_SPEED_DEG = 0.5
 GRIPPER_DEADBAND = 0.02
 GRIPPER_MIN_INTERVAL = 0.1
 
@@ -297,6 +299,58 @@ class KortexBackend:
                     self._rearm_feedback_pending = False
                     self._feedback_requires_rearm = False
             return pose
+        finally:
+            self._rpc_lock.release()
+
+    def confirm_stationary(self) -> bool:
+        """Return true only when a fresh feedback frame reports low velocity.
+
+        The Kortex feedback message exposes tool twist components alongside
+        the pose.  Missing components are treated as an unconfirmed stop;
+        this keeps fixed-trajectory completion fail-closed for incomplete
+        fakes or SDK payloads rather than inventing physical stillness.
+        """
+
+        with self._state_lock:
+            try:
+                self._feedback_admission_locked()
+            except KortexSafetyError:
+                return False
+        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
+            return False
+        try:
+            with self._state_lock:
+                try:
+                    self._feedback_admission_locked()
+                except KortexSafetyError:
+                    return False
+            feedback = self.connection.base_cyclic.RefreshFeedback(
+                options=self.connection.rpc_options()
+            ).base
+            linear = np.asarray(
+                [
+                    getattr(feedback, "tool_twist_linear_x", np.nan),
+                    getattr(feedback, "tool_twist_linear_y", np.nan),
+                    getattr(feedback, "tool_twist_linear_z", np.nan),
+                ],
+                dtype=np.float64,
+            )
+            angular = np.asarray(
+                [
+                    getattr(feedback, "tool_twist_angular_x", np.nan),
+                    getattr(feedback, "tool_twist_angular_y", np.nan),
+                    getattr(feedback, "tool_twist_angular_z", np.nan),
+                ],
+                dtype=np.float64,
+            )
+            if not np.isfinite(linear).all() or not np.isfinite(angular).all():
+                return False
+            return bool(
+                np.linalg.norm(linear) <= STATIONARY_MAX_LINEAR_SPEED
+                and np.linalg.norm(angular) <= STATIONARY_MAX_ANGULAR_SPEED_DEG
+            )
+        except BaseException:
+            return False
         finally:
             self._rpc_lock.release()
 

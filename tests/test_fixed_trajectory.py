@@ -53,9 +53,30 @@ def test_runner_stops_on_first_rejection_and_never_runs_next_segment():
     spec = load_trajectory(Path("configs/gen3_micro_axes.json"))
     spec = spec.__class__(spec.schema_version, "two", spec.max_offset_m, spec.segments[:2], spec.control_hz, spec.max_speed_mps, spec.operator_approval_each_segment)
     backend = RejectingBackend(reject_at_command=3)
-    result = FixedTrajectoryRunner(backend, control_hz=25.0).run(spec)
+    result = FixedTrajectoryRunner(
+        backend,
+        control_hz=25.0,
+        approve_segment=lambda *_: True,
+    ).run(spec)
     assert result.completed_segments == 0
     assert backend.hold_calls == 1
+
+
+def test_runner_fails_closed_without_segment_approval_callback():
+    spec = load_trajectory(Path("configs/gen3_micro_axes.json"))
+    backend = RejectingBackend(reject_at_command=999)
+    events: list[tuple[str, str, dict[str, object]]] = []
+    result = FixedTrajectoryRunner(
+        backend,
+        event_sink=lambda kind, state, payload: events.append((kind, state, dict(payload))),
+    ).run(spec)
+
+    assert result.completed_segments == 0
+    assert result.reason == "operator approval callback is required"
+    assert backend.commands == 0
+    assert backend.hold_calls == 1
+    assert [kind for kind, _state, _payload in events] == ["command_rejected"]
+    assert not any(kind == "physical_stop_observed" for kind, _state, _payload in events)
 
 
 def test_trajectory_loader_rejects_bad_json_and_extra_fields(tmp_path):
@@ -102,9 +123,39 @@ def test_runner_operator_denial_and_stationary_failure_stop_once():
     spec = load_trajectory(Path("configs/gen3_micro_axes.json"))
     denied = FixedTrajectoryRunner(ConfirmingBackend(), approve_segment=lambda *_: False).run(spec)
     assert denied.completed_segments == 0
-    failed = FixedTrajectoryRunner(ConfirmingBackend(False)).run(spec)
+    failed = FixedTrajectoryRunner(
+        ConfirmingBackend(False),
+        approve_segment=lambda *_: True,
+    ).run(spec)
     assert failed.reason == "stationary confirmation failed"
     assert failed.completed_segments == 0
+
+
+def test_runner_emits_segment_completion_only_after_software_stationary():
+    spec = load_trajectory(Path("configs/gen3_micro_axes.json"))
+    spec = spec.__class__(
+        spec.schema_version,
+        "one",
+        spec.max_offset_m,
+        spec.segments[:1],
+        spec.control_hz,
+        spec.max_speed_mps,
+        spec.operator_approval_each_segment,
+    )
+    events: list[str] = []
+    result = FixedTrajectoryRunner(
+        ConfirmingBackend(True),
+        approve_segment=lambda *_: True,
+        event_sink=lambda kind, _state, _payload: events.append(kind),
+    ).run(spec)
+
+    assert result.completed
+    assert events == [
+        "moving",
+        "motion_command_completed",
+        "device_stationary_confirmed",
+    ]
+    assert "physical_stop_observed" not in events
 
 
 def test_runner_propagates_backend_exception_after_one_stop():
@@ -116,5 +167,5 @@ def test_runner_propagates_backend_exception_after_one_stop():
     spec = load_trajectory(Path("configs/gen3_micro_axes.json"))
     backend = Exploding(999)
     with pytest.raises(RuntimeError, match="command failed"):
-        FixedTrajectoryRunner(backend).run(spec)
+        FixedTrajectoryRunner(backend, approve_segment=lambda *_: True).run(spec)
     assert backend.hold_calls == 1

@@ -89,8 +89,10 @@ python -m kinova_teleop.main `
 ```
 
 Each segment stops on the first rejection and requires a fresh low-velocity
-feedback observation before another segment is authorized. Normal RPC return
-or cleanup is not evidence of physical stillness.
+feedback observation before another segment is authorized. The program asks
+for an exact `MOVE` confirmation before every segment; a missing confirmation
+hook is fail-closed. Normal RPC return or cleanup is not evidence of physical
+stillness, and the adapter never fabricates `physical_stop_observed`.
 
 ## Stop semantics and observations
 

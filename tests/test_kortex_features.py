@@ -308,6 +308,27 @@ def test_running_fault_is_not_cleared_automatically():
     assert connection.base.stop_count == 1
 
 
+def test_confirm_stationary_requires_fresh_low_velocity_feedback():
+    connection = _Connection()
+    backend = _backend(connection)
+    backend.begin_control()
+    backend.current_pose()
+
+    feedback = SimpleNamespace(
+        tool_twist_linear_x=0.0001,
+        tool_twist_linear_y=0.0,
+        tool_twist_linear_z=0.0,
+        tool_twist_angular_x=0.1,
+        tool_twist_angular_y=0.0,
+        tool_twist_angular_z=0.0,
+    )
+    connection.base_cyclic.RefreshFeedback = lambda *, options=None: SimpleNamespace(base=feedback)
+    assert backend.confirm_stationary() is True
+
+    feedback.tool_twist_linear_x = 0.01
+    assert backend.confirm_stationary() is False
+
+
 # --- gripper channel ------------------------------------------------------
 
 

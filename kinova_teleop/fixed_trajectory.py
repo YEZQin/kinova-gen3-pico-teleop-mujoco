@@ -202,27 +202,76 @@ class FixedTrajectoryRunner:
             validate_trajectory(spec, anchor=anchor)
             completed = 0
             for index, segment in enumerate(spec.segments):
-                if spec.operator_approval_each_segment and self.approve_segment is not None:
-                    if not self.approve_segment(segment, index):
+                if spec.operator_approval_each_segment:
+                    # A fixed trajectory is intentionally fail-closed: a
+                    # caller must inject an explicit operator approval hook
+                    # for every segment.  Silently treating a missing hook as
+                    # approval would turn the checked-in micro-trajectory into
+                    # an unattended motion sequence.
+                    if self.approve_segment is None:
+                        reason = "operator approval callback is required"
+                        self._emit(
+                            "command_rejected",
+                            "STOPPING",
+                            {"segment": segment.name, "reason": reason},
+                        )
                         stopped = self._stop_once(stopped)
-                        return FixedTrajectoryResult(completed, len(spec.segments), segment.name, "operator approval denied")
+                        return FixedTrajectoryResult(
+                            completed, len(spec.segments), segment.name, reason
+                        )
+                    if not self.approve_segment(segment, index):
+                        reason = "operator approval denied"
+                        self._emit(
+                            "command_rejected",
+                            "STOPPING",
+                            {"segment": segment.name, "reason": reason},
+                        )
+                        stopped = self._stop_once(stopped)
+                        return FixedTrajectoryResult(
+                            completed, len(spec.segments), segment.name, reason
+                        )
+                self._emit(
+                    "moving",
+                    "MOVING",
+                    {"segment": segment.name, "index": index},
+                )
                 for point in segment.offsets_xyz:
                     target = Pose(
                         np.asarray(anchor.position, dtype=float) + np.asarray(point, dtype=float),
                         np.asarray(anchor.quaternion, dtype=float).copy(),
                     )
-                    self._emit("moving", "MOVING", {"segment": segment.name, "offset_xyz": list(point)})
                     result: BackendResult = self.backend.command_pose(target)
                     if not result.accepted:
-                        stopped = self._stop_once(stopped)
                         self._emit("command_rejected", "STOPPING", {"segment": segment.name, "reason": result.reason})
+                        stopped = self._stop_once(stopped)
                         return FixedTrajectoryResult(completed, len(spec.segments), segment.name, result.reason)
                     self.backend.step()
                 confirmer = getattr(self.backend, "confirm_stationary", None)
-                if callable(confirmer) and not bool(confirmer()):
+                if not callable(confirmer):
+                    reason = "stationary confirmation is unavailable"
+                    self._emit(
+                        "command_rejected",
+                        "STOPPING",
+                        {"segment": segment.name, "reason": reason},
+                    )
                     stopped = self._stop_once(stopped)
-                    return FixedTrajectoryResult(completed, len(spec.segments), segment.name, "stationary confirmation failed")
+                    return FixedTrajectoryResult(completed, len(spec.segments), segment.name, reason)
+                if not bool(confirmer()):
+                    reason = "stationary confirmation failed"
+                    self._emit(
+                        "command_rejected",
+                        "STOPPING",
+                        {"segment": segment.name, "reason": reason},
+                    )
+                    stopped = self._stop_once(stopped)
+                    return FixedTrajectoryResult(completed, len(spec.segments), segment.name, reason)
                 self._emit("motion_command_completed", "MOVING", {"segment": segment.name})
+                if callable(confirmer):
+                    self._emit(
+                        "device_stationary_confirmed",
+                        "STOPPING",
+                        {"segment": segment.name},
+                    )
                 completed += 1
             stopped = self._stop_once(stopped)
             return FixedTrajectoryResult(completed, len(spec.segments))

@@ -415,6 +415,21 @@ def _print_status(diagnostics: StepDiagnostics) -> None:
     print(f"status: {' '.join(fields)}", flush=True)
 
 
+def _approve_fixed_segment(segment: Any, index: int) -> bool:
+    """Require a fresh exact MOVE confirmation before each fixed segment."""
+
+    try:
+        confirmation = input(
+            f"Type MOVE to authorize fixed segment {index + 1} "
+            f"({segment.name}): "
+        )
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return False
+    return confirmation == "MOVE"
+
+
 def _preflight_context(args: argparse.Namespace) -> PreflightContext:
     limits = _workspace_from_args(args)
     limit_mapping: dict[str, object] = {
@@ -620,6 +635,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = FixedTrajectoryRunner(
                 backend,
                 control_hz=spec.control_hz,
+                approve_segment=_approve_fixed_segment,
                 event_sink=event_sink if args.backend == "kortex" else None,
             ).run(spec)
             exit_code = 0 if result.completed else 2

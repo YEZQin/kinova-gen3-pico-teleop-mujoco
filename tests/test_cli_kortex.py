@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kinova_teleop.main import _cleanup_resources, main
+from kinova_teleop.main import _approve_fixed_segment, _cleanup_resources, main
 
 
 def _motion_gate_args(arguments: list[str]) -> list[str]:
@@ -169,6 +169,14 @@ def test_gripper_requires_kortex_backend(monkeypatch, capsys) -> None:
     assert main(["--gripper"]) == 2
     assert "--gripper is disabled" in capsys.readouterr().err
     assert calls == []
+
+
+def test_fixed_segment_approval_requires_exact_move(monkeypatch) -> None:
+    segment = SimpleNamespace(name="axis-x-plus")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "move")
+    assert _approve_fixed_segment(segment, 0) is False
+    monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
+    assert _approve_fixed_segment(segment, 0) is True
 
 
 def test_first_hardware_gripper_gate_precedes_password_lookup(monkeypatch) -> None:
