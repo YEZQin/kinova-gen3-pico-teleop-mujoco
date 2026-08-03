@@ -51,7 +51,7 @@ def preflight_context() -> PreflightContext:
         runtime={"python": "3.13"},
         driver={"name": "kortex", "version": "2.6.0"},
         firmware={"version": "6.5.0"},
-        transport={"kind": "fixture"},
+        transport={"kind": "tcp"},
         calibration=({"name": "gen3-arm", "sha256": "a" * 64},),
         safety_limits={"workspace": "explicit", "max_linear_speed": 0.01},
         physical_checks={
@@ -132,6 +132,7 @@ def test_passing_preflight_report_requires_complete_kortex_checks(tmp_path):
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
+        ("driver", {"version": "read-only-unverified"}, "driver.*placeholder"),
         ("firmware", {"version": "read-only-unverified"}, "firmware.*placeholder"),
         (
             "calibration",

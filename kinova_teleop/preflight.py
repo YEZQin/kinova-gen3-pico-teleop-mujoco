@@ -479,8 +479,8 @@ def load_passing_preflight_report(
         value = payload[field]
         if not isinstance(value, Mapping) or not value or _unknown(value):
             raise ValueError(f"preflight report {field} is incomplete")
-    if _contains_placeholder(payload["firmware"]):
-        raise ValueError("preflight report firmware contains placeholder evidence")
+        if _contains_placeholder(value):
+            raise ValueError(f"preflight report {field} contains placeholder evidence")
     calibration = payload["calibration"]
     if not isinstance(calibration, list) or not calibration:
         raise ValueError("preflight report calibration is incomplete")
