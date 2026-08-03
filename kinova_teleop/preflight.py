@@ -62,20 +62,6 @@ def _unknown(value: object) -> bool:
         lowered = value.strip().lower()
         if lowered in {"unknown", "n/a", "not available"}:
             return True
-        # Treat vendor/read-only placeholders as unknown evidence.  This is
-        # intentionally substring-based so values such as
-        # ``read-only-unverified`` cannot be promoted by cosmetic wording.
-        if any(
-            marker in lowered
-            for marker in (
-                "unverified",
-                "read-only",
-                "read only",
-                "fixture",
-                "reported-by-kortex",
-            )
-        ):
-            return True
     if isinstance(value, Mapping):
         return any(_unknown(item) for item in value.values())
     if isinstance(value, (tuple, list)):
