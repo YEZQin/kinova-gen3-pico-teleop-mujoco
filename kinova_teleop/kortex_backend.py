@@ -194,7 +194,8 @@ class KortexBackend:
 
         base_pb2 = self.connection.base_pb2
         state = self._read_arm_state()
-        if state == getattr(base_pb2, "ARMSTATE_IN_FAULT", object()):
+        fault_state = getattr(base_pb2, "ARMSTATE_IN_FAULT", object())
+        if state == fault_state or state == "ARMSTATE_IN_FAULT":
             self._emit("faulted", "FAULTED", {"reason": "startup fault"})
             raise KortexSafetyError(
                 "Kortex startup fault is latched; clear it in the Kinova Web App and retry"
@@ -208,7 +209,7 @@ class KortexBackend:
         deadline = self._monotonic() + SERVO_READY_TIMEOUT
         while True:
             state = self._read_arm_state()
-            if state == ready_state:
+            if state == ready_state or state == "ARMSTATE_SERVOING_READY":
                 return
             if self._monotonic() >= deadline:
                 raise KortexSafetyError(

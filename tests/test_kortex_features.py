@@ -220,6 +220,29 @@ def test_init_rejects_preexisting_fault_without_clearing():
     assert connection.base.servo_modes == []
 
 
+def test_init_rejects_string_fault_state_without_clearing():
+    connection = _Connection()
+    connection.base.arm_states = ["ARMSTATE_IN_FAULT"]
+
+    with pytest.raises(KortexSafetyError, match="startup fault"):
+        _backend(connection)
+
+    assert connection.base.clear_faults_count == 0
+    assert connection.base.arm_state_reads == 1
+    assert connection.base.servo_modes == []
+
+
+def test_init_accepts_string_ready_state():
+    connection = _Connection()
+    connection.base.arm_states = ["ARMSTATE_SERVOING_READY"]
+
+    _backend(connection)
+
+    assert connection.base.clear_faults_count == 0
+    assert connection.base.arm_state_reads == 2
+    assert connection.base.servo_modes == [23]
+
+
 def test_init_fails_safely_when_fault_never_clears():
     connection = _Connection()
     connection.base.arm_states = [FAULT]
