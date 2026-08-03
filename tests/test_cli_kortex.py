@@ -267,6 +267,36 @@ def test_check_kortex_uses_connect_and_read_only_rpc(monkeypatch) -> None:
     assert "close" in calls
 
 
+def test_check_kortex_cleanup_failure_is_fatal(monkeypatch, capsys) -> None:
+    class Connection:
+        base = SimpleNamespace(
+            GetArmState=lambda **_: SimpleNamespace(active_state=31),
+        )
+        base_cyclic = SimpleNamespace(
+            RefreshFeedback=lambda **_: SimpleNamespace(base=SimpleNamespace(
+                tool_pose_x=0.0,
+                tool_pose_y=0.0,
+                tool_pose_z=0.3,
+                tool_pose_theta_x=0.0,
+                tool_pose_theta_y=0.0,
+                tool_pose_theta_z=0.0,
+            )),
+        )
+        base_pb2 = SimpleNamespace(ARMSTATE_SERVOING_READY=31, ARMSTATE_IN_FAULT=32)
+
+        def rpc_options(self):
+            return SimpleNamespace(timeout_ms=100)
+
+        def close(self):
+            return False
+
+    monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "CONNECT")
+    monkeypatch.setattr("kinova_teleop.main._create_kortex_connection", lambda _config: Connection())
+    assert main(["--backend", "kortex", "--enable-hardware", "--check-kortex"]) == 2
+    assert "motion stop may be unconfirmed" in capsys.readouterr().err
+
+
 def test_kortex_rejects_stale_timeout_above_200_ms_before_prompt_import_or_connect(
     monkeypatch,
 ) -> None:

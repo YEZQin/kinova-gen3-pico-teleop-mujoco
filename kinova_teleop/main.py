@@ -500,6 +500,7 @@ def _run_kortex_readonly_check(args: argparse.Namespace, password: str) -> int:
         print("error: read-only Kortex preflight was not confirmed", file=sys.stderr)
         return 2
     connection = None
+    exit_code = 2
     try:
         from .kortex_transport import KortexConfig
 
@@ -515,13 +516,14 @@ def _run_kortex_readonly_check(args: argparse.Namespace, password: str) -> int:
             )
         # A read-only RPC probe can succeed while the physical checklist is
         # intentionally unconfirmed; only a motion mode may gate on `passed`.
-        return 0
+        exit_code = 0
     except Exception as error:
         print(f"error: Kortex read-only preflight failed ({type(error).__name__})", file=sys.stderr)
-        return 2
     finally:
         if connection is not None:
-            _close_resource(connection, hardware=True)
+            if not _close_resource(connection, hardware=True):
+                exit_code = 2
+    return exit_code
 
 
 def _close_resource(resource: Any, *, hardware: bool) -> bool:
