@@ -208,15 +208,16 @@ def test_init_skips_clear_faults_when_arm_is_ready():
     assert connection.base.servo_modes == [23]
 
 
-def test_init_clears_preexisting_fault_and_waits_for_ready():
+def test_init_rejects_preexisting_fault_without_clearing():
     connection = _Connection()
     connection.base.arm_states = [FAULT, FAULT, READY]
 
-    _backend(connection)
+    with pytest.raises(KortexSafetyError, match="startup fault"):
+        _backend(connection)
 
-    assert connection.base.clear_faults_count == 1
-    assert connection.base.arm_state_reads == 4
-    assert connection.base.servo_modes == [23]
+    assert connection.base.clear_faults_count == 0
+    assert connection.base.arm_state_reads == 1
+    assert connection.base.servo_modes == []
 
 
 def test_init_fails_safely_when_fault_never_clears():
@@ -224,11 +225,11 @@ def test_init_fails_safely_when_fault_never_clears():
     connection.base.arm_states = [FAULT]
     clock = _Clock()
 
-    with pytest.raises(KortexSafetyError, match="in fault"):
+    with pytest.raises(KortexSafetyError, match="startup fault"):
         _backend(connection, clock)
 
     # The failed initialization must still attempt a Stop.
-    assert connection.base.clear_faults_count == 1
+    assert connection.base.clear_faults_count == 0
     assert connection.base.stop_count == 1
     assert connection.base.servo_modes == []
 

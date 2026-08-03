@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import builtins
+from types import SimpleNamespace
 
 import pytest
 
 from kinova_teleop.main import _cleanup_resources, main
+
+
+def _motion_gate_args(arguments: list[str]) -> list[str]:
+    return arguments + [
+        "--workspace-min", "-1", "-1", "-1",
+        "--workspace-max", "1", "1", "1",
+        "--motion-lease", "fixture-motion.lock",
+    ]
 
 
 class _FakeSource:
@@ -158,8 +167,65 @@ def test_gripper_requires_kortex_backend(monkeypatch, capsys) -> None:
     calls = _install_unreachable_connection_factory(monkeypatch)
 
     assert main(["--gripper"]) == 2
-    assert "--gripper requires --backend kortex" in capsys.readouterr().err
+    assert "--gripper is disabled" in capsys.readouterr().err
     assert calls == []
+
+
+def test_first_hardware_gripper_gate_precedes_password_lookup(monkeypatch) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.delenv("KINOVA_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    assert main(["--backend", "kortex", "--enable-hardware", "--gripper"]) == 2
+    assert calls == []
+
+
+def test_workspace_gate_precedes_password_and_prompt(monkeypatch) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(AssertionError("prompted")))
+    assert main(["--backend", "kortex", "--enable-hardware"]) == 2
+    assert calls == []
+
+
+def test_check_kortex_uses_connect_and_read_only_rpc(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Base:
+        def GetArmState(self, *, options=None):
+            calls.append("GetArmState")
+            return SimpleNamespace(active_state=31)
+
+    class Cyclic:
+        def RefreshFeedback(self, *, options=None):
+            calls.append("RefreshFeedback")
+            return SimpleNamespace(base=SimpleNamespace(
+                tool_pose_x=0.0, tool_pose_y=0.0, tool_pose_z=0.3,
+                tool_pose_theta_x=0.0, tool_pose_theta_y=0.0, tool_pose_theta_z=0.0,
+            ))
+
+    class Connection:
+        base = Base()
+        base_cyclic = Cyclic()
+        base_pb2 = SimpleNamespace(ARMSTATE_SERVOING_READY=31, ARMSTATE_IN_FAULT=32)
+
+        def rpc_options(self):
+            return SimpleNamespace(timeout_ms=100)
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+    monkeypatch.setattr("builtins.input", lambda prompt: "CONNECT")
+    monkeypatch.setattr("kinova_teleop.main._create_kortex_connection", lambda _config: Connection())
+    assert main(["--backend", "kortex", "--enable-hardware", "--check-kortex"]) == 0
+    assert calls[:2] == ["GetArmState", "RefreshFeedback"]
+    assert "close" in calls
 
 
 def test_kortex_rejects_stale_timeout_above_200_ms_before_prompt_import_or_connect(
@@ -313,6 +379,7 @@ def _install_valid_kortex_fakes(monkeypatch, created: dict) -> None:
         raising=False,
     )
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
+    monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
@@ -324,9 +391,9 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
     _install_valid_kortex_fakes(monkeypatch, created)
     monkeypatch.setattr("kinova_teleop.main.SdkXrInput", _FakeSource)
 
-    assert main(
+    assert main(_motion_gate_args(
         ["--backend", "kortex", "--enable-hardware", "--input", "xrobotoolkit"],
-    ) == 0
+    )) == 0
     config = created["connection_config"]
     backend = created["backend"]
     connection = created["connection"]
@@ -337,6 +404,8 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
     assert backend.kwargs == {
         "max_linear_speed": 0.03,
         "max_angular_speed_deg": 5.0,
+        "workspace_limits": backend.kwargs["workspace_limits"],
+        "event_sink": None,
     }
     controller_config = created["controller_config"]
     assert controller_config.translation_scale == 0.5
@@ -359,7 +428,7 @@ def test_kortex_default_input_is_pico_udp(monkeypatch) -> None:
 
     monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", FakePicoInput)
 
-    assert main(["--backend", "kortex", "--enable-hardware"]) == 0
+    assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 0
     assert isinstance(created["source"], FakePicoInput)
     assert pico_kwargs == {
         "host": "0.0.0.0",
@@ -373,8 +442,8 @@ def test_kortex_gripper_flag_reaches_controller_config(monkeypatch) -> None:
     _install_valid_kortex_fakes(monkeypatch, created)
     monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", _FakeSource)
 
-    assert main(["--backend", "kortex", "--enable-hardware", "--gripper"]) == 0
-    assert created["controller_config"].gripper is True
+    assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware", "--gripper"])) == 2
+    assert "controller_config" not in created
 
 
 def test_kortex_headless_stays_realtime_and_needs_no_steps(monkeypatch) -> None:
@@ -382,7 +451,7 @@ def test_kortex_headless_stays_realtime_and_needs_no_steps(monkeypatch) -> None:
     _install_valid_kortex_fakes(monkeypatch, created)
     monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", _FakeSource)
 
-    assert main(["--backend", "kortex", "--enable-hardware", "--headless"]) == 0
+    assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware", "--headless"])) == 0
     assert created["controller_config"].realtime is True
 
 
@@ -411,9 +480,10 @@ def test_backend_construction_fallback_reports_false_connection_cleanup(
         ),
     )
     monkeypatch.setenv("KINOVA_PASSWORD", "top-secret")
+    monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
-    assert main(["--backend", "kortex", "--enable-hardware"]) == 2
+    assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 2
     error = capsys.readouterr().err
     assert "motion stop may be unconfirmed" in error
     assert "top-secret" not in error
@@ -476,9 +546,10 @@ def test_kortex_errors_close_controller_and_backend(
     monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", EventSource)
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+    monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
-    assert main(["--backend", "kortex", "--enable-hardware"]) == expected_code
+    assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == expected_code
     assert events == ["controller.close", "backend.close", "source.close"]
 
 
@@ -530,9 +601,10 @@ def test_kortex_cleanup_failure_blocks_success_and_closes_remaining_resources(
     monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", EventSource)
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+    monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
 
-    assert main(["--backend", "kortex", "--enable-hardware"]) == 2
+    assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 2
     captured = capsys.readouterr()
     assert "completed" not in captured.out
     assert "Kortex cleanup failed" in captured.err

@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "name": "gen3_micro_axes_first_visit",
+  "max_offset_m": 0.005,
+  "control_hz": 25.0,
+  "max_speed_mps": 0.01,
+  "operator_approval_each_segment": true,
+  "segments": [
+    {"name": "x_positive", "offsets_xyz": [[0.0, 0.0, 0.0], [0.005, 0.0, 0.0], [0.0, 0.0, 0.0]]},
+    {"name": "x_negative", "offsets_xyz": [[0.0, 0.0, 0.0], [-0.005, 0.0, 0.0], [0.0, 0.0, 0.0]]},
+    {"name": "y_positive", "offsets_xyz": [[0.0, 0.0, 0.0], [0.0, 0.005, 0.0], [0.0, 0.0, 0.0]]},
+    {"name": "y_negative", "offsets_xyz": [[0.0, 0.0, 0.0], [0.0, -0.005, 0.0], [0.0, 0.0, 0.0]]},
+    {"name": "z_positive", "offsets_xyz": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.005], [0.0, 0.0, 0.0]]},
+    {"name": "z_negative", "offsets_xyz": [[0.0, 0.0, 0.0], [0.0, 0.0, -0.005], [0.0, 0.0, 0.0]]},
+    {"name": "x_positive_short", "offsets_xyz": [[0.0, 0.0, 0.0], [0.003, 0.0, 0.0], [0.0, 0.0, 0.0]]},
+    {"name": "y_positive_short", "offsets_xyz": [[0.0, 0.0, 0.0], [0.0, 0.003, 0.0], [0.0, 0.0, 0.0]]},
+    {"name": "z_positive_short", "offsets_xyz": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.003], [0.0, 0.0, 0.0]]},
+    {"name": "diagonal_micro", "offsets_xyz": [[0.0, 0.0, 0.0], [0.003, -0.003, 0.003], [0.0, 0.0, 0.0]]}
+  ]
+}

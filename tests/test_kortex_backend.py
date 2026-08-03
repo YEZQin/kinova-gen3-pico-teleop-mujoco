@@ -10,6 +10,7 @@ import pytest
 import kinova_teleop.kortex_backend as kortex_backend_module
 from kinova_teleop.kortex_backend import KortexBackend
 from kinova_teleop.pose_mapping import Pose
+from kinova_teleop.workspace import WorkspaceLimits
 
 
 class _Twist:
@@ -215,6 +216,20 @@ def test_feedback_fixed_axis_xyz_pose_is_converted_to_wxyz():
     )
     assert connection.base.servo_modes == [23]
     assert connection.base_cyclic.options[-1].timeout_ms < 200
+
+
+def test_workspace_rejection_stops_before_feedback_or_twist():
+    connection = _Connection(_feedback((0.0, 0.0, 0.3)))
+    backend = _backend(
+        connection,
+        workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
+    )
+    backend.begin_control()
+    result = backend.command_pose(_target(position=(1.0, 0.0, 0.3)))
+    assert result.accepted is False
+    assert connection.base_cyclic.options == []
+    assert connection.base.sent == []
+    assert connection.base.stop_count == 1
 
 
 def test_servoing_mode_error_stops_before_propagating():

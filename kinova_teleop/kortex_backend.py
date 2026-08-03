@@ -6,6 +6,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any, Callable
 
 import numpy as np
@@ -19,6 +20,7 @@ from .pose_mapping import (
     quat_multiply,
     quat_to_rotvec,
 )
+from .workspace import WorkspaceLimits, validate_target_pose
 
 MAX_LINEAR_SPEED = 0.03
 MAX_ANGULAR_SPEED_DEG = 5.0
@@ -26,7 +28,7 @@ WATCHDOG_TIMEOUT = 0.2
 RPC_LOCK_TIMEOUT = 0.15
 WATCHDOG_POLL_INTERVAL = 0.01
 WATCHDOG_READY_TIMEOUT = 0.1
-FAULT_CLEAR_TIMEOUT = 3.0
+SERVO_READY_TIMEOUT = 3.0
 FAULT_POLL_INTERVAL = 0.05
 GRIPPER_DEADBAND = 0.02
 GRIPPER_MIN_INTERVAL = 0.1
@@ -89,6 +91,8 @@ class KortexBackend:
         kp_angular: float = 1.0,
         max_linear_speed: float = MAX_LINEAR_SPEED,
         max_angular_speed_deg: float = MAX_ANGULAR_SPEED_DEG,
+        workspace_limits: WorkspaceLimits | None = None,
+        event_sink: Callable[[str, str, Mapping[str, object]], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -112,6 +116,8 @@ class KortexBackend:
         self.kp_angular = float(kp_angular)
         self.max_linear_speed = float(max_linear_speed)
         self.max_angular_speed_deg = float(max_angular_speed_deg)
+        self.workspace_limits = workspace_limits
+        self.event_sink = event_sink
         self._monotonic = monotonic
         self._sleep = sleep
 
@@ -138,7 +144,7 @@ class KortexBackend:
         self._gripper_last_time: float | None = None
 
         try:
-            self._clear_startup_fault()
+            self._require_startup_ready()
             servoing_mode = self.connection.base_pb2.ServoingModeInformation()
             servoing_mode.servoing_mode = (
                 self.connection.base_pb2.SINGLE_LEVEL_SERVOING
@@ -168,49 +174,38 @@ class KortexBackend:
         finally:
             self._rpc_lock.release()
 
-    def _clear_startup_fault(self) -> None:
-        """Clear a pre-existing fault once and wait for it to drop.
-
-        Runs before ``SetServoingMode`` so that a faulted arm can be
-        recovered; a leftover non-fault mode (for example low-level servoing
-        from a crashed client) is instead recovered by the subsequent
-        ``SetServoingMode`` call. Faults that appear while teleoperation is
-        running are never cleared automatically; the backend stops and the
-        operator must restart.
-        """
-
-        base_pb2 = self.connection.base_pb2
-        fault_state = base_pb2.ARMSTATE_IN_FAULT
-        if self._read_arm_state() != fault_state:
+    def _emit(
+        self,
+        kind: str,
+        state: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        sink = self.event_sink
+        if sink is None:
+            return
+        try:
+            sink(kind, state, dict(payload or {}))
+        except Exception:
+            # Evidence failures must not disable the watchdog or alter Stop order.
             return
 
-        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
-            raise KortexSafetyError("Timed out clearing Kortex faults")
-        try:
-            self.connection.base.ClearFaults(
-                options=self.connection.rpc_options()
-            )
-        finally:
-            self._rpc_lock.release()
+    def _require_startup_ready(self) -> None:
+        """Read and latch a startup fault; recovery belongs to the operator."""
 
-        deadline = self._monotonic() + FAULT_CLEAR_TIMEOUT
-        while True:
-            state = self._read_arm_state()
-            if state != fault_state:
-                return
-            if self._monotonic() >= deadline:
-                raise KortexSafetyError(
-                    f"Kortex arm is still in fault (state={state}); "
-                    "clear the fault from the Kinova Web App and retry"
-                )
-            self._sleep(FAULT_POLL_INTERVAL)
+        base_pb2 = self.connection.base_pb2
+        state = self._read_arm_state()
+        if state == getattr(base_pb2, "ARMSTATE_IN_FAULT", object()):
+            self._emit("faulted", "FAULTED", {"reason": "startup fault"})
+            raise KortexSafetyError(
+                "Kortex startup fault is latched; clear it in the Kinova Web App and retry"
+            )
 
     def _wait_until_servo_ready(self) -> None:
         """Wait for SERVOING_READY after single-level servoing was requested."""
 
         base_pb2 = self.connection.base_pb2
         ready_state = base_pb2.ARMSTATE_SERVOING_READY
-        deadline = self._monotonic() + FAULT_CLEAR_TIMEOUT
+        deadline = self._monotonic() + SERVO_READY_TIMEOUT
         while True:
             state = self._read_arm_state()
             if state == ready_state:
@@ -319,12 +314,25 @@ class KortexBackend:
             self._stop_token = None
             self._deadline = None
             self._rearm_feedback_pending = True
+        self._emit("control_started", "ARMED", {})
 
     def command_pose(self, target: Pose) -> BackendResult:
         with self._state_lock:
             if not self._state_allows_command_locked():
                 return _inactive_result()
             generation = self._generation
+
+        # Workspace checks are deliberately before any feedback or Twist RPC.
+        if self.workspace_limits is not None:
+            decision = validate_target_pose(target, self.workspace_limits)
+            if not decision.accepted:
+                self._emit(
+                    "workspace_rejected",
+                    "STOPPING",
+                    {"reason": decision.reason},
+                )
+                self.hold()
+                return BackendResult(False, False, 0.0, 0.0, decision.reason)
 
         try:
             target_position = np.asarray(target.position, dtype=np.float64)
@@ -417,6 +425,8 @@ class KortexBackend:
                 return _inactive_result()
             if nonzero:
                 self._deadline = self._monotonic() + WATCHDOG_TIMEOUT
+        if nonzero:
+            self._emit("moving", "MOVING", {})
         return result
 
     def command_gripper(self, position: float) -> bool:
@@ -572,8 +582,13 @@ class KortexBackend:
         return token
 
     def _request_stop(self, *, force: bool) -> _StopToken:
+        emit = False
         with self._state_lock:
-            return self._request_stop_locked(force=force)
+            emit = not self._stop_requested
+            token = self._request_stop_locked(force=force)
+        if emit:
+            self._emit("host_stop_requested", "STOPPING", {})
+        return token
 
     def _token_matches_locked(self, token: _StopToken) -> bool:
         return (
@@ -620,6 +635,10 @@ class KortexBackend:
             with self._state_lock:
                 if self._token_matches_locked(token):
                     self._stop_confirmed = False
+        if committed and not failed:
+            self._emit("stop_rpc_returned", "STOPPING", {})
+        elif failed:
+            self._emit("stop_unconfirmed", "FAULTED", {})
         if failed and raise_on_failure:
             raise KortexSafetyError("Stop attempted but unconfirmed") from None
         return committed and not failed
@@ -628,16 +647,15 @@ class KortexBackend:
         with self._state_lock:
             if self._stop_requested and self._stop_confirmed:
                 return
-            if self._stop_requested:
-                token = self._request_stop_locked(force=False)
-            else:
-                token = self._request_stop_locked(force=True)
+            force = not self._stop_requested
+        token = self._request_stop(force=force)
         self._attempt_stop(token=token, raise_on_failure=True)
 
     def step(self) -> None:
         """The Kortex controller executes commands asynchronously."""
 
     def close(self) -> None:
+        emit_stop_request = False
         with self._watchdog_start_lock:
             with self._state_lock:
                 if self._connection_closed:
@@ -654,12 +672,15 @@ class KortexBackend:
                     self._stop_confirmed = False
                     close_token = self._request_stop_locked(force=True)
                     self._terminal_stop_token = close_token
+                    emit_stop_request = True
                 else:
                     close_token = self._terminal_stop_token
                 watchdog_thread = (
                     self._watchdog_thread if self._watchdog_started else None
                 )
         self._shutdown.set()
+        if emit_stop_request:
+            self._emit("host_stop_requested", "STOPPING", {})
 
         if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
             if (
@@ -687,6 +708,8 @@ class KortexBackend:
         ):
             watchdog_thread.join(timeout=RPC_LOCK_TIMEOUT)
         if not self.stop_confirmed:
+            self._emit("stop_unconfirmed", "FAULTED", {})
             raise KortexSafetyError(
                 "Kortex connection closed after Stop attempted but unconfirmed"
             ) from None
+        self._emit("cleanup_completed", "COMPLETED", {})

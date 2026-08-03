@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import math
 import time
+from collections.abc import Mapping
 
 from .backend import BackendResult, EndEffectorTargetBackend
 from .pose_mapping import ClutchState, MappingConfig, Pose, RelativePoseMapper
@@ -38,6 +39,8 @@ class TeleopController:
         config: TeleopConfig,
         source: XrInputSource,
         backend: EndEffectorTargetBackend,
+        *,
+        event_sink: Callable[[str, str, Mapping[str, object]], None] | None = None,
     ) -> None:
         if not math.isfinite(config.control_hz) or config.control_hz <= 0.0:
             raise ValueError("control_hz must be positive and finite")
@@ -49,6 +52,7 @@ class TeleopController:
         self.config = config
         self.source = source
         self.backend = backend
+        self.event_sink = event_sink
         self.mapper = RelativePoseMapper(
             MappingConfig(
                 translation_scale=config.translation_scale,
@@ -60,6 +64,13 @@ class TeleopController:
         self._closed = False
         self._backend_closed = False
         self._source_closed = False
+
+    def _emit(self, kind: str, state: str, payload: Mapping[str, object] | None = None) -> None:
+        if self.event_sink is not None:
+            try:
+                self.event_sink(kind, state, dict(payload or {}))
+            except Exception:
+                return
 
     def _begin_anchor_transaction(self) -> Pose:
         """Run the backend's begin-control transaction and return the anchor.
@@ -84,8 +95,12 @@ class TeleopController:
             result = self.backend.command_pose(mapping.target)
         else:
             if mapping.deactivated:
+                self._emit("input_release", "STOPPING", {})
                 self.backend.hold()
             result = BackendResult(False, False, 0.0, 0.0, "")
+
+        if mapping.stale:
+            self._emit("input_stale", "STOPPING", {})
 
         if self.config.gripper and mapping.active and sample.valid:
             self.backend.command_gripper(float(sample.trigger))

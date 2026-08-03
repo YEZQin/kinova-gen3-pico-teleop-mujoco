@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import json
 import math
 import os
 from pathlib import Path
@@ -12,7 +13,12 @@ import time
 from typing import Any
 
 from .pico_udp_input import PicoUdpInput
+from .evidence_log import EvidenceLogger, logger_event_sink
+from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
+from .motion_lease import validate_motion_lease
+from .preflight import PreflightContext, run_kortex_readonly_preflight
 from .teleop_controller import StepDiagnostics, TeleopConfig, TeleopController
+from .workspace import WorkspaceLimits
 from .xr_input import DryRunXrInput, SdkXrInput, XrInputSource
 
 
@@ -31,6 +37,8 @@ DEFAULT_KORTEX_LINEAR_SPEED = 0.03
 DEFAULT_KORTEX_ANGULAR_SPEED_DEG = 5.0
 MAX_KORTEX_SCALE = 0.5
 MAX_KORTEX_STALE_TIMEOUT = 0.2
+DEFAULT_MOTION_RUN_ID = "gen3-first-hardware"
+DEFAULT_MOTION_OWNER = "kinova-teleop"
 
 
 def _create_kortex_connection(config: Any) -> Any:
@@ -98,9 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--input",
-        choices=("pico-udp", "xrobotoolkit"),
+        choices=("pico-udp", "xrobotoolkit", "none"),
         default="pico-udp",
-        help="controller input source (default: pico-udp)",
+        help="controller input source (default: pico-udp; none for fixed trajectory)",
     )
     parser.add_argument(
         "--pico-host",
@@ -122,6 +130,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-xr",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--check-kortex",
+        action="store_true",
+        help="run read-only Kortex state/feedback preflight and exit",
+    )
+    parser.add_argument(
+        "--preflight-json",
+        type=Path,
+        help="write the read-only preflight report to this JSON path",
     )
     parser.add_argument(
         "--check-timeout",
@@ -180,12 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gripper",
         action="store_true",
-        help=(
-            "drive the Kortex gripper from the controller trigger "
-            "(requires --backend kortex and a Unity bridge sending "
-            "protocol V2 packets)"
-        ),
+        help="deprecated first-hardware option; always rejected",
     )
+    parser.add_argument("--workspace-min", nargs=3, type=float, metavar=("X", "Y", "Z"), help="explicit workspace minimum XYZ (m)")
+    parser.add_argument("--workspace-max", nargs=3, type=float, metavar=("X", "Y", "Z"), help="explicit workspace maximum XYZ (m)")
+    parser.add_argument("--motion-lease", type=Path, help="supervisor-issued motion lease JSON")
+    parser.add_argument("--run-id", default=DEFAULT_MOTION_RUN_ID, help="run id expected in the motion lease")
+    parser.add_argument("--lease-owner", default=DEFAULT_MOTION_OWNER, help="owner expected in the motion lease")
+    parser.add_argument("--fixed-trajectory", type=Path, help="validated relative trajectory JSON")
+    parser.add_argument("--evidence-jsonl", type=Path, help="append-only trial event JSONL path")
     return parser
 
 
@@ -200,6 +221,8 @@ def resolve_control_hz(args: argparse.Namespace) -> float:
 def create_input(args: argparse.Namespace) -> XrInputSource:
     """Construct the selected input without requiring a fixed PICO address."""
     control_hz = resolve_control_hz(args)
+    if args.input == "none":
+        raise RuntimeError("input source is disabled for fixed trajectory mode")
     if args.dry_run:
         return DryRunXrInput(control_hz=control_hz)
     if args.input == "pico-udp":
@@ -272,6 +295,10 @@ def check_input(
 
 
 def _validate_args(args: argparse.Namespace) -> str | None:
+    # This is intentionally first: the bare-arm profile never permits a
+    # gripper flag, regardless of backend or any other malformed option.
+    if args.gripper:
+        return "--gripper is disabled for the first-hardware profile"
     if args.control_hz is not None and (
         not math.isfinite(args.control_hz) or args.control_hz <= 0.0
     ):
@@ -296,26 +323,45 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         return "--check-input requires a positive --samples"
     if args.samples is not None and not (args.check_input or args.check_xr):
         return "--samples is only valid with --check-input"
-    if args.gripper and args.backend != "kortex":
-        return "--gripper requires --backend kortex"
+    if args.check_kortex and args.backend != "kortex":
+        return "--check-kortex requires --backend kortex"
+    if args.check_kortex and args.fixed_trajectory:
+        return "--check-kortex cannot be combined with --fixed-trajectory"
+    if args.fixed_trajectory and args.input != "none":
+        return "--fixed-trajectory requires --input none"
+    if args.fixed_trajectory and not args.backend == "kortex":
+        return "--fixed-trajectory requires --backend kortex"
     return None
 
 
-def _validate_kortex_args(args: argparse.Namespace, password: str | None) -> str | None:
-    """Validate every hardware input before importing or connecting Kortex."""
+def _workspace_from_args(args: argparse.Namespace) -> WorkspaceLimits | None:
+    if args.workspace_min is None or args.workspace_max is None:
+        return None
+    return WorkspaceLimits(tuple(args.workspace_min), tuple(args.workspace_max))
+
+
+def _validate_kortex_args(
+    args: argparse.Namespace,
+    password: str | None,
+    *,
+    check_password: bool = True,
+) -> str | None:
+    """Validate hardware gates in their fail-closed order before SDK import."""
 
     if not args.enable_hardware:
         return "--backend kortex requires --enable-hardware"
     if args.dry_run:
         return "--dry-run cannot be used with --backend kortex"
+    if args.check_kortex and args.fixed_trajectory:
+        return "--check-kortex cannot be combined with --fixed-trajectory"
+    if args.fixed_trajectory and args.input != "none":
+        return "--fixed-trajectory requires --input none"
     if args.stale_timeout > MAX_KORTEX_STALE_TIMEOUT:
         return "--stale-timeout must not exceed 0.2 for --backend kortex"
     if not args.robot_ip.strip():
         return "--robot-ip must not be empty"
     if not args.robot_user.strip():
         return "--robot-user must not be empty"
-    if not password:
-        return "KINOVA_PASSWORD must be set for --backend kortex"
     if args.scale > MAX_KORTEX_SCALE:
         return "--scale must not exceed 0.5 for --backend kortex"
     if args.control_hz is not None and args.control_hz > MAX_KORTEX_CONTROL_HZ:
@@ -331,6 +377,29 @@ def _validate_kortex_args(args: argparse.Namespace, password: str | None) -> str
         0.0 < args.max_angular_speed_deg <= DEFAULT_KORTEX_ANGULAR_SPEED_DEG
     ):
         return "--max-angular-speed-deg must be in (0, 5]"
+
+    # Read-only inspection does not authorize motion, so workspace/lease gates
+    # are intentionally scoped to the motion paths only.
+    if not args.check_kortex:
+        try:
+            limits = _workspace_from_args(args)
+        except ValueError as error:
+            return str(error)
+        if limits is None:
+            return "--workspace-min and --workspace-max are required for Kortex motion"
+        if args.motion_lease is None:
+            return "--motion-lease is required for Kortex motion"
+        try:
+            validate_motion_lease(args.motion_lease, args.run_id, args.lease_owner)
+        except (OSError, ValueError) as error:
+            return f"invalid motion lease: {error}"
+        if args.fixed_trajectory is not None:
+            try:
+                load_trajectory(args.fixed_trajectory)
+            except (OSError, ValueError) as error:
+                return f"invalid fixed trajectory: {error}"
+    if check_password and not password:
+        return "KINOVA_PASSWORD must be set for --backend kortex"
     return None
 
 
@@ -344,6 +413,79 @@ def _print_status(diagnostics: StepDiagnostics) -> None:
     if diagnostics.reason:
         fields.append(f"reason={diagnostics.reason}")
     print(f"status: {' '.join(fields)}", flush=True)
+
+
+def _preflight_context(args: argparse.Namespace) -> PreflightContext:
+    limits = _workspace_from_args(args)
+    limit_mapping: dict[str, object] = {
+        "max_linear_speed": args.max_linear_speed,
+        "max_angular_speed_deg": args.max_angular_speed_deg,
+    }
+    if limits is not None:
+        limit_mapping["workspace_min"] = list(limits.minimum_xyz)
+        limit_mapping["workspace_max"] = list(limits.maximum_xyz)
+    return PreflightContext(
+        code_revision="working-tree",
+        dirty_worktree=False,
+        runtime={"python": sys.version.split()[0]},
+        driver={"name": "kortex", "version": "unknown"},
+        firmware={"version": "read-only-unverified"},
+        transport={"kind": "tcp", "host": args.robot_ip, "port": 10000},
+        calibration=({"name": "reported-by-kortex", "sha256": "read-only-unverified"},),
+        safety_limits=limit_mapping,
+        # Physical checks are an onsite operator concern; read-only inspection
+        # must remain failed-closed until an operator records every check.
+        physical_checks={
+            "workspace_clear": False,
+            "physical_estop_reachable": False,
+            "teach_pendant_stop_reachable": False,
+            "second_observer_present": False,
+            "cable_slack_checked": False,
+            "device_fixture_checked": False,
+            "speed_level_checked": False,
+            "workspace_bounds_checked": False,
+            "load_tcp_checked": False,
+        },
+    )
+
+
+def _run_kortex_readonly_check(args: argparse.Namespace, password: str) -> int:
+    """Connect only after exact CONNECT and perform no motion setup."""
+
+    try:
+        confirmation = input("Type CONNECT to run read-only Kortex preflight: ")
+    except KeyboardInterrupt:
+        print("stopped by user", file=sys.stderr)
+        return 130
+    except Exception:
+        print("error: Kortex confirmation failed", file=sys.stderr)
+        return 2
+    if confirmation != "CONNECT":
+        print("error: read-only Kortex preflight was not confirmed", file=sys.stderr)
+        return 2
+    connection = None
+    try:
+        from .kortex_transport import KortexConfig
+
+        connection = _create_kortex_connection(
+            KortexConfig(args.robot_ip, args.robot_user, password)
+        )
+        report = run_kortex_readonly_preflight(connection, _preflight_context(args))
+        if args.preflight_json is not None:
+            args.preflight_json.parent.mkdir(parents=True, exist_ok=True)
+            args.preflight_json.write_text(
+                json.dumps(report.to_mapping(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        # A read-only RPC probe can succeed while the physical checklist is
+        # intentionally unconfirmed; only a motion mode may gate on `passed`.
+        return 0
+    except Exception as error:
+        print(f"error: Kortex read-only preflight failed ({type(error).__name__})", file=sys.stderr)
+        return 2
+    finally:
+        if connection is not None:
+            _close_resource(connection, hardware=True)
 
 
 def _close_resource(resource: Any, *, hardware: bool) -> bool:
@@ -411,11 +553,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     password: str | None = None
     if args.backend == "kortex":
+        # Fail closed on non-secret gates before even looking up the password.
+        error = _validate_kortex_args(args, None, check_password=False)
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
         password = os.getenv("KINOVA_PASSWORD")
         error = _validate_kortex_args(args, password)
         if error is not None:
             print(f"error: {error}", file=sys.stderr)
             return 2
+        if args.check_kortex:
+            return _run_kortex_readonly_check(args, password)
         try:
             confirmation = input("Type MOVE to enable Kortex motion: ")
         except KeyboardInterrupt:
@@ -433,12 +582,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     connection = None
     backend = None
     controller = None
+    evidence_logger = None
+    event_sink = None
     exit_code = 2
     completion: str | None = None
     try:
-        source = create_input(args)
+        if args.fixed_trajectory is None:
+            source = create_input(args)
         if args.backend == "kortex":
             from .kortex_transport import KortexConfig
+
+            workspace_limits = _workspace_from_args(args)
+            if args.evidence_jsonl is not None:
+                evidence_logger = EvidenceLogger(
+                    args.evidence_jsonl,
+                    run_id=args.run_id,
+                )
+            event_sink = logger_event_sink(evidence_logger) if evidence_logger is not None else None
 
             connection = _create_kortex_connection(
                 KortexConfig(args.robot_ip, args.robot_user, password),
@@ -447,45 +607,63 @@ def main(argv: Sequence[str] | None = None) -> int:
                 connection,
                 max_linear_speed=args.max_linear_speed,
                 max_angular_speed_deg=args.max_angular_speed_deg,
+                workspace_limits=workspace_limits,
+                event_sink=event_sink,
             )
         else:
             from .mujoco_backend import MuJoCoBackend
 
             backend = MuJoCoBackend(args.model, control_hz=control_hz)
 
-        controller = TeleopController(
-            TeleopConfig(
-                control_hz=control_hz,
-                # Hardware must always run against the wall clock; free-running
-                # a headless loop against a real arm floods the robot with RPCs.
-                realtime=args.backend == "kortex" or not args.headless,
-                translation_scale=args.scale,
-                stale_timeout=args.stale_timeout,
-                gripper=args.gripper,
-            ),
-            source,
-            backend,
-        )
-        if args.backend == "kortex" or args.headless:
-            controller.run(max_steps=args.steps, on_status=_print_status)
-        else:
-            viewer = backend.launch_viewer()
-            controller.run(
-                max_steps=args.steps,
-                should_continue=viewer.is_running,
-                on_step=viewer.sync,
-                on_status=_print_status,
-            )
-        if args.backend == "mujoco":
-            finite = backend.state_is_finite()
-            exit_code = 0 if finite else 2
+        if args.fixed_trajectory is not None:
+            spec = load_trajectory(args.fixed_trajectory)
+            result = FixedTrajectoryRunner(
+                backend,
+                control_hz=spec.control_hz,
+                event_sink=event_sink if args.backend == "kortex" else None,
+            ).run(spec)
+            exit_code = 0 if result.completed else 2
             completion = (
-                f"completed steps={controller.steps} "
-                f"finite_state={str(finite).lower()}"
+                f"completed fixed_segments={result.completed_segments}/{result.total_segments}"
             )
         else:
-            exit_code = 0
-            completion = f"completed steps={controller.steps}"
+            controller_kwargs: dict[str, object] = {}
+            if event_sink is not None:
+                controller_kwargs["event_sink"] = event_sink
+            controller = TeleopController(
+                TeleopConfig(
+                    control_hz=control_hz,
+                    # Hardware must always run against the wall clock; free-running
+                    # a headless loop against a real arm floods the robot with RPCs.
+                    realtime=args.backend == "kortex" or not args.headless,
+                    translation_scale=args.scale,
+                    stale_timeout=args.stale_timeout,
+                    gripper=args.gripper,
+                ),
+                source,
+                backend,
+                **controller_kwargs,
+            )
+            if args.backend == "kortex" or args.headless:
+                controller.run(max_steps=args.steps, on_status=_print_status)
+            else:
+                viewer = backend.launch_viewer()
+                controller.run(
+                    max_steps=args.steps,
+                    should_continue=viewer.is_running,
+                    on_step=viewer.sync,
+                    on_status=_print_status,
+                )
+            if args.backend == "mujoco":
+                finite = backend.state_is_finite()
+                exit_code = 0 if finite else 2
+                completion = (
+                    f"completed steps={controller.steps} "
+                    f"finite_state={str(finite).lower()}"
+                )
+            else:
+                exit_code = 0
+                completion = f"completed steps={controller.steps}"
     except KeyboardInterrupt:
         print("stopped by user", file=sys.stderr)
         exit_code = 130

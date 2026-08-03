@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hardware-trial.local/schema/preflight-v1.schema.json",
+  "title": "Hardware Trial Preflight v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "device",
+    "timestamp_utc",
+    "code_revision",
+    "dirty_worktree",
+    "runtime",
+    "driver",
+    "firmware",
+    "transport",
+    "calibration",
+    "safety_limits",
+    "checks",
+    "physical_checks",
+    "passed"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "device": {"enum": ["gen3", "ur5e", "l20"]},
+    "timestamp_utc": {"type": "string", "minLength": 1},
+    "code_revision": {"type": "string", "minLength": 1},
+    "dirty_worktree": {"type": "boolean"},
+    "runtime": {"type": "object"},
+    "driver": {"type": "object"},
+    "firmware": {"type": "object"},
+    "transport": {"type": "object"},
+    "calibration": {"type": "array", "items": {"type": "object"}},
+    "safety_limits": {"type": "object"},
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "detail"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "status": {"enum": ["pass", "fail", "unknown"]},
+          "detail": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "physical_checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workspace_clear": {"type": "boolean"},
+        "physical_estop_reachable": {"type": "boolean"},
+        "teach_pendant_stop_reachable": {"type": "boolean"},
+        "second_observer_present": {"type": "boolean"},
+        "cable_slack_checked": {"type": "boolean"},
+        "device_fixture_checked": {"type": "boolean"},
+        "speed_level_checked": {"type": "boolean"},
+        "workspace_bounds_checked": {"type": "boolean"},
+        "load_tcp_checked": {"type": "boolean"},
+        "external_control_play_checked": {"type": "boolean"},
+        "physical_power_cut_reachable": {"type": "boolean"},
+        "current_limited_supply_checked": {"type": "boolean"},
+        "operator_distance_checked": {"type": "boolean"}
+      }
+    },
+    "passed": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"device": {"const": "gen3"}}, "required": ["device"]},
+      "then": {"properties": {"physical_checks": {"$ref": "#/$defs/gen3PhysicalChecks"}}}
+    },
+    {
+      "if": {"properties": {"device": {"const": "ur5e"}}, "required": ["device"]},
+      "then": {"properties": {"physical_checks": {"$ref": "#/$defs/ur5ePhysicalChecks"}}}
+    },
+    {
+      "if": {"properties": {"device": {"const": "l20"}}, "required": ["device"]},
+      "then": {"properties": {"physical_checks": {"$ref": "#/$defs/l20PhysicalChecks"}}}
+    },
+    {
+      "if": {"properties": {"passed": {"const": true}}, "required": ["passed"]},
+      "then": {
+        "properties": {
+          "checks": {
+            "items": {
+              "properties": {
+                "status": {"const": "pass"}
+              }
+            }
+          },
+          "physical_checks": {
+            "patternProperties": {
+              ".*": {"const": true}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "gen3PhysicalChecks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_clear",
+        "physical_estop_reachable",
+        "teach_pendant_stop_reachable",
+        "second_observer_present",
+        "cable_slack_checked",
+        "device_fixture_checked",
+        "speed_level_checked",
+        "workspace_bounds_checked",
+        "load_tcp_checked"
+      ],
+      "properties": {
+        "workspace_clear": {"type": "boolean"},
+        "physical_estop_reachable": {"type": "boolean"},
+        "teach_pendant_stop_reachable": {"type": "boolean"},
+        "second_observer_present": {"type": "boolean"},
+        "cable_slack_checked": {"type": "boolean"},
+        "device_fixture_checked": {"type": "boolean"},
+        "speed_level_checked": {"type": "boolean"},
+        "workspace_bounds_checked": {"type": "boolean"},
+        "load_tcp_checked": {"type": "boolean"}
+      }
+    },
+    "ur5ePhysicalChecks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_clear",
+        "physical_estop_reachable",
+        "teach_pendant_stop_reachable",
+        "second_observer_present",
+        "cable_slack_checked",
+        "device_fixture_checked",
+        "speed_level_checked",
+        "workspace_bounds_checked",
+        "load_tcp_checked",
+        "external_control_play_checked"
+      ],
+      "properties": {
+        "workspace_clear": {"type": "boolean"},
+        "physical_estop_reachable": {"type": "boolean"},
+        "teach_pendant_stop_reachable": {"type": "boolean"},
+        "second_observer_present": {"type": "boolean"},
+        "cable_slack_checked": {"type": "boolean"},
+        "device_fixture_checked": {"type": "boolean"},
+        "speed_level_checked": {"type": "boolean"},
+        "workspace_bounds_checked": {"type": "boolean"},
+        "load_tcp_checked": {"type": "boolean"},
+        "external_control_play_checked": {"type": "boolean"}
+      }
+    },
+    "l20PhysicalChecks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_clear",
+        "physical_power_cut_reachable",
+        "current_limited_supply_checked",
+        "operator_distance_checked",
+        "second_observer_present",
+        "cable_slack_checked",
+        "device_fixture_checked",
+        "speed_level_checked"
+      ],
+      "properties": {
+        "workspace_clear": {"type": "boolean"},
+        "physical_power_cut_reachable": {"type": "boolean"},
+        "current_limited_supply_checked": {"type": "boolean"},
+        "operator_distance_checked": {"type": "boolean"},
+        "second_observer_present": {"type": "boolean"},
+        "cable_slack_checked": {"type": "boolean"},
+        "device_fixture_checked": {"type": "boolean"},
+        "speed_level_checked": {"type": "boolean"}
+      }
+    }
+  }
+}
