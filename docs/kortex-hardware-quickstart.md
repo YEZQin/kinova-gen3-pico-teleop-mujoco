@@ -51,12 +51,22 @@ credential without echoing it, then run only the exact read-only path with
 `CONNECT` and save a new, non-overwriting report:
 
 ```powershell
-$env:KINOVA_PASSWORD = Read-Host 'Kortex password'
-python -m kinova_teleop.main `
-  --backend kortex --enable-hardware --check-kortex `
-  --robot-ip 192.168.1.10 --robot-user admin `
-  --preflight-json results\gen3-t0-read-only.json
+$securePassword = Read-Host 'Kortex password' -AsSecureString
+try {
+  $env:KINOVA_PASSWORD = [System.Net.NetworkCredential]::new('', $securePassword).Password
+  python -m kinova_teleop.main `
+    --backend kortex --enable-hardware --check-kortex `
+    --robot-ip 192.168.1.10 --robot-user admin `
+    --preflight-json results\gen3-t0-read-only.json
+} finally {
+  Remove-Item Env:KINOVA_PASSWORD -ErrorAction SilentlyContinue
+  $securePassword.Dispose()
+}
 ```
+
+The conversion exists only while the Python process runs; the value is neither
+printed nor persisted, and the environment entry is removed even if the
+read-only check fails.
 
 Confirm L53 / 7 DoF, firmware `2.8.0-5`, Running, Single Level Servoing,
 `SERVOING_READY`, and a finite pose. Do not continue if read-only cleanup
