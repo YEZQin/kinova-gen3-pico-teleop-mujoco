@@ -199,8 +199,12 @@ def _verify_source_continuity(
     source: XrInputSource,
     admission: InputAdmissionResult | None,
 ) -> None:
-    active_source, foreign_count = _observe_source_health(source)
     has_health = callable(getattr(source, "health", None))
+    if has_health and admission is None:
+        raise InputAdmissionError(
+            "prior admission is required for controller health recheck"
+        )
+    active_source, foreign_count = _observe_source_health(source)
     if active_source is None and has_health:
         raise InputAdmissionError("active controller source is unavailable")
     if admission is None:

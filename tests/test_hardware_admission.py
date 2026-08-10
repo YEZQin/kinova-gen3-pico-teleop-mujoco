@@ -235,3 +235,14 @@ def test_release_recheck_rejects_foreign_count_change_after_admission() -> None:
             admission=admission,
             timeout_s=0.5,
         )
+
+
+def test_release_recheck_requires_admission_for_health_capable_source() -> None:
+    source = MutableHealthSource([sample(timestamp_ns=4, grip=0.0)])
+
+    with pytest.raises(InputAdmissionError, match="prior admission"):
+        verify_released_now(
+            source,
+            after_timestamp_ns=3,
+            timeout_s=0.5,
+        )
