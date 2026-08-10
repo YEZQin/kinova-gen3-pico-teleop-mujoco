@@ -28,6 +28,7 @@ class InputAdmissionResult:
     last_timestamp_ns: int
     grip_released: bool
     active_source: tuple[str, int] | None
+    foreign_count: int | None = None
 
 
 def confirm_move(*, input_fn: Callable[[str], str] = input) -> None:
@@ -94,6 +95,7 @@ def wait_for_fresh_released_input(
         last_timestamp_ns=previous_timestamp,
         grip_released=True,
         active_source=active_source,
+        foreign_count=foreign_count,
     )
 
 
@@ -101,6 +103,7 @@ def verify_released_now(
     source: XrInputSource,
     *,
     after_timestamp_ns: int,
+    admission: InputAdmissionResult | None = None,
     timeout_s: float = 1.0,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -114,7 +117,7 @@ def verify_released_now(
         sample = _read_finite_sample(source)
         if _sample_timestamp(sample) <= after_timestamp_ns:
             raise InputAdmissionError("controller sample must be newer than admission")
-        _require_active_source_when_available(source)
+        _verify_source_continuity(source, admission)
         if float(sample.grip) >= _GRIP_RELEASE_THRESHOLD:
             raise InputAdmissionError("Grip must remain released after confirmation")
         return sample
@@ -192,7 +195,17 @@ def _observe_source_health(
     return active_source, foreign_count
 
 
-def _require_active_source_when_available(source: XrInputSource) -> None:
-    active_source, _ = _observe_source_health(source)
-    if active_source is None and callable(getattr(source, "health", None)):
+def _verify_source_continuity(
+    source: XrInputSource,
+    admission: InputAdmissionResult | None,
+) -> None:
+    active_source, foreign_count = _observe_source_health(source)
+    has_health = callable(getattr(source, "health", None))
+    if active_source is None and has_health:
         raise InputAdmissionError("active controller source is unavailable")
+    if admission is None:
+        return
+    if active_source != admission.active_source:
+        raise InputAdmissionError("controller source changed after admission")
+    if foreign_count != admission.foreign_count:
+        raise InputAdmissionError("foreign packet count changed after admission")

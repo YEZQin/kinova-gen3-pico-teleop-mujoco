@@ -135,13 +135,14 @@ class PicoUdpInput:
     ) -> bool:
         session_boundary = False
         if self._active_source is not None and frame.source != self._active_source:
+            same_device = frame.source[0] == self._active_source[0]
             if (
                 not recovering_from_stale
-                and frame.source[0] != self._active_source[0]
+                and not same_device
             ):
                 self._foreign += 1
                 return True
-            session_boundary = not recovering_from_stale
+            session_boundary = same_device
             self._clear_session()
 
         if not frame.tracked:

@@ -242,8 +242,8 @@ def test_healthy_different_ip_packet_remains_foreign_without_session_error() -> 
     assert source.health().last_error == ""
 
 
-def test_stale_handoff_queued_before_read_emits_boundary_before_valid_frame() -> None:
-    """Draining a recovery frame must not hide the already-stale session."""
+def test_stale_same_device_handoff_reports_source_changed_before_valid_frame() -> None:
+    """A stale endpoint change must retain its session-boundary diagnostic."""
     receiver = FakeReceiver([
         make_frame(
             sequence=100,
@@ -268,6 +268,7 @@ def test_stale_handoff_queued_before_read_emits_boundary_before_valid_frame() ->
 
     assert not source.read().valid
     assert source.health().active_source == ("10.0.0.2", 4000)
+    assert source.health().last_error == "source changed"
     assert source.read().valid
     assert source.health().rejected == 0
 

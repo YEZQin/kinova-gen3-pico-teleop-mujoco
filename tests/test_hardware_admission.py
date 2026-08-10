@@ -63,6 +63,20 @@ class HealthScriptedSource(ScriptedSource):
         return type("Health", (), {"active_source": source, "foreign": 0})()
 
 
+class MutableHealthSource(ScriptedSource):
+    def __init__(self, samples: list[ControllerSample]) -> None:
+        super().__init__(samples)
+        self.active_source = ("pico", 0)
+        self.foreign = 0
+
+    def health(self):
+        return type(
+            "Health",
+            (),
+            {"active_source": self.active_source, "foreign": self.foreign},
+        )()
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -175,3 +189,49 @@ def test_release_recheck_requires_a_newer_finite_sample() -> None:
         timeout_s=0.5,
     )
     assert result.timestamp_ns == 4
+
+
+def test_release_recheck_rejects_source_change_after_admission() -> None:
+    source = MutableHealthSource([
+        sample(timestamp_ns=1, grip=0.0),
+        sample(timestamp_ns=2, grip=0.0),
+        sample(timestamp_ns=3, grip=0.0),
+        sample(timestamp_ns=4, grip=0.0),
+    ])
+    admission = wait_for_fresh_released_input(
+        source,
+        sample_count=3,
+        timeout_s=1.0,
+    )
+    source.active_source = ("pico", 1)
+
+    with pytest.raises(InputAdmissionError, match="source changed"):
+        verify_released_now(
+            source,
+            after_timestamp_ns=admission.last_timestamp_ns,
+            admission=admission,
+            timeout_s=0.5,
+        )
+
+
+def test_release_recheck_rejects_foreign_count_change_after_admission() -> None:
+    source = MutableHealthSource([
+        sample(timestamp_ns=1, grip=0.0),
+        sample(timestamp_ns=2, grip=0.0),
+        sample(timestamp_ns=3, grip=0.0),
+        sample(timestamp_ns=4, grip=0.0),
+    ])
+    admission = wait_for_fresh_released_input(
+        source,
+        sample_count=3,
+        timeout_s=1.0,
+    )
+    source.foreign = 1
+
+    with pytest.raises(InputAdmissionError, match="foreign packet count changed"):
+        verify_released_now(
+            source,
+            after_timestamp_ns=admission.last_timestamp_ns,
+            admission=admission,
+            timeout_s=0.5,
+        )
