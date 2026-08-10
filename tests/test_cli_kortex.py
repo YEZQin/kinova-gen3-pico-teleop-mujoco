@@ -234,11 +234,21 @@ def test_preflight_report_gate_precedes_password_and_prompt(monkeypatch) -> None
 
 def test_check_kortex_uses_connect_and_read_only_rpc(monkeypatch) -> None:
     calls: list[str] = []
+    factory_kwargs: dict[str, object] = {}
 
     class Base:
         def GetArmState(self, *, options=None):
             calls.append("GetArmState")
             return SimpleNamespace(active_state=31)
+
+        def GetProductConfiguration(self, *, options=None):
+            return SimpleNamespace(model="MODEL_ID_L53", degree_of_freedom=7)
+
+        def GetOperatingMode(self, *, options=None):
+            return SimpleNamespace(operating_mode="RUN_MODE")
+
+        def GetServoingMode(self, *, options=None):
+            return SimpleNamespace(servoing_mode="SINGLE_LEVEL_SERVOING")
 
     class Cyclic:
         def RefreshFeedback(self, *, options=None):
@@ -251,20 +261,36 @@ def test_check_kortex_uses_connect_and_read_only_rpc(monkeypatch) -> None:
     class Connection:
         base = Base()
         base_cyclic = Cyclic()
-        base_pb2 = SimpleNamespace(ARMSTATE_SERVOING_READY=31, ARMSTATE_IN_FAULT=32)
+        base_pb2 = SimpleNamespace(
+            ARMSTATE_SERVOING_READY=31,
+            ARMSTATE_IN_FAULT=32,
+            RUN_MODE="RUN_MODE",
+            SINGLE_LEVEL_SERVOING="SINGLE_LEVEL_SERVOING",
+        )
+        device_config = SimpleNamespace(
+            GetFirmwareVersion=lambda **_: SimpleNamespace(firmware_version=0x05020800),
+        )
 
         def rpc_options(self):
             return SimpleNamespace(timeout_ms=100)
 
-        def close(self):
-            calls.append("close")
+        def readonly_rpc_options(self):
+            return SimpleNamespace(timeout_ms=5_000)
+
+        def close(self, *, send_stop=True):
+            calls.append(f"close:{send_stop}")
 
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("builtins.input", lambda prompt: "CONNECT")
-    monkeypatch.setattr("kinova_teleop.main._create_kortex_connection", lambda _config: Connection())
+    def create_connection(_config, **kwargs):
+        factory_kwargs.update(kwargs)
+        return Connection()
+
+    monkeypatch.setattr("kinova_teleop.main._create_kortex_connection", create_connection)
     assert main(["--backend", "kortex", "--enable-hardware", "--check-kortex"]) == 0
+    assert factory_kwargs == {"read_only": True}
     assert calls[:2] == ["GetArmState", "RefreshFeedback"]
-    assert "close" in calls
+    assert "close:False" in calls
 
 
 def test_check_kortex_cleanup_failure_is_fatal(monkeypatch, capsys) -> None:
@@ -287,14 +313,17 @@ def test_check_kortex_cleanup_failure_is_fatal(monkeypatch, capsys) -> None:
         def rpc_options(self):
             return SimpleNamespace(timeout_ms=100)
 
-        def close(self):
+        def close(self, *, send_stop=True):
             return False
 
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("builtins.input", lambda _prompt: "CONNECT")
-    monkeypatch.setattr("kinova_teleop.main._create_kortex_connection", lambda _config: Connection())
+    monkeypatch.setattr(
+        "kinova_teleop.main._create_kortex_connection",
+        lambda _config, **_kwargs: Connection(),
+    )
     assert main(["--backend", "kortex", "--enable-hardware", "--check-kortex"]) == 2
-    assert "motion stop may be unconfirmed" in capsys.readouterr().err
+    assert "error: cleanup failed" in capsys.readouterr().err
 
 
 def test_kortex_rejects_stale_timeout_above_200_ms_before_prompt_import_or_connect(

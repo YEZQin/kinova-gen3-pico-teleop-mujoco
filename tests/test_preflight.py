@@ -9,6 +9,7 @@ import pytest
 from kinova_teleop.preflight import (
     PreflightContext,
     load_passing_preflight_report,
+    require_live_kortex_ready,
     run_input_preflight,
     run_kortex_readonly_preflight,
 )
@@ -16,17 +17,45 @@ from kinova_teleop.xr_input import ControllerSample
 
 
 class RecordingConnection:
-    def __init__(self, arm_state: int = 31) -> None:
+    def __init__(
+        self,
+        arm_state: int = 31,
+        *,
+        model: str = "MODEL_ID_L53",
+        degree_of_freedom: int = 7,
+        firmware_raw: int = 0x05020800,
+        operating_mode: str = "RUN_MODE",
+        servoing_mode: str = "SINGLE_LEVEL_SERVOING",
+    ) -> None:
         self.calls: list[str] = []
-        self.base_pb2 = SimpleNamespace(ARMSTATE_SERVOING_READY=31, ARMSTATE_IN_FAULT=32)
+        self.base_pb2 = SimpleNamespace(
+            ARMSTATE_SERVOING_READY=31,
+            ARMSTATE_IN_FAULT=32,
+            RUN_MODE=41,
+            SINGLE_LEVEL_SERVOING=23,
+        )
         self.base = SimpleNamespace(
             GetArmState=self._get_arm_state,
+            GetProductConfiguration=self._get_product_configuration,
+            GetOperatingMode=self._get_operating_mode,
+            GetServoingMode=self._get_servoing_mode,
         )
         self.base_cyclic = SimpleNamespace(RefreshFeedback=self._refresh_feedback)
+        self.device_config = SimpleNamespace(
+            GetFirmwareVersion=self._get_firmware_version,
+        )
         self.arm_state = arm_state
+        self.model = model
+        self.degree_of_freedom = degree_of_freedom
+        self.firmware_raw = firmware_raw
+        self.operating_mode = operating_mode
+        self.servoing_mode = servoing_mode
 
     def rpc_options(self) -> SimpleNamespace:
         return SimpleNamespace(timeout_ms=100)
+
+    def readonly_rpc_options(self) -> SimpleNamespace:
+        return SimpleNamespace(timeout_ms=5_000)
 
     def _get_arm_state(self, *, options=None):
         self.calls.append("GetArmState")
@@ -42,6 +71,26 @@ class RecordingConnection:
             tool_pose_theta_y=0.0,
             tool_pose_theta_z=0.0,
         ))
+
+    def _get_product_configuration(self, *, options=None):
+        self.calls.append("GetProductConfiguration")
+        return SimpleNamespace(
+            model=self.model,
+            degree_of_freedom=self.degree_of_freedom,
+            serial_number="PRIVATE-SERIAL-MUST-NOT-LEAK",
+        )
+
+    def _get_operating_mode(self, *, options=None):
+        self.calls.append("GetOperatingMode")
+        return SimpleNamespace(operating_mode=self.operating_mode)
+
+    def _get_servoing_mode(self, *, options=None):
+        self.calls.append("GetServoingMode")
+        return SimpleNamespace(servoing_mode=self.servoing_mode)
+
+    def _get_firmware_version(self, *, options=None):
+        self.calls.append("GetFirmwareVersion")
+        return SimpleNamespace(firmware_version=self.firmware_raw)
 
 
 def preflight_context() -> PreflightContext:
@@ -69,11 +118,65 @@ def preflight_context() -> PreflightContext:
     )
 
 
-def test_readonly_preflight_reads_state_and_feedback_without_clear_or_servo_mode():
+def test_readonly_preflight_reads_current_state_without_clear_or_servo_mode():
     connection = RecordingConnection()
     report = run_kortex_readonly_preflight(connection, preflight_context())
     assert report.passed is True
-    assert connection.calls == ["GetArmState", "RefreshFeedback"]
+    assert connection.calls == [
+        "GetArmState",
+        "GetProductConfiguration",
+        "GetOperatingMode",
+        "GetServoingMode",
+        "GetFirmwareVersion",
+        "RefreshFeedback",
+    ]
+
+
+def test_readonly_preflight_requires_l53_7dof_running_single_level() -> None:
+    connection = RecordingConnection(
+        model="MODEL_ID_L53",
+        degree_of_freedom=7,
+        firmware_raw=0x05020800,
+        operating_mode="RUN_MODE",
+        servoing_mode="SINGLE_LEVEL_SERVOING",
+    )
+
+    report = run_kortex_readonly_preflight(connection, preflight_context())
+
+    statuses = {check.name: check.status for check in report.checks}
+    assert statuses["product_model"] == "pass"
+    assert statuses["degree_of_freedom"] == "pass"
+    assert statuses["firmware_version"] == "pass"
+    assert statuses["operating_mode"] == "pass"
+    assert statuses["servoing_mode"] == "pass"
+    require_live_kortex_ready(report)
+
+
+def test_readonly_preflight_uses_device_specific_enum_modules() -> None:
+    """Base enums must not override the DeviceConfig/ProductConfiguration IDs."""
+
+    connection = RecordingConnection(model=1, operating_mode=6)
+    connection.base_pb2 = SimpleNamespace(
+        ARMSTATE_SERVOING_READY=31,
+        RUN_MODE=6,
+        SINGLE_LEVEL_SERVOING=23,
+    )
+    connection.product_configuration_pb2 = SimpleNamespace(MODEL_ID_L53=1)
+
+    report = run_kortex_readonly_preflight(connection, preflight_context())
+
+    statuses = {check.name: check.status for check in report.checks}
+    assert statuses["product_model"] == "pass"
+    assert statuses["operating_mode"] == "pass"
+
+
+def test_preflight_report_omits_unique_device_identifiers() -> None:
+    mapping = run_kortex_readonly_preflight(
+        RecordingConnection(), preflight_context()
+    ).to_mapping()
+    serialized = json.dumps(mapping).lower()
+    assert "serial" not in serialized
+    assert "mac" not in serialized
 
 
 def test_report_mapping_has_central_preflight_fields():
@@ -116,11 +219,22 @@ def test_passing_preflight_report_rejects_unknown_physical_check(tmp_path):
         load_passing_preflight_report(path)
 
 
-def test_passing_preflight_report_requires_complete_kortex_checks(tmp_path):
+@pytest.mark.parametrize(
+    "required_check",
+    (
+        "feedback_pose",
+        "product_model",
+        "degree_of_freedom",
+        "firmware_version",
+        "operating_mode",
+        "servoing_mode",
+    ),
+)
+def test_passing_preflight_report_requires_complete_kortex_checks(tmp_path, required_check):
     payload = run_kortex_readonly_preflight(RecordingConnection(), preflight_context()).to_mapping()
     payload["passed"] = True
     payload["checks"] = [
-        check for check in payload["checks"] if check["name"] != "feedback_pose"
+        check for check in payload["checks"] if check["name"] != required_check
     ]
     path = tmp_path / "missing-check.json"
     path.write_text(json.dumps(payload), encoding="utf-8")

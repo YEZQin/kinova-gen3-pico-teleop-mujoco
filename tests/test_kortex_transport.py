@@ -74,6 +74,10 @@ def _factories(
         def __init__(self, router):
             events.append("cyclic.create")
 
+    class DeviceConfigClient:
+        def __init__(self, router):
+            events.append("device-config.create")
+
     class CreateSessionInfo:
         username = ""
         password = ""
@@ -86,6 +90,7 @@ def _factories(
         session_manager=SessionManager,
         base_client=BaseClient,
         base_cyclic_client=BaseCyclicClient,
+        device_config_client=DeviceConfigClient,
         create_session_info=CreateSessionInfo,
         create_send_options=SendOptions,
         base_pb2=SimpleNamespace(),
@@ -107,12 +112,31 @@ def test_connect_uses_tcp_10000_and_close_stops_then_reverses_lifecycle():
         ("transport.connect", "192.0.2.10", 10000),
         ("router.create", connection.factories.router.basicErrorCallback),
         "session.create",
-        ("session.open", "operator", "secret", 10_000, 2_000, 100),
+        ("session.open", "operator", "secret", 10_000, 2_000, 5_000),
         "base.create",
         "cyclic.create",
+        "device-config.create",
         ("stop.timeout", 100),
         "base.stop",
-        ("session.close", 100),
+        ("session.close", 5_000),
+        ("router.active", False),
+        "transport.disconnect",
+    ]
+
+
+def test_readonly_cleanup_never_sends_stop_or_motion() -> None:
+    """A read-only session must only close its own transport resources."""
+
+    events: list[object] = []
+    connection = KortexConnection(
+        KortexConfig("192.0.2.10", "operator", "secret"),
+        factories=_factories(events),
+    ).connect()
+
+    assert connection.close(send_stop=False)
+    assert "base.stop" not in events
+    assert events[-3:] == [
+        ("session.close", 5_000),
         ("router.active", False),
         "transport.disconnect",
     ]
@@ -132,7 +156,7 @@ def test_connect_error_redacts_password_and_cleans_up_partial_connection():
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
     assert events[-3:] == [
-        ("session.close", 100),
+        ("session.close", 5_000),
         ("router.active", False),
         "transport.disconnect",
     ]
@@ -152,6 +176,7 @@ def test_base_cyclic_creation_failure_stops_before_disconnect():
         session_manager=factories.session_manager,
         base_client=factories.base_client,
         base_cyclic_client=fail_cyclic,
+        device_config_client=factories.device_config_client,
         create_session_info=factories.create_session_info,
         create_send_options=factories.create_send_options,
         base_pb2=factories.base_pb2,
@@ -168,7 +193,7 @@ def test_base_cyclic_creation_failure_stops_before_disconnect():
         "cyclic.create.failed",
         ("stop.timeout", 100),
         "base.stop",
-        ("session.close", 100),
+        ("session.close", 5_000),
         ("router.active", False),
         "transport.disconnect",
     ]
@@ -192,6 +217,7 @@ def test_connection_error_preserves_unconfirmed_stop_without_leaking_secret():
         session_manager=factories.session_manager,
         base_client=factories.base_client,
         base_cyclic_client=fail_cyclic,
+        device_config_client=factories.device_config_client,
         create_session_info=factories.create_session_info,
         create_send_options=factories.create_send_options,
         base_pb2=factories.base_pb2,
@@ -207,6 +233,43 @@ def test_connection_error_preserves_unconfirmed_stop_without_leaking_secret():
     assert "Stop attempted but unconfirmed" in str(error.value)
     assert "top-secret" not in str(error.value)
     assert connection.stop_confirmed is False
+
+
+def test_readonly_connection_failure_never_sends_stop() -> None:
+    """A partial read-only setup must close transport resources without Stop."""
+
+    events: list[object] = []
+    factories = _factories(events)
+
+    def fail_cyclic(router):
+        events.append("cyclic.create.failed")
+        raise RuntimeError("cyclic unavailable")
+
+    readonly_factories = KortexFactories(
+        transport=factories.transport,
+        router=factories.router,
+        session_manager=factories.session_manager,
+        base_client=factories.base_client,
+        base_cyclic_client=fail_cyclic,
+        device_config_client=factories.device_config_client,
+        create_session_info=factories.create_session_info,
+        create_send_options=factories.create_send_options,
+        base_pb2=factories.base_pb2,
+    )
+    connection = KortexConnection(
+        KortexConfig("192.0.2.10", "operator", "secret"),
+        factories=readonly_factories,
+    )
+
+    with pytest.raises(RuntimeError, match="cyclic unavailable"):
+        connection.connect(send_stop_on_failure=False)
+
+    assert "base.stop" not in events
+    assert events[-3:] == [
+        ("session.close", 5_000),
+        ("router.active", False),
+        "transport.disconnect",
+    ]
 
 
 def test_connection_keyboard_interrupt_cleans_up_then_propagates_unchanged():
@@ -225,6 +288,7 @@ def test_connection_keyboard_interrupt_cleans_up_then_propagates_unchanged():
         session_manager=factories.session_manager,
         base_client=factories.base_client,
         base_cyclic_client=interrupt_cyclic,
+        device_config_client=factories.device_config_client,
         create_session_info=factories.create_session_info,
         create_send_options=factories.create_send_options,
         base_pb2=factories.base_pb2,
@@ -241,7 +305,7 @@ def test_connection_keyboard_interrupt_cleans_up_then_propagates_unchanged():
         "cyclic.create.interrupted",
         ("stop.timeout", 100),
         "base.stop",
-        ("session.close", 100),
+        ("session.close", 5_000),
         ("router.active", False),
         "transport.disconnect",
     ]

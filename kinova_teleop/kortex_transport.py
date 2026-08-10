@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 RPC_TIMEOUT_MS = 100
+SESSION_RPC_TIMEOUT_MS = 5_000
+READONLY_RPC_TIMEOUT_MS = 5_000
 
 
 @dataclass(frozen=True)
@@ -29,9 +31,11 @@ class KortexFactories:
     session_manager: Callable[[Any], Any]
     base_client: Callable[[Any], Any]
     base_cyclic_client: Callable[[Any], Any]
+    device_config_client: Callable[[Any], Any]
     create_session_info: Callable[[], Any]
     create_send_options: Callable[[], Any]
     base_pb2: Any
+    product_configuration_pb2: Any | None = None
 
 
 def _sdk_factories() -> KortexFactories:
@@ -42,7 +46,12 @@ def _sdk_factories() -> KortexFactories:
     from kortex_api.TCPTransport import TCPTransport
     from kortex_api.autogen.client_stubs.BaseClientRpc import BaseClient
     from kortex_api.autogen.client_stubs.BaseCyclicClientRpc import BaseCyclicClient
-    from kortex_api.autogen.messages import Base_pb2, Session_pb2
+    from kortex_api.autogen.client_stubs.DeviceConfigClientRpc import DeviceConfigClient
+    from kortex_api.autogen.messages import (
+        Base_pb2,
+        ProductConfiguration_pb2,
+        Session_pb2,
+    )
 
     return KortexFactories(
         transport=TCPTransport,
@@ -50,9 +59,11 @@ def _sdk_factories() -> KortexFactories:
         session_manager=SessionManager,
         base_client=BaseClient,
         base_cyclic_client=BaseCyclicClient,
+        device_config_client=DeviceConfigClient,
         create_session_info=Session_pb2.CreateSessionInfo,
         create_send_options=RouterClientSendOptions,
         base_pb2=Base_pb2,
+        product_configuration_pb2=ProductConfiguration_pb2,
     )
 
 
@@ -72,7 +83,9 @@ class KortexConnection:
         self.session_manager: Any | None = None
         self.base: Any | None = None
         self.base_cyclic: Any | None = None
+        self.device_config: Any | None = None
         self.base_pb2: Any | None = None
+        self.product_configuration_pb2: Any | None = None
         self._connected = False
         self._closed = False
         self.stop_confirmed = True
@@ -83,7 +96,7 @@ class KortexConnection:
             self._factories = _sdk_factories()
         return self._factories
 
-    def connect(self) -> KortexConnection:
+    def connect(self, *, send_stop_on_failure: bool = True) -> KortexConnection:
         if self._connected:
             return self
         if self._closed:
@@ -114,15 +127,19 @@ class KortexConnection:
             )
             self.session_manager.CreateSession(
                 session_info,
-                options=self.rpc_options(),
+                options=self.session_rpc_options(),
             )
 
             self.base = factories.base_client(self.router)
             self.base_cyclic = factories.base_cyclic_client(self.router)
+            self.device_config = factories.device_config_client(self.router)
             self.base_pb2 = factories.base_pb2
+            self.product_configuration_pb2 = factories.product_configuration_pb2
             self._connected = True
         except BaseException as error:
-            stop_confirmed = self._cleanup(stop=self.base is not None)
+            stop_confirmed = self._cleanup(
+                stop=send_stop_on_failure and self.base is not None
+            )
             if not isinstance(error, Exception):
                 raise
             safe_message = str(error)
@@ -140,6 +157,16 @@ class KortexConnection:
         options.timeout_ms = RPC_TIMEOUT_MS
         return options
 
+    def session_rpc_options(self) -> Any:
+        options = self.factories.create_send_options()
+        options.timeout_ms = SESSION_RPC_TIMEOUT_MS
+        return options
+
+    def readonly_rpc_options(self) -> Any:
+        options = self.factories.create_send_options()
+        options.timeout_ms = READONLY_RPC_TIMEOUT_MS
+        return options
+
     def _cleanup(self, *, stop: bool) -> bool:
         stop_confirmed = not stop
         if stop and self.base is not None:
@@ -150,7 +177,7 @@ class KortexConnection:
                 stop_confirmed = False
         if self.session_manager is not None:
             try:
-                self.session_manager.CloseSession(options=self.rpc_options())
+                self.session_manager.CloseSession(options=self.session_rpc_options())
             except BaseException:
                 pass
         if self.router is not None:
@@ -171,6 +198,8 @@ class KortexConnection:
 
         self.base_cyclic = None
         self.base = None
+        self.device_config = None
+        self.product_configuration_pb2 = None
         self.session_manager = None
         self.router = None
         self.transport = None
@@ -178,10 +207,10 @@ class KortexConnection:
         self.stop_confirmed = stop_confirmed
         return stop_confirmed
 
-    def close(self) -> bool:
+    def close(self, *, send_stop: bool = True) -> bool:
         """Stop first, then close all SDK resources in reverse order."""
 
         if self._closed:
             return self.stop_confirmed
         self._closed = True
-        return self._cleanup(stop=True)
+        return self._cleanup(stop=send_stop)

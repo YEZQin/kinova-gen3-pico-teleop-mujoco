@@ -260,17 +260,33 @@ def _feedback_values(feedback: Any) -> tuple[np.ndarray, np.ndarray]:
     return position, angles
 
 
+def decode_firmware_version(raw: int) -> str:
+    """Format the packed Kortex firmware integer without recording device IDs."""
+
+    build = (raw >> 24) & 0xFF
+    major = (raw >> 16) & 0xFF
+    minor = (raw >> 8) & 0xFF
+    patch = raw & 0xFF
+    return f"{major}.{minor}.{patch}-{build}"
+
+
+def _matches_kortex_enum(value: Any, constants: Any, name: str) -> bool:
+    expected = getattr(constants, name, name)
+    return value == expected or value == name
+
+
 def run_kortex_readonly_preflight(
     connection: Any,
     context: PreflightContext,
     *,
     monotonic: Callable[[], float] | None = None,
 ) -> PreflightReport:
-    """Read arm state and one feedback frame; never clear faults or servo."""
+    """Read current Gen3 state only; never clear faults, servo, or move."""
 
     checks = _context_checks(context)
     try:
-        state_response = connection.base.GetArmState(options=connection.rpc_options())
+        options = connection.readonly_rpc_options()
+        state_response = connection.base.GetArmState(options=options)
         active_state = getattr(state_response, "active_state", None)
         ready_state = getattr(connection.base_pb2, "ARMSTATE_SERVOING_READY", None)
         if active_state == ready_state or active_state == "ARMSTATE_SERVOING_READY":
@@ -279,7 +295,55 @@ def run_kortex_readonly_preflight(
             checks.append(PreflightCheck("arm_state", "unknown", "ready state constant is missing"))
         else:
             checks.append(PreflightCheck("arm_state", "fail", f"arm state is {active_state!r}"))
-        feedback = connection.base_cyclic.RefreshFeedback(options=connection.rpc_options())
+        product = connection.base.GetProductConfiguration(options=options)
+        product_constants = (
+            getattr(connection, "product_configuration_pb2", None)
+            or connection.base_pb2
+        )
+        if _matches_kortex_enum(product.model, product_constants, "MODEL_ID_L53"):
+            checks.append(PreflightCheck("product_model", "pass", "MODEL_ID_L53"))
+        else:
+            checks.append(PreflightCheck("product_model", "fail", "expected MODEL_ID_L53"))
+        if getattr(product, "degree_of_freedom", None) == 7:
+            checks.append(PreflightCheck("degree_of_freedom", "pass", "7 DoF"))
+        else:
+            checks.append(PreflightCheck("degree_of_freedom", "fail", "expected 7 DoF"))
+
+        operating_mode = connection.base.GetOperatingMode(options=options)
+        current_operating_mode = getattr(
+            operating_mode,
+            "operating_mode",
+            getattr(operating_mode, "run_mode", None),
+        )
+        if _matches_kortex_enum(
+            current_operating_mode, connection.base_pb2, "RUN_MODE"
+        ):
+            checks.append(PreflightCheck("operating_mode", "pass", "RUN_MODE"))
+        else:
+            checks.append(PreflightCheck("operating_mode", "fail", "expected RUN_MODE"))
+
+        servoing_mode = connection.base.GetServoingMode(options=options)
+        if _matches_kortex_enum(
+            getattr(servoing_mode, "servoing_mode", None),
+            connection.base_pb2,
+            "SINGLE_LEVEL_SERVOING",
+        ):
+            checks.append(
+                PreflightCheck("servoing_mode", "pass", "SINGLE_LEVEL_SERVOING")
+            )
+        else:
+            checks.append(
+                PreflightCheck("servoing_mode", "fail", "expected SINGLE_LEVEL_SERVOING")
+            )
+
+        firmware = connection.device_config.GetFirmwareVersion(options=options)
+        firmware_raw = getattr(firmware, "firmware_version", None)
+        if isinstance(firmware_raw, int) and decode_firmware_version(firmware_raw) == "2.8.0-5":
+            checks.append(PreflightCheck("firmware_version", "pass", "2.8.0-5"))
+        else:
+            checks.append(PreflightCheck("firmware_version", "fail", "expected 2.8.0-5"))
+
+        feedback = connection.base_cyclic.RefreshFeedback(options=options)
         position, angles = _feedback_values(feedback)
         if np.isfinite(position).all() and np.isfinite(angles).all():
             checks.append(PreflightCheck("feedback_pose", "pass", "finite tool pose"))
@@ -289,6 +353,23 @@ def run_kortex_readonly_preflight(
         # Do not expose arbitrary SDK text: it may contain credentials or host details.
         checks.append(PreflightCheck("kortex_rpc", "fail", f"read-only RPC failed: {type(error).__name__}"))
     return _make_report(context, checks)
+
+
+def require_live_kortex_ready(report: PreflightReport) -> None:
+    """Reject motion admission without passing current-session Kortex evidence."""
+
+    required = {
+        "arm_state",
+        "feedback_pose",
+        "product_model",
+        "degree_of_freedom",
+        "firmware_version",
+        "operating_mode",
+        "servoing_mode",
+    }
+    statuses = {check.name: check.status for check in report.checks}
+    if any(statuses.get(name) != "pass" for name in required):
+        raise ValueError("current Kortex read-only preflight is not motion-ready")
 
 
 def run_input_preflight(
@@ -390,6 +471,11 @@ _GEN3_KORTEX_REQUIRED_CHECKS = frozenset(
         "safety_limits",
         "arm_state",
         "feedback_pose",
+        "product_model",
+        "degree_of_freedom",
+        "firmware_version",
+        "operating_mode",
+        "servoing_mode",
     }
 )
 _PLACEHOLDER_MARKERS = (

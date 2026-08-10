@@ -65,12 +65,12 @@ class _BackendDefaultsParser(argparse.ArgumentParser):
         return parsed, extras
 
 
-def _create_kortex_connection(config: Any) -> Any:
+def _create_kortex_connection(config: Any, *, read_only: bool = False) -> Any:
     """Construct the optional Kortex transport after the hardware gate passes."""
 
     from .kortex_transport import KortexConnection
 
-    return KortexConnection(config).connect()
+    return KortexConnection(config).connect(send_stop_on_failure=not read_only)
 
 
 def _create_kortex_backend(connection: Any, **kwargs: Any) -> Any:
@@ -565,7 +565,8 @@ def _run_kortex_readonly_check(args: argparse.Namespace, password: str) -> int:
         from .kortex_transport import KortexConfig
 
         connection = _create_kortex_connection(
-            KortexConfig(args.robot_ip, args.robot_user, password)
+            KortexConfig(args.robot_ip, args.robot_user, password),
+            read_only=True,
         )
         report = run_kortex_readonly_preflight(connection, _preflight_context(args))
         if args.preflight_json is not None:
@@ -581,16 +582,21 @@ def _run_kortex_readonly_check(args: argparse.Namespace, password: str) -> int:
         print(f"error: Kortex read-only preflight failed ({type(error).__name__})", file=sys.stderr)
     finally:
         if connection is not None:
-            if not _close_resource(connection, hardware=True):
+            if not _close_resource(connection, hardware=False, send_stop=False):
                 exit_code = 2
     return exit_code
 
 
-def _close_resource(resource: Any, *, hardware: bool) -> bool:
+def _close_resource(
+    resource: Any,
+    *,
+    hardware: bool,
+    send_stop: bool | None = None,
+) -> bool:
     """Attempt one close operation and report whether it completed safely."""
 
     try:
-        result = resource.close()
+        result = resource.close() if send_stop is None else resource.close(send_stop=send_stop)
     except BaseException:
         message = (
             "error: Kortex cleanup failed; motion stop may be unconfirmed"
