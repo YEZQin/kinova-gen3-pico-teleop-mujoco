@@ -246,6 +246,55 @@ def test_workspace_rejection_stops_before_feedback_or_twist():
     assert connection.base_cyclic.options == []
     assert connection.base.sent == []
     assert connection.base.stop_count == 1
+    assert backend.fault_reason == "target outside workspace"
+
+
+def test_stale_workspace_rejection_cannot_fault_new_rearmed_generation(
+    monkeypatch,
+):
+    evaluation_started = threading.Event()
+    release_evaluation = threading.Event()
+    connection = _Connection(_feedback((0.0, 0.0, 0.3)))
+    backend = _backend(
+        connection,
+        workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
+    )
+    _begin_pose_control(backend)
+    real_validate = kortex_backend_module.validate_target_pose
+
+    def blocking_validate(target, limits):
+        evaluation_started.set()
+        assert release_evaluation.wait(timeout=1.0)
+        return real_validate(target, limits)
+
+    monkeypatch.setattr(
+        kortex_backend_module,
+        "validate_target_pose",
+        blocking_validate,
+    )
+    results = []
+    errors = []
+    stale_command = threading.Thread(
+        target=lambda: _capture_result_or_error(
+            lambda: backend.command_pose(_target(position=(1.0, 0.0, 0.3))),
+            results,
+            errors,
+        )
+    )
+    stale_command.start()
+    assert evaluation_started.wait(timeout=1.0)
+
+    backend.hold()
+    _begin_pose_control(backend)
+    release_evaluation.set()
+    stale_command.join(timeout=1.0)
+
+    assert not stale_command.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    assert results[0].accepted is False
+    assert backend.fault_reason is None
+    assert connection.base.stop_count == 1
 
 
 def test_command_without_rearm_anchor_faults_before_feedback_or_twist():
@@ -494,8 +543,27 @@ def test_watchdog_crossing_200_ms_stops_once_and_latches():
     backend.check_watchdog()
 
     assert connection.base.stop_count == 1
-    assert backend.command_pose(_target(position=(0.02, 0.0, 0.0))).converged is False
+    assert backend.fault_reason == "watchdog timeout"
+    with pytest.raises(KortexSafetyError, match="watchdog timeout"):
+        backend.command_pose(_target(position=(0.02, 0.0, 0.0)))
+    with pytest.raises(KortexSafetyError, match="latched"):
+        backend.begin_control()
     assert len(connection.base.sent) == 1
+
+
+def test_watchdog_fault_surfaces_from_current_pose_and_step():
+    clock = _Clock()
+    connection = _Connection(_feedback())
+    backend = _backend(connection, monotonic=clock)
+    _begin_pose_control(backend)
+    backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+    clock.now = 0.200001
+    backend.check_watchdog()
+
+    with pytest.raises(KortexSafetyError, match="watchdog timeout"):
+        backend.current_pose()
+    with pytest.raises(KortexSafetyError, match="watchdog timeout"):
+        backend.step()
 
 
 def test_fresh_successful_command_resets_watchdog_deadline():
@@ -631,9 +699,12 @@ def test_blocked_send_has_bounded_options_and_watchdog_latches_before_stop_rpc()
     watchdog = threading.Thread(target=backend.check_watchdog)
     watchdog.start()
     rejected_result = []
+    rejected_errors = []
     later_command = threading.Thread(
-        target=lambda: rejected_result.append(
-            backend.command_pose(_target(position=(0.03, 0.0, 0.0)))
+        target=lambda: _capture_result_or_error(
+            lambda: backend.command_pose(_target(position=(0.03, 0.0, 0.0))),
+            rejected_result,
+            rejected_errors,
         )
     )
     later_command.start()
@@ -641,7 +712,9 @@ def test_blocked_send_has_bounded_options_and_watchdog_latches_before_stop_rpc()
 
     try:
         assert not later_command.is_alive()
-        assert rejected_result[0].converged is False
+        assert rejected_result == []
+        assert len(rejected_errors) == 1
+        assert "watchdog timeout" in str(rejected_errors[0])
         assert backend.stop_requested is True
     finally:
         release_send.set()
@@ -692,6 +765,9 @@ def test_watchdog_stop_exception_does_not_escape_and_is_retried():
 
     backend.check_watchdog()
     assert backend.stop_confirmed is False
+    assert backend.fault_reason == "Stop attempted but unconfirmed"
+    with pytest.raises(KortexSafetyError, match="Stop attempted but unconfirmed"):
+        backend.step()
     backend.check_watchdog()
 
     assert backend.stop_confirmed is True
@@ -750,6 +826,9 @@ def test_watchdog_thread_construction_failure_attempts_stop(monkeypatch):
 
     assert connection.base.stop_count == 1
     assert backend.stop_confirmed is True
+    assert backend.fault_reason == "watchdog unavailable"
+    with pytest.raises(KortexSafetyError, match="latched"):
+        backend.begin_control()
 
 
 def test_watchdog_thread_that_never_reports_ready_stops_before_first_nonzero_send(
@@ -1040,14 +1119,18 @@ def test_command_failure_after_close_token_cannot_override_close_confirmation():
         raise RuntimeError("send failed")
 
     connection.base.SendTwistCommand = failing_send
-    original_request_stop = backend._request_stop
+    original_latch_fault = backend._latch_fault_and_stop
 
-    def delayed_failure_request(*, force):
+    def delayed_failure_latch(reason, *, generation=None, require_active=True):
         failure_request_entered.set()
         assert allow_failure_request.wait(timeout=1.0)
-        return original_request_stop(force=force)
+        return original_latch_fault(
+            reason,
+            generation=generation,
+            require_active=require_active,
+        )
 
-    backend._request_stop = delayed_failure_request
+    backend._latch_fault_and_stop = delayed_failure_latch
 
     def successful_clearing_close():
         connection.closed += 1
@@ -1095,6 +1178,13 @@ def test_command_failure_after_close_token_cannot_override_close_confirmation():
 def _capture_error(call, errors):
     try:
         call()
+    except BaseException as error:
+        errors.append(error)
+
+
+def _capture_result_or_error(call, results, errors):
+    try:
+        results.append(call())
     except BaseException as error:
         errors.append(error)
 

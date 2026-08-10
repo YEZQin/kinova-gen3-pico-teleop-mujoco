@@ -30,6 +30,15 @@ class ClutchState(str, Enum):
     ACTIVE = "active"
 
 
+class InputFault(str, Enum):
+    """Stable classification for input conditions that deactivate mapping."""
+
+    NONE = "none"
+    INVALID = "invalid"
+    STALE = "stale"
+    SOURCE_CHANGED = "source_changed"
+
+
 @dataclass(frozen=True)
 class MappingConfig:
     translation_scale: float = 1.0
@@ -61,6 +70,7 @@ class MappingOutput:
     activated: bool
     deactivated: bool
     stale: bool
+    input_fault: InputFault = InputFault.NONE
 
 
 def normalize_quat(quaternion: np.ndarray) -> np.ndarray:
@@ -261,7 +271,7 @@ class RelativePoseMapper:
         self._last_fresh_time = None
         self._last_update_time = None
 
-    def _deactivate(self, stale: bool) -> MappingOutput:
+    def _deactivate(self, stale: bool, input_fault: InputFault) -> MappingOutput:
         was_active = self.clutch_state is ClutchState.ACTIVE
         self.clutch_state = ClutchState.WAITING_FOR_RELEASE
         self._controller_reference = None
@@ -278,6 +288,7 @@ class RelativePoseMapper:
             activated=False,
             deactivated=was_active,
             stale=stale,
+            input_fault=input_fault,
         )
 
     def update(
@@ -317,15 +328,24 @@ class RelativePoseMapper:
             self._last_fresh_time is None
             or now - self._last_fresh_time > self.config.stale_timeout
         )
-        if not sample_valid or stale:
-            return self._deactivate(stale=stale)
+        if not sample_valid:
+            invalid_reason = str(getattr(sample, "invalid_reason", ""))
+            if invalid_reason == "stream is stale":
+                input_fault = InputFault.STALE
+            elif invalid_reason == "source changed":
+                input_fault = InputFault.SOURCE_CHANGED
+            else:
+                input_fault = InputFault.INVALID
+            return self._deactivate(stale=stale, input_fault=input_fault)
+        if stale:
+            return self._deactivate(stale=True, input_fault=InputFault.STALE)
 
         try:
             controller_pose = transform_controller_pose(
                 sample.position, sample.quaternion_xyzw
             )
         except ValueError:
-            return self._deactivate(stale=False)
+            return self._deactivate(stale=False, input_fault=InputFault.INVALID)
 
         grip = float(sample.grip)
         if self.clutch_state is ClutchState.WAITING_FOR_RELEASE:

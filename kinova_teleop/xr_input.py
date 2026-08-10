@@ -26,6 +26,7 @@ class ControllerSample:
     received_monotonic: float
     valid: bool = True
     trigger: float = 0.0
+    invalid_reason: str = ""
 
 
 class XrInputSource(Protocol):

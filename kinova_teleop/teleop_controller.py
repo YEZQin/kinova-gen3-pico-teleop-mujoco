@@ -9,7 +9,13 @@ import time
 from collections.abc import Mapping
 
 from .backend import BackendResult, EndEffectorTargetBackend
-from .pose_mapping import ClutchState, MappingConfig, Pose, RelativePoseMapper
+from .pose_mapping import (
+    ClutchState,
+    InputFault,
+    MappingConfig,
+    Pose,
+    RelativePoseMapper,
+)
 from .xr_input import XrInputSource
 
 
@@ -20,6 +26,11 @@ class TeleopConfig:
     translation_scale: float = 0.5
     stale_timeout: float = 0.2
     gripper: bool = False
+    fatal_input_faults: bool = False
+
+
+class TeleopSafetyError(RuntimeError):
+    """A hardware teleoperation safety policy stopped the control loop."""
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,23 @@ class TeleopController:
             else float(sample.received_monotonic)
         )
         mapping = self.mapper.update(sample, self._begin_anchor_transaction, now)
+
+        if (
+            mapping.input_fault is not InputFault.NONE
+            and self.config.fatal_input_faults
+        ):
+            self._emit(
+                "input_fault",
+                "FAULTED",
+                {"reason": mapping.input_fault.value},
+            )
+            try:
+                self.backend.hold()
+            except BaseException as error:
+                raise TeleopSafetyError("Stop attempted but unconfirmed") from error
+            raise TeleopSafetyError(
+                f"fatal input fault: {mapping.input_fault.value}"
+            )
 
         if mapping.active:
             result = self.backend.command_pose(mapping.target)

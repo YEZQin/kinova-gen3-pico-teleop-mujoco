@@ -5,6 +5,7 @@ import pytest
 
 from kinova_teleop.pose_mapping import (
     ClutchState,
+    InputFault,
     PICO_TO_WORLD,
     MappingConfig,
     Pose,
@@ -25,6 +26,7 @@ def sample(
     stamp=1,
     received=0.0,
     valid=True,
+    invalid_reason="",
 ):
     return SimpleNamespace(
         position=np.asarray(position, dtype=np.float64),
@@ -33,7 +35,30 @@ def sample(
         timestamp_ns=int(stamp),
         received_monotonic=float(received),
         valid=bool(valid),
+        invalid_reason=str(invalid_reason),
     )
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        pytest.param("stream is stale", InputFault.STALE, id="stale"),
+        pytest.param("source changed", InputFault.SOURCE_CHANGED, id="source-changed"),
+        pytest.param("controller is untracked", InputFault.INVALID, id="invalid"),
+    ],
+)
+def test_invalid_sample_reason_maps_to_stable_input_fault(reason, expected) -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    ee = identity_pose()
+    mapper.reset(ee)
+
+    output = mapper.update(
+        sample([0.0, 0.0, 0.0], valid=False, invalid_reason=reason),
+        ee,
+        now=0.0,
+    )
+
+    assert output.input_fault is expected
 
 
 def identity_pose(position=(0.0, 0.0, 0.0)) -> Pose:

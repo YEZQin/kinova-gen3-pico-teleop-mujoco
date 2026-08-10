@@ -103,12 +103,18 @@ class PicoUdpInput:
 
         now = self._clock()
         stale = self._is_stale(now)
+        invalid_reason = "stream is stale" if emit_stale_boundary else ""
         if source_changed:
             self._last_error = "source changed"
         if stale and not self._last_error:
             self._last_error = "stream is stale"
         if had_invalid or stale or self._last_valid is None:
-            return self._inactive_sample(now)
+            sample_reason = (
+                "source changed"
+                if source_changed
+                else invalid_reason or self._last_error
+            )
+            return self._inactive_sample(now, sample_reason)
         return self._sample_from(self._last_valid)
 
     def health(self) -> PicoStreamHealth:
@@ -203,7 +209,7 @@ class PicoUdpInput:
         return self._last_valid is None or now - self._last_valid.received_at > self._stale_after
 
     @staticmethod
-    def _inactive_sample(now: float) -> ControllerSample:
+    def _inactive_sample(now: float, invalid_reason: str) -> ControllerSample:
         return ControllerSample(
             position=np.zeros(3, dtype=np.float64),
             quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
@@ -212,6 +218,7 @@ class PicoUdpInput:
             received_monotonic=now,
             valid=False,
             trigger=0.0,
+            invalid_reason=invalid_reason,
         )
 
     @staticmethod

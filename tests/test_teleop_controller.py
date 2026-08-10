@@ -2,10 +2,15 @@ from collections.abc import Iterable
 
 import mujoco
 import numpy as np
+import pytest
 
 from kinova_teleop.mujoco_backend import MuJoCoBackend
-from kinova_teleop.pose_mapping import Pose
-from kinova_teleop.teleop_controller import TeleopConfig, TeleopController
+from kinova_teleop.pose_mapping import ClutchState, Pose
+from kinova_teleop.teleop_controller import (
+    TeleopConfig,
+    TeleopController,
+    TeleopSafetyError,
+)
 from kinova_teleop.xr_input import ControllerSample, DryRunXrInput
 
 
@@ -68,6 +73,9 @@ def sample(
     grip: float,
     timestamp_ns: int,
     received: float,
+    *,
+    valid: bool = True,
+    invalid_reason: str = "",
 ) -> ControllerSample:
     return ControllerSample(
         position=np.asarray(position, dtype=np.float64),
@@ -75,7 +83,123 @@ def sample(
         grip=grip,
         timestamp_ns=timestamp_ns,
         received_monotonic=received,
+        valid=valid,
+        invalid_reason=invalid_reason,
     )
+
+
+def test_hardware_stale_input_stops_and_escapes_loop() -> None:
+    backend = RecordingBackend()
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+            sample(
+                [0.0, 0.0, 0.0],
+                0.0,
+                0,
+                1.02,
+                valid=False,
+                invalid_reason="stream is stale",
+            ),
+        ]
+    )
+    controller = TeleopController(
+        TeleopConfig(realtime=False, fatal_input_faults=True),
+        source,
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    with pytest.raises(TeleopSafetyError, match="stale"):
+        controller.step_once()
+
+    assert backend.holds == 1
+
+
+def test_normal_release_remains_recoverable_in_hardware_policy() -> None:
+    backend = RecordingBackend()
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+            sample([0.0, 0.0, 0.0], 0.0, 3, 1.02),
+            sample([0.0, 0.0, 0.0], 1.0, 4, 1.03),
+        ]
+    )
+    controller = TeleopController(
+        TeleopConfig(realtime=False, fatal_input_faults=True),
+        source,
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    released = controller.step_once()
+
+    assert released.clutch_state is ClutchState.READY
+    assert backend.holds == 1
+    assert controller.step_once().active is True
+
+
+def test_source_change_is_fatal_but_mujoco_default_keeps_existing_behavior() -> None:
+    invalid = sample(
+        [0.0, 0.0, 0.0],
+        0.0,
+        0,
+        1.0,
+        valid=False,
+        invalid_reason="source changed",
+    )
+    recoverable = TeleopController(
+        TeleopConfig(realtime=False),
+        ScriptedInput([invalid]),
+        RecordingBackend(),
+    )
+
+    assert recoverable.step_once().active is False
+
+    fatal_backend = RecordingBackend()
+    fatal = TeleopController(
+        TeleopConfig(realtime=False, fatal_input_faults=True),
+        ScriptedInput([invalid]),
+        fatal_backend,
+    )
+    with pytest.raises(TeleopSafetyError, match="source_changed"):
+        fatal.step_once()
+    assert fatal_backend.holds == 1
+
+
+def test_fatal_input_reports_unconfirmed_stop_failure() -> None:
+    class FailingHoldBackend(RecordingBackend):
+        def hold(self):
+            self.holds += 1
+            raise RuntimeError("stop RPC failed")
+
+    invalid = sample(
+        [0.0, 0.0, 0.0],
+        0.0,
+        0,
+        1.0,
+        valid=False,
+        invalid_reason="stream is stale",
+    )
+    backend = FailingHoldBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False, fatal_input_faults=True),
+        ScriptedInput([invalid]),
+        backend,
+    )
+
+    with pytest.raises(
+        TeleopSafetyError,
+        match="Stop attempted but unconfirmed",
+    ) as captured:
+        controller.step_once()
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert backend.holds == 1
 
 
 def test_headless_dry_run_stays_finite(teleop_model_path) -> None:

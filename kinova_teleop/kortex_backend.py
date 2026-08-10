@@ -154,6 +154,7 @@ class KortexBackend:
         self._rearm_feedback_pending = False
         self._control_anchor: Pose | None = None
         self._fault_reason: str | None = None
+        self._stop_failure_reason: str | None = None
         self._closed = False
         self._connection_closed = False
         self._gripper_last_value: float | None = None
@@ -250,6 +251,21 @@ class KortexBackend:
         with self._state_lock:
             return self._stop_confirmed
 
+    @property
+    def fault_reason(self) -> str | None:
+        with self._state_lock:
+            return self._effective_fault_reason_locked()
+
+    def _effective_fault_reason_locked(self) -> str | None:
+        return self._stop_failure_reason or self._fault_reason
+
+    def _raise_latched_fault_locked(self) -> None:
+        fault_reason = self._effective_fault_reason_locked()
+        if fault_reason is not None:
+            raise KortexSafetyError(
+                f"Kortex safety fault is latched: {fault_reason}"
+            )
+
     def _state_allows_command_locked(self, generation: int | None = None) -> bool:
         return (
             not self._closed
@@ -271,35 +287,50 @@ class KortexBackend:
 
     def current_pose(self) -> Pose:
         with self._state_lock:
+            self._raise_latched_fault_locked()
             self._feedback_admission_locked()
+            generation = self._generation
+            require_active = self._active
         if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
-            raise KortexSafetyError("Timed out waiting for in-flight RPC")
+            reason = "Timed out waiting for in-flight RPC"
+            latched_reason = self._latch_fault_and_stop(
+                reason,
+                generation=generation,
+                require_active=require_active,
+            )
+            raise KortexSafetyError(latched_reason or reason)
+        failure: BaseException | None = None
+        failure_reason = ""
+        pose: Pose | None = None
         try:
             with self._state_lock:
                 rearm_generation = self._feedback_admission_locked()
-            feedback = self.connection.base_cyclic.RefreshFeedback(
-                options=self.connection.rpc_options()
-            ).base
-
-            position = np.array(
-                [feedback.tool_pose_x, feedback.tool_pose_y, feedback.tool_pose_z],
-                dtype=np.float64,
-            )
-            angles = np.array(
-                [
-                    feedback.tool_pose_theta_x,
-                    feedback.tool_pose_theta_y,
-                    feedback.tool_pose_theta_z,
-                ],
-                dtype=np.float64,
-            )
-            if not np.isfinite(position).all() or not np.isfinite(angles).all():
-                raise ValueError("Kortex feedback pose must be finite")
-            pose = Pose(
-                position=position,
-                quaternion=_fixed_xyz_quaternion(angles),
-            )
-            if rearm_generation is not None:
+            try:
+                feedback = self.connection.base_cyclic.RefreshFeedback(
+                    options=self.connection.rpc_options()
+                ).base
+                position = np.array(
+                    [feedback.tool_pose_x, feedback.tool_pose_y, feedback.tool_pose_z],
+                    dtype=np.float64,
+                )
+                angles = np.array(
+                    [
+                        feedback.tool_pose_theta_x,
+                        feedback.tool_pose_theta_y,
+                        feedback.tool_pose_theta_z,
+                    ],
+                    dtype=np.float64,
+                )
+                if not np.isfinite(position).all() or not np.isfinite(angles).all():
+                    raise ValueError("Kortex feedback pose must be finite")
+                pose = Pose(
+                    position=position,
+                    quaternion=_fixed_xyz_quaternion(angles),
+                )
+            except BaseException as error:
+                failure = error
+                failure_reason = str(error) or "Kortex feedback RPC failed"
+            if failure is None and rearm_generation is not None:
                 with self._state_lock:
                     if (
                         self._closed
@@ -310,12 +341,23 @@ class KortexBackend:
                         raise KortexSafetyError(
                             "Stop was requested during re-arm feedback"
                         )
+                    if pose is None:
+                        raise RuntimeError("Kortex feedback pose is unavailable")
                     self._control_anchor = _immutable_pose_copy(pose)
                     self._rearm_feedback_pending = False
                     self._feedback_requires_rearm = False
-            return pose
         finally:
             self._rpc_lock.release()
+        if failure is not None:
+            latched_reason = self._latch_fault_and_stop(
+                failure_reason,
+                generation=generation,
+                require_active=require_active,
+            )
+            raise KortexSafetyError(latched_reason or failure_reason) from failure
+        if pose is None:
+            raise RuntimeError("Kortex feedback pose is unavailable")
+        return pose
 
     def confirm_stationary(self) -> bool:
         """Return true only when a fresh feedback frame reports low velocity.
@@ -373,9 +415,10 @@ class KortexBackend:
         with self._state_lock:
             if self._closed:
                 raise RuntimeError("Kortex backend is closed")
-            if self._fault_reason is not None:
+            fault_reason = self._effective_fault_reason_locked()
+            if fault_reason is not None:
                 raise KortexSafetyError(
-                    f"Kortex safety fault is latched: {self._fault_reason}"
+                    f"Kortex safety fault is latched: {fault_reason}"
                 )
             if self._stop_requested and not self._stop_confirmed:
                 raise KortexSafetyError(
@@ -393,6 +436,7 @@ class KortexBackend:
 
     def command_pose(self, target: Pose) -> BackendResult:
         with self._state_lock:
+            self._raise_latched_fault_locked()
             if not self._state_allows_command_locked():
                 return _inactive_result()
             generation = self._generation
@@ -402,12 +446,17 @@ class KortexBackend:
         if self.workspace_limits is not None:
             decision = validate_target_pose(target, self.workspace_limits)
             if not decision.accepted:
+                latched_reason = self._latch_fault_and_stop(
+                    decision.reason,
+                    generation=generation,
+                )
+                if latched_reason is None:
+                    return _inactive_result()
                 self._emit(
                     "workspace_rejected",
                     "STOPPING",
                     {"reason": decision.reason},
                 )
-                self.hold()
                 return BackendResult(False, False, 0.0, 0.0, decision.reason)
 
         if anchor is None:
@@ -466,10 +515,17 @@ class KortexBackend:
                 command.twist.angular_y,
                 command.twist.angular_z,
             ) = map(float, velocity)
-        except BaseException:
-            token = self._request_stop(force=True)
-            self._attempt_stop(token=token, raise_on_failure=False)
-            raise
+        except BaseException as error:
+            reason = str(error) or "Kortex command preparation failed"
+            latched_reason = self._latch_fault_and_stop(
+                reason,
+                generation=generation,
+            )
+            if latched_reason is None:
+                raise
+            if isinstance(error, KortexSafetyError) and str(error) == latched_reason:
+                raise
+            raise KortexSafetyError(latched_reason) from error
 
         result = BackendResult(
             accepted=True,
@@ -482,8 +538,8 @@ class KortexBackend:
         if nonzero:
             self._ensure_watchdog_ready()
         if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
-            token = self._request_stop(force=True)
-            self._attempt_stop(token=token, raise_on_failure=False)
+            reason = "Timed out waiting for in-flight RPC"
+            self._latch_fault_and_stop(reason, generation=generation)
             raise KortexSafetyError(
                 "Timed out waiting for in-flight RPC; Stop attempted but unconfirmed"
             )
@@ -512,9 +568,14 @@ class KortexBackend:
             self._rpc_lock.release()
 
         if send_error is not None:
-            token = self._request_stop(force=True)
-            self._attempt_stop(token=token, raise_on_failure=False)
-            raise send_error
+            reason = str(send_error) or "Kortex command RPC failed"
+            latched_reason = self._latch_fault_and_stop(
+                reason,
+                generation=generation,
+            )
+            if latched_reason is None:
+                raise send_error
+            raise KortexSafetyError(latched_reason) from send_error
 
         with self._state_lock:
             if not sent or not self._state_allows_command_locked(generation):
@@ -530,13 +591,15 @@ class KortexBackend:
         reason: str,
         *,
         generation: int | None = None,
+        require_active: bool = True,
     ) -> str | None:
         emit_stop_request = False
         with self._state_lock:
-            if generation is not None and not self._state_allows_command_locked(
-                generation
-            ):
-                return None
+            if generation is not None:
+                if generation != self._generation:
+                    return None
+                if require_active and not self._state_allows_command_locked(generation):
+                    return None
             if self._fault_reason is not None:
                 return self._fault_reason
             self._fault_reason = reason
@@ -621,6 +684,7 @@ class KortexBackend:
         return sent
 
     def _ensure_watchdog_ready(self) -> None:
+        generation: int | None = None
         with self._watchdog_start_lock:
             with self._state_lock:
                 if (
@@ -631,6 +695,7 @@ class KortexBackend:
                     return
                 if not self._active:
                     return
+                generation = self._generation
             ready = threading.Event()
             start_failed = False
             try:
@@ -650,8 +715,11 @@ class KortexBackend:
             if not start_failed and ready.wait(WATCHDOG_READY_TIMEOUT):
                 return
 
-        token = self._request_stop(force=True)
-        confirmed = self._attempt_stop(token=token, raise_on_failure=False)
+        self._latch_fault_and_stop(
+            "watchdog unavailable",
+            generation=generation,
+        )
+        confirmed = self.stop_confirmed
         status = "Stop confirmed" if confirmed else "Stop attempted but unconfirmed"
         raise KortexSafetyError(
             f"Failed to start Kortex watchdog or report ready; {status}"
@@ -668,6 +736,7 @@ class KortexBackend:
 
     def check_watchdog(self) -> None:
         token: _StopToken | None = None
+        expired_generation: int | None = None
         with self._state_lock:
             if (
                 not self._closed
@@ -675,10 +744,15 @@ class KortexBackend:
                 and self._deadline is not None
                 and self._monotonic() > self._deadline
             ):
-                token = self._request_stop_locked(force=True)
+                expired_generation = self._generation
             elif self._stop_requested and not self._stop_confirmed:
                 token = self._stop_token
-        if token is not None:
+        if expired_generation is not None:
+            self._latch_fault_and_stop(
+                "watchdog timeout",
+                generation=expired_generation,
+            )
+        elif token is not None:
             self._attempt_stop(token=token, raise_on_failure=False)
 
     def _request_stop_locked(self, *, force: bool) -> _StopToken:
@@ -731,6 +805,7 @@ class KortexBackend:
         acquired = self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT)
         failed = not acquired
         committed = False
+        fault_latched = False
         if acquired:
             try:
                 with self._state_lock:
@@ -748,12 +823,26 @@ class KortexBackend:
                     if self._token_matches_locked(token):
                         self._stop_confirmed = not failed
                         committed = True
+                        if failed and self._stop_failure_reason is None:
+                            self._stop_failure_reason = (
+                                "Stop attempted but unconfirmed"
+                            )
+                            fault_latched = True
             finally:
                 self._rpc_lock.release()
         elif failed:
             with self._state_lock:
                 if self._token_matches_locked(token):
                     self._stop_confirmed = False
+                    if self._stop_failure_reason is None:
+                        self._stop_failure_reason = "Stop attempted but unconfirmed"
+                        fault_latched = True
+        if fault_latched:
+            self._emit(
+                "faulted",
+                "FAULTED",
+                {"reason": "Stop attempted but unconfirmed"},
+            )
         if committed and not failed:
             self._emit("stop_rpc_returned", "STOPPING", {})
         elif failed:
@@ -772,6 +861,9 @@ class KortexBackend:
 
     def step(self) -> None:
         """The Kortex controller executes commands asynchronously."""
+
+        with self._state_lock:
+            self._raise_latched_fault_locked()
 
     def close(self) -> None:
         emit_stop_request = False
