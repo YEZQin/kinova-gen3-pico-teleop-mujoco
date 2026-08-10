@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import stat
 from types import SimpleNamespace
 
 import numpy as np
@@ -204,6 +206,29 @@ def test_passing_preflight_report_is_strict_and_read_only(tmp_path):
 
     with pytest.raises(ValueError, match="not passed"):
         load_passing_preflight_report(report_path)
+
+
+def test_passing_preflight_report_rejects_windows_reparse_file(
+    tmp_path,
+    monkeypatch,
+):
+    payload = run_kortex_readonly_preflight(
+        RecordingConnection(), preflight_context()
+    ).to_mapping()
+    payload["passed"] = True
+    path = tmp_path / "preflight.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda self: SimpleNamespace(
+            st_mode=stat.S_IFREG,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="symlink or reparse point"):
+        load_passing_preflight_report(path)
 
 
 def test_passing_preflight_report_rejects_unknown_physical_check(tmp_path):

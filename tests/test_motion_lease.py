@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +39,22 @@ def test_validate_motion_lease_is_read_only(tmp_path):
     before = path.read_bytes()
     validate_motion_lease(path, "run-1", "operator-1")
     assert path.read_bytes() == before
+
+
+def test_validate_motion_lease_rejects_windows_reparse_file(tmp_path, monkeypatch):
+    path = tmp_path / "motion.lock"
+    _write(path)
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda self: SimpleNamespace(
+            st_mode=stat.S_IFREG,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="regular file"):
+        validate_motion_lease(path, "run-1", "operator-1")
 
 
 @pytest.mark.parametrize(

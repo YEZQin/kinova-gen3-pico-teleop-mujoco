@@ -8,6 +8,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import stat
 from typing import Any, cast
 
 
@@ -15,6 +16,7 @@ _LEASE_FIELDS = frozenset(("lease_id", "device", "run_id", "owner", "acquired_ut
 _LEASE_ID = re.compile(r"[0-9a-f]{32}\Z")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z")
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +92,10 @@ def validate_motion_lease(path: str | Path, run_id: str, owner: str) -> MotionLe
         metadata = candidate.lstat()
     except OSError as error:
         raise ValueError("motion lease file is unavailable") from error
-    if candidate.is_symlink() or not candidate.is_file():
+    is_reparse_point = bool(
+        getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT
+    )
+    if candidate.is_symlink() or is_reparse_point or not candidate.is_file():
         raise ValueError("motion lease must be a regular file")
     try:
         raw = candidate.read_bytes()

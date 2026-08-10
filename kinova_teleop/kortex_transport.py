@@ -89,6 +89,8 @@ class KortexConnection:
         self._connected = False
         self._closed = False
         self.stop_confirmed = True
+        self.cleanup_failures: tuple[str, ...] = ()
+        self._cleanup_succeeded = True
 
     @property
     def factories(self) -> KortexFactories:
@@ -137,7 +139,7 @@ class KortexConnection:
             self.product_configuration_pb2 = factories.product_configuration_pb2
             self._connected = True
         except BaseException as error:
-            stop_confirmed = self._cleanup(
+            cleanup_succeeded = self._cleanup(
                 stop=send_stop_on_failure and self.base is not None
             )
             if not isinstance(error, Exception):
@@ -146,8 +148,15 @@ class KortexConnection:
             if self.config.password:
                 safe_message = safe_message.replace(self.config.password, "[REDACTED]")
             failure_message = f"Failed to connect to Kortex robot: {safe_message}"
-            if not stop_confirmed:
+            if not self.stop_confirmed:
                 failure_message += "; Stop attempted but unconfirmed during cleanup"
+            if self.cleanup_failures:
+                failure_message += (
+                    "; Kortex cleanup failed at "
+                    + ", ".join(self.cleanup_failures)
+                )
+            elif not cleanup_succeeded:
+                failure_message += "; Kortex cleanup failed"
         if failure_message is not None:
             raise RuntimeError(failure_message) from None
         return self
@@ -168,6 +177,7 @@ class KortexConnection:
         return options
 
     def _cleanup(self, *, stop: bool) -> bool:
+        failures: list[str] = []
         stop_confirmed = not stop
         if stop and self.base is not None:
             try:
@@ -175,26 +185,28 @@ class KortexConnection:
                 stop_confirmed = True
             except BaseException:
                 stop_confirmed = False
+                failures.append("base.Stop")
         if self.session_manager is not None:
             try:
                 self.session_manager.CloseSession(options=self.session_rpc_options())
             except BaseException:
-                pass
+                failures.append("session.CloseSession")
         if self.router is not None:
             try:
                 self.router.SetActivationStatus(False)
             except BaseException:
+                failures.append("router.SetActivationStatus")
                 close = getattr(self.router, "close", None)
                 if close is not None:
                     try:
                         close()
                     except BaseException:
-                        pass
+                        failures.append("router.close")
         if self.transport is not None:
             try:
                 self.transport.disconnect()
             except BaseException:
-                pass
+                failures.append("transport.disconnect")
 
         self.base_cyclic = None
         self.base = None
@@ -205,12 +217,14 @@ class KortexConnection:
         self.transport = None
         self._connected = False
         self.stop_confirmed = stop_confirmed
-        return stop_confirmed
+        self.cleanup_failures = tuple(failures)
+        self._cleanup_succeeded = stop_confirmed and not failures
+        return self._cleanup_succeeded
 
     def close(self, *, send_stop: bool = True) -> bool:
         """Stop first, then close all SDK resources in reverse order."""
 
         if self._closed:
-            return self.stop_confirmed
+            return self._cleanup_succeeded
         self._closed = True
         return self._cleanup(stop=send_stop)

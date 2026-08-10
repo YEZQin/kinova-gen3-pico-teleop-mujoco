@@ -45,10 +45,40 @@ def test_runtime_gate_requires_the_tested_sdk_stack() -> None:
         )
 
 
-@pytest.mark.parametrize("host", ["8.8.8.8", "127.0.0.1", "::1", "robot.local"])
-def test_robot_endpoint_requires_private_non_loopback_ipv4(host: str) -> None:
+@pytest.mark.parametrize(
+    "host",
+    [
+        "8.8.8.8",
+        "127.0.0.1",
+        "169.254.1.1",
+        "192.0.2.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "240.0.0.1",
+        "255.255.255.255",
+        "::1",
+        "robot.local",
+    ],
+)
+def test_robot_endpoint_rejects_non_rfc1918_ipv4(host: str) -> None:
     with pytest.raises(ValueError, match="private IPv4"):
         validate_private_robot_ipv4(host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "10.0.0.1",
+        "10.255.255.254",
+        "172.16.0.1",
+        "172.31.255.254",
+        "192.168.0.1",
+        "192.168.255.254",
+    ],
+)
+def test_robot_endpoint_accepts_only_rfc1918_ipv4(host: str) -> None:
+    assert validate_private_robot_ipv4(host) is None
 
 
 def test_first_hardware_workspace_cannot_exceed_four_centimetres_per_axis() -> None:

@@ -147,7 +147,8 @@ class PicoUdpInput:
                 and not same_device
             ):
                 self._foreign += 1
-                return True
+                self._last_error = "source changed"
+                return False
             session_boundary = same_device
             self._clear_session()
 

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
+import stat
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -540,8 +541,16 @@ def load_passing_preflight_report(
     """
 
     report_path = Path(path)
-    if report_path.is_symlink():
-        raise ValueError("preflight report must not be a symlink")
+    try:
+        metadata = report_path.lstat()
+    except OSError as error:
+        raise ValueError("preflight report file is unavailable") from error
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    is_reparse_point = bool(
+        getattr(metadata, "st_file_attributes", 0) & reparse_flag
+    )
+    if report_path.is_symlink() or is_reparse_point:
+        raise ValueError("preflight report must not be a symlink or reparse point")
     payload = _strict_report_json(report_path)
     keys = set(payload)
     missing = _PREFLIGHT_REQUIRED_FIELDS - keys

@@ -113,14 +113,17 @@ def test_duplicate_or_out_of_order_frame_invalidates_current_input() -> None:
     assert source.health().rejected == 1
 
 
-def test_other_source_is_ignored_until_active_source_is_stale() -> None:
+def test_other_source_faults_until_active_source_is_stale() -> None:
     first = make_frame(sequence=1, position=(1.0, 0.0, 0.0), received_at=5.0, source=("10.0.0.2", 3000))
     other = make_frame(sequence=1, position=(2.0, 0.0, 0.0), received_at=5.05, source=("10.0.0.3", 4000))
     receiver = FakeReceiver([first, other])
     now = [5.05]
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: now[0])
-    assert source.read().position.tolist() == list(first.position)
+    boundary = source.read()
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
     assert source.health().foreign == 1
+    assert source.health().active_source == first.source
     now[0] = 5.21
     receiver.items.append(make_frame(sequence=2, received_at=5.21, source=("10.0.0.3", 4000)))
     assert not source.read().valid
@@ -231,18 +234,35 @@ def test_healthy_same_ip_new_port_emits_boundary_and_requires_release() -> None:
     assert rearmed.clutch_state is ClutchState.READY
 
 
-def test_healthy_different_ip_packet_remains_foreign_without_session_error() -> None:
-    receiver = FakeReceiver([
-        make_frame(sequence=1, received_at=5.0, source=("10.0.0.2", 3000)),
-        make_frame(sequence=2, received_at=5.01, source=("10.0.0.3", 4000)),
-    ])
+def test_foreign_packet_after_admission_emits_source_changed_without_handoff() -> None:
+    """A foreign sender must fault hardware without replacing the lock."""
+
+    first = make_frame(
+        sequence=1,
+        position=(1.0, 0.0, 0.0),
+        received_at=5.0,
+        source=("10.0.0.2", 3000),
+    )
+    receiver = FakeReceiver([first])
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
 
-    sample = source.read()
+    assert source.read().valid
+    receiver.items.append(
+        make_frame(sequence=2, received_at=5.01, source=("10.0.0.3", 4000))
+    )
+    boundary = source.read()
 
-    assert sample.valid
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
     assert source.health().foreign == 1
-    assert source.health().last_error == ""
+    assert source.health().active_source == ("10.0.0.2", 3000)
+    assert source.health().last_error == "source changed"
+
+    # The established generation remains intact for diagnostics; the Kortex
+    # controller consumes the invalid boundary and exits before this recovery.
+    cached = source.read()
+    assert cached.valid
+    assert cached.position.tolist() == list(first.position)
 
 
 def test_stale_same_device_handoff_reports_source_changed_before_valid_frame() -> None:

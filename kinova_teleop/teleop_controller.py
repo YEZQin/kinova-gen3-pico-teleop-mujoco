@@ -115,7 +115,13 @@ class TeleopController:
                 f"fatal input fault: {mapping.input_fault.value}"
             )
 
-        if mapping.active:
+        if mapping.activated:
+            # Grip activation is deliberately an anchor-only cycle. Hardware
+            # feedback may change immediately after the anchor read; deferring
+            # command_pose until a later input sample prevents that feedback
+            # jitter from becoming a nonzero compensating command.
+            result = BackendResult(False, False, 0.0, 0.0, "")
+        elif mapping.active:
             result = self.backend.command_pose(mapping.target)
         else:
             if mapping.deactivated:

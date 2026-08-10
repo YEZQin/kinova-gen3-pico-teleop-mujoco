@@ -296,7 +296,7 @@ def test_controller_uses_only_backend_contract_and_owns_resources() -> None:
     controller.close()
 
     assert backend.begin_calls == 1
-    assert len(backend.commands) == 2
+    assert len(backend.commands) == 1
     # hold() fires only on the deactivation edge so idle cycles do not spam
     # hardware backends with Stop commands.
     assert backend.holds == 1
@@ -341,6 +341,7 @@ def test_run_reports_only_meaningful_state_and_reason_transitions() -> None:
     ] == [
         ("waiting_for_release", False, ""),
         ("ready", False, ""),
+        ("active", False, ""),
         ("active", False, "IK did not converge"),
         ("ready", False, ""),
     ]

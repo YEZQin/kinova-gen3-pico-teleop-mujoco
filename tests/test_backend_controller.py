@@ -106,15 +106,13 @@ def test_controller_orchestrates_backend_clutch_lifecycle() -> None:
     assert backend.events == [
         "step",
         "begin_control",
-        "command_pose",
         "step",
         "command_pose",
         "step",
         "hold",
         "step",
     ]
-    assert len(backend.targets) == 2
-    assert backend.targets[0].position.tolist() == [0.4, -0.2, 0.3]
+    assert len(backend.targets) == 1
     assert controller.steps == 4
 
     controller.close()
@@ -211,20 +209,19 @@ def test_first_grip_reads_anchor_after_begin_and_active_cycle_adds_no_feedback()
     assert backend.events == [
         "begin_control",
         "current_pose",
-        "command_pose",
         "step",
     ]
-    np.testing.assert_allclose(backend.targets[0].position, backend.pose.position)
+    assert backend.targets == []
 
     backend.events.clear()
     controller.step_once()
     assert backend.events == ["command_pose", "step"]
 
 
-def test_first_press_emits_only_zero_twist_before_later_moved_sample(
+def test_first_press_anchors_without_twist_when_feedback_changes(
     monkeypatch,
 ) -> None:
-    """The press/anchor cycle cannot transmit motion before a later movement."""
+    """A feedback change after anchoring must not create activation motion."""
 
     class Twist:
         linear_x = linear_y = linear_z = 0.0
@@ -267,12 +264,19 @@ def test_first_press_emits_only_zero_twist_before_later_moved_sample(
             pass
 
     class Cyclic:
+        def __init__(self) -> None:
+            self.feedback_calls = 0
+
         def RefreshFeedback(self, *, options=None):
+            self.feedback_calls += 1
+            # The third read is the vulnerable command-time read: it differs
+            # from the second read used to establish the Grip anchor.
+            tool_pose_x = 0.001 if self.feedback_calls >= 3 else 0.0
             return type(
                 "Feedback",
                 (),
                 {"base": type("Pose", (), {
-                    "tool_pose_x": 0.0,
+                    "tool_pose_x": tool_pose_x,
                     "tool_pose_y": 0.0,
                     "tool_pose_z": 0.0,
                     "tool_pose_theta_x": 0.0,
@@ -323,7 +327,14 @@ def test_first_press_emits_only_zero_twist_before_later_moved_sample(
         backend,
     )
 
-    controller.run(max_steps=3)
+    controller.step_once()
+    controller.step_once()
+
+    # Activation is an anchor-only cycle. Even a changed feedback frame must
+    # not be converted into a compensating Twist command.
+    assert connection.base.sent == []
+
+    controller.step_once()
 
     sent = [
         np.array(
@@ -338,11 +349,13 @@ def test_first_press_emits_only_zero_twist_before_later_moved_sample(
         )
         for command in connection.base.sent
     ]
-    np.testing.assert_allclose(sent[0], np.zeros(6))
-    assert 0.0 < np.linalg.norm(sent[1][:3]) <= 0.005
-    np.testing.assert_allclose(sent[1][3:], np.zeros(3))
+    assert len(sent) == 1
+    assert 0.0 < np.linalg.norm(sent[0][:3]) <= 0.005
+    np.testing.assert_allclose(sent[0][3:], np.zeros(3))
     assert max(np.linalg.norm(command[:3]) for command in sent) <= 0.005
     assert max(np.linalg.norm(command[3:]) for command in sent) <= 2.0
+
+    controller.close()
 
 
 @pytest.mark.parametrize(
@@ -399,7 +412,7 @@ def test_controller_runs_generic_backend_without_a_mujoco_viewer() -> None:
 
     controller.run(max_steps=2)
 
-    assert backend.events == ["step", "begin_control", "command_pose", "step"]
+    assert backend.events == ["step", "begin_control", "step"]
     assert backend.close_calls == 1
     assert source.close_calls == 1
 
@@ -439,6 +452,5 @@ def test_controller_never_actuates_pico_trigger() -> None:
     assert backend.events == [
         "step",
         "begin_control",
-        "command_pose",
         "step",
     ]

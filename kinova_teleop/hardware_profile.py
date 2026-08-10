@@ -13,6 +13,13 @@ import numpy as np
 from .workspace import WorkspaceLimits
 
 
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
 @dataclass(frozen=True)
 class HardwareProfile:
     """Immutable envelope approved for the first physical-hardware run."""
@@ -66,7 +73,7 @@ def validate_kortex_runtime(
 
 
 def validate_private_robot_ipv4(host: str) -> None:
-    """Reject endpoints that cannot be a private, non-loopback robot IPv4."""
+    """Allow robot endpoints only within the three RFC1918 IPv4 blocks."""
 
     try:
         address = ipaddress.ip_address(host)
@@ -74,9 +81,7 @@ def validate_private_robot_ipv4(host: str) -> None:
         raise ValueError("robot endpoint must be a private IPv4 address") from error
     if (
         not isinstance(address, ipaddress.IPv4Address)
-        or not address.is_private
-        or address.is_loopback
-        or address.is_unspecified
+        or not any(address in network for network in _RFC1918_NETWORKS)
     ):
         raise ValueError("robot endpoint must be a private IPv4 address")
 

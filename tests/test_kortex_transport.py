@@ -16,6 +16,9 @@ def _factories(
     *,
     session_error: Exception | None = None,
     stop_error: Exception | None = None,
+    session_close_error: Exception | None = None,
+    router_close_error: Exception | None = None,
+    transport_close_error: Exception | None = None,
 ):
     class SendOptions:
         def __init__(self):
@@ -27,6 +30,8 @@ def _factories(
 
         def disconnect(self):
             events.append("transport.disconnect")
+            if transport_close_error is not None:
+                raise transport_close_error
 
     class Router:
         basicErrorCallback = object()
@@ -36,6 +41,11 @@ def _factories(
 
         def SetActivationStatus(self, active):
             events.append(("router.active", active))
+            if router_close_error is not None:
+                raise router_close_error
+
+        def close(self):
+            events.append("router.close")
 
     class SessionManager:
         def __init__(self, router):
@@ -59,6 +69,8 @@ def _factories(
             events.append(
                 ("session.close", None if options is None else options.timeout_ms)
             )
+            if session_close_error is not None:
+                raise session_close_error
 
     class BaseClient:
         def __init__(self, router):
@@ -138,6 +150,34 @@ def test_readonly_cleanup_never_sends_stop_or_motion() -> None:
     assert events[-3:] == [
         ("session.close", 5_000),
         ("router.active", False),
+        "transport.disconnect",
+    ]
+
+
+def test_readonly_cleanup_aggregates_failures_and_attempts_every_stage() -> None:
+    """Every teardown failure must make T0 fail after later cleanup attempts."""
+
+    events: list[object] = []
+    connection = KortexConnection(
+        KortexConfig("192.0.2.10", "operator", "secret"),
+        factories=_factories(
+            events,
+            session_close_error=RuntimeError("session close failed"),
+            router_close_error=RuntimeError("router close failed"),
+            transport_close_error=RuntimeError("transport close failed"),
+        ),
+    ).connect()
+
+    assert connection.close(send_stop=False) is False
+    assert connection.cleanup_failures == (
+        "session.CloseSession",
+        "router.SetActivationStatus",
+        "transport.disconnect",
+    )
+    assert events[-4:] == [
+        ("session.close", 5_000),
+        ("router.active", False),
+        "router.close",
         "transport.disconnect",
     ]
 
