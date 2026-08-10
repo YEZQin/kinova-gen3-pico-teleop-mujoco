@@ -1,8 +1,11 @@
 # Gen3 PICO Kortex final fix report
 
-Date: 2026-08-10  
-Branch: `feat/kortex-hardware-merge`  
-Fix commit: `154c5ba` (`fix: close Gen3 final safety gaps`)  
+Date: 2026-08-10
+
+Branch: `feat/kortex-hardware-merge`
+
+Fix commit: `154c5ba` (`fix: close Gen3 final safety gaps`)
+
 Evidence level: offline only
 
 ## Outcome
