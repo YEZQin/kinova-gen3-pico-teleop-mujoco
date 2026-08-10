@@ -201,6 +201,7 @@ def test_healthy_same_ip_new_port_emits_boundary_and_requires_release() -> None:
     boundary = source.read()
     assert not boundary.valid
     assert source.health().active_source == ("10.0.0.2", 4000)
+    assert source.health().last_error == "source changed"
     assert (
         mapper.update(boundary, ee, now=5.02).clutch_state
         is ClutchState.WAITING_FOR_RELEASE
@@ -225,6 +226,20 @@ def test_healthy_same_ip_new_port_emits_boundary_and_requires_release() -> None:
     )
     rearmed = mapper.update(source.read(), ee, now=5.03)
     assert rearmed.clutch_state is ClutchState.READY
+
+
+def test_healthy_different_ip_packet_remains_foreign_without_session_error() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, received_at=5.0, source=("10.0.0.2", 3000)),
+        make_frame(sequence=2, received_at=5.01, source=("10.0.0.3", 4000)),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
+
+    sample = source.read()
+
+    assert sample.valid
+    assert source.health().foreign == 1
+    assert source.health().last_error == ""
 
 
 def test_stale_handoff_queued_before_read_emits_boundary_before_valid_frame() -> None:

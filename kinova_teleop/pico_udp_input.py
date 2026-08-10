@@ -71,6 +71,7 @@ class PicoUdpInput:
         if emit_stale_boundary:
             self._stale_boundary_reported = True
         had_invalid = emit_stale_boundary
+        source_changed = False
 
         for _ in range(_MAX_DRAIN_ATTEMPTS):
             try:
@@ -95,12 +96,15 @@ class PicoUdpInput:
                 recovering_from_stale=recovering_from_stale,
             ):
                 had_invalid = True
+                source_changed = source_changed or self._last_error == "source changed"
         else:
             self._last_error = "receiver drain limit reached"
             had_invalid = True
 
         now = self._clock()
         stale = self._is_stale(now)
+        if source_changed:
+            self._last_error = "source changed"
         if stale and not self._last_error:
             self._last_error = "stream is stale"
         if had_invalid or stale or self._last_valid is None:
@@ -155,7 +159,9 @@ class PicoUdpInput:
                 )
                 self._last_sequence = frame.sequence
             self._rejected += 1
-            self._last_error = "controller is untracked"
+            self._last_error = (
+                "source changed" if session_boundary else "controller is untracked"
+            )
             return False
 
         if self._last_sequence is not None:
@@ -183,7 +189,7 @@ class PicoUdpInput:
         self._last_sequence = frame.sequence
         self._last_valid = frame
         self._accepted += 1
-        self._last_error = ""
+        self._last_error = "source changed" if session_boundary else ""
         self._stale_boundary_reported = False
         return not session_boundary
 
