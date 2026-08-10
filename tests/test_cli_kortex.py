@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import builtins
+import importlib
 from types import SimpleNamespace
 
 import pytest
 
 from kinova_teleop.main import _approve_fixed_segment, _cleanup_resources, main
+
+
+main_module = importlib.import_module("kinova_teleop.main")
 
 
 def _motion_gate_args(arguments: list[str]) -> list[str]:
@@ -17,6 +21,200 @@ def _motion_gate_args(arguments: list[str]) -> list[str]:
         "--motion-lease", "fixture-motion.lock",
         "--preflight-report", "fixture-preflight.json",
     ]
+
+
+def _valid_motion_argv() -> list[str]:
+    return _motion_gate_args(["--backend", "kortex", "--enable-hardware"])
+
+
+def _install_valid_motion_gate_files(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr(
+        main_module,
+        "load_passing_preflight_report",
+        lambda *_args: object(),
+    )
+    monkeypatch.setenv("KINOVA_PASSWORD", "test-password")
+
+
+def _admitted() -> SimpleNamespace:
+    return SimpleNamespace(last_timestamp_ns=10)
+
+
+def _ready_report() -> SimpleNamespace:
+    return SimpleNamespace()
+
+
+class _FakeReleasedPico:
+    def close(self) -> None:
+        pass
+
+
+class _FakeBackend:
+    def close(self) -> None:
+        pass
+
+
+class _FakeController:
+    steps = 1
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    def run(self, **_kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _readonly_then_motion_connection(events: list[str]):
+    class Connection:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self, *, send_stop: bool = True) -> bool:
+            assert send_stop is (self.name == "motion")
+            events.append(f"{self.name}_close")
+            return True
+
+    def factory(_config, *, read_only: bool = False):
+        name = "readonly" if read_only else "motion"
+        events.append(f"{name}_connect")
+        return Connection(name)
+
+    return factory
+
+
+def _install_passing_motion_admission(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: object())
+    monkeypatch.setattr(
+        main_module,
+        "wait_for_fresh_released_input",
+        lambda *_args, **_kwargs: _admitted(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_kortex_readonly_preflight",
+        lambda *_args, **_kwargs: _ready_report(),
+    )
+    monkeypatch.setattr(main_module, "require_live_kortex_ready", lambda _report: None)
+    monkeypatch.setattr(main_module, "confirm_move", lambda: None)
+    monkeypatch.setattr(main_module, "verify_released_now", lambda *_args, **_kwargs: None)
+
+
+def test_motion_startup_order_is_input_readonly_move_recheck_then_backend(
+    monkeypatch,
+) -> None:
+    """Kortex motion must admit input and live readiness before MOVE/connect."""
+
+    events: list[str] = []
+    _install_valid_motion_gate_files(monkeypatch)
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: events.append("runtime") or object())
+    monkeypatch.setattr(main_module, "create_input", lambda _args: events.append("source") or _FakeReleasedPico())
+    monkeypatch.setattr(
+        main_module,
+        "wait_for_fresh_released_input",
+        lambda _source, **_kwargs: events.append("input_admit") or _admitted(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_connection",
+        _readonly_then_motion_connection(events),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_kortex_readonly_preflight",
+        lambda *_args, **_kwargs: events.append("readonly_preflight") or _ready_report(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "require_live_kortex_ready",
+        lambda _report: events.append("readonly_accept"),
+    )
+    monkeypatch.setattr(main_module, "confirm_move", lambda: events.append("MOVE"))
+    monkeypatch.setattr(
+        main_module,
+        "verify_released_now",
+        lambda *_args, **_kwargs: events.append("release_recheck"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_backend",
+        lambda *_args, **_kwargs: events.append("backend") or _FakeBackend(),
+    )
+    monkeypatch.setattr(main_module, "TeleopController", _FakeController)
+
+    assert main(_valid_motion_argv()) == 0
+    assert events[:10] == [
+        "runtime",
+        "source",
+        "input_admit",
+        "readonly_connect",
+        "readonly_preflight",
+        "readonly_accept",
+        "readonly_close",
+        "MOVE",
+        "release_recheck",
+        "motion_connect",
+    ]
+    assert events.index("backend") > events.index("motion_connect")
+
+
+@pytest.mark.parametrize(
+    "failed_stage",
+    [
+        "runtime",
+        "input_admit",
+        "pressed_grip",
+        "source_changed",
+        "firmware",
+        "operating_mode",
+        "servoing_mode",
+        "readonly_cleanup",
+        "confirmation",
+        "release_recheck",
+    ],
+)
+def test_kortex_admission_failures_cannot_reach_motion_connect(
+    monkeypatch,
+    failed_stage: str,
+) -> None:
+    """Every admission failure is terminal before a motion transport exists."""
+
+    events: list[str] = []
+    _install_valid_motion_gate_files(monkeypatch)
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: object())
+    monkeypatch.setattr(main_module, "create_input", lambda _args: _FakeReleasedPico())
+    monkeypatch.setattr(main_module, "wait_for_fresh_released_input", lambda *_args, **_kwargs: _admitted())
+    monkeypatch.setattr(main_module, "_create_kortex_connection", _readonly_then_motion_connection(events))
+    monkeypatch.setattr(main_module, "run_kortex_readonly_preflight", lambda *_args, **_kwargs: _ready_report())
+    monkeypatch.setattr(main_module, "require_live_kortex_ready", lambda _report: None)
+    monkeypatch.setattr(main_module, "confirm_move", lambda: None)
+    monkeypatch.setattr(main_module, "verify_released_now", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main_module, "_create_kortex_backend", lambda *_args, **_kwargs: _FakeBackend())
+    monkeypatch.setattr(main_module, "TeleopController", _FakeController)
+
+    failure = RuntimeError(f"{failed_stage} rejected")
+    if failed_stage == "runtime":
+        monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: (_ for _ in ()).throw(failure))
+    elif failed_stage in {"input_admit", "pressed_grip", "source_changed"}:
+        monkeypatch.setattr(main_module, "wait_for_fresh_released_input", lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
+    elif failed_stage in {"firmware", "operating_mode", "servoing_mode"}:
+        monkeypatch.setattr(main_module, "require_live_kortex_ready", lambda _report: (_ for _ in ()).throw(failure))
+    elif failed_stage == "readonly_cleanup":
+        def cleanup_fails(_config, *, read_only: bool = False):
+            if not read_only:
+                events.append("motion_connect")
+            return SimpleNamespace(close=lambda **_kwargs: False)
+        monkeypatch.setattr(main_module, "_create_kortex_connection", cleanup_fails)
+    elif failed_stage == "confirmation":
+        monkeypatch.setattr(main_module, "confirm_move", lambda: (_ for _ in ()).throw(failure))
+    elif failed_stage == "release_recheck":
+        monkeypatch.setattr(main_module, "verify_released_now", lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
+
+    assert main(_valid_motion_argv()) == 2
+    assert events.count("motion_connect") == 0
 
 
 class _FakeSource:
@@ -463,8 +661,8 @@ def test_mujoco_default_does_not_read_password_or_construct_kortex(
 
 def _install_valid_kortex_fakes(monkeypatch, created: dict) -> None:
     class FakeConnection:
-        def close(self) -> None:
-            pass
+        def close(self, *, send_stop: bool = True) -> bool:
+            return True
 
     class FakeBackend:
         def __init__(self, connection, **kwargs) -> None:
@@ -489,10 +687,11 @@ def _install_valid_kortex_fakes(monkeypatch, created: dict) -> None:
         def close(self) -> None:
             created["backend"].close()
 
-    def factory(config):
+    def factory(config, *, read_only: bool = False):
         connection = FakeConnection()
-        created["connection_config"] = config
-        created["connection"] = connection
+        if not read_only:
+            created["connection_config"] = config
+            created["connection"] = connection
         return connection
 
     monkeypatch.setattr(
@@ -510,6 +709,7 @@ def _install_valid_kortex_fakes(monkeypatch, created: dict) -> None:
     monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
+    _install_passing_motion_admission(monkeypatch)
 
 
 def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> None:
@@ -533,13 +733,17 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
         "max_linear_speed": 0.005,
         "max_angular_speed_deg": 2.0,
         "workspace_limits": backend.kwargs["workspace_limits"],
+        "anchor_envelope": backend.kwargs["anchor_envelope"],
         "event_sink": None,
     }
+    assert backend.kwargs["anchor_envelope"].maximum_translation_axis_m == (0.02, 0.02, 0.02)
+    assert backend.kwargs["anchor_envelope"].maximum_rotation_rad == pytest.approx(0.0872664626)
     controller_config = created["controller_config"]
     assert controller_config.translation_scale == 0.25
     # Hardware defaults: reduced RPC rate and wall-clock pacing.
     assert controller_config.control_hz == 40.0
     assert controller_config.realtime is True
+    assert controller_config.fatal_input_faults is True
     assert backend.closed
 
 
@@ -582,14 +786,18 @@ def test_backend_construction_fallback_reports_false_connection_cleanup(
     events: list[str] = []
 
     class FalseConnection:
-        def close(self) -> bool:
+        def close(self, **_kwargs) -> bool:
             events.append("connection.close")
             return False
+
+    class ReadonlyConnection:
+        def close(self, **_kwargs) -> bool:
+            return True
 
     monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", _FakeSource)
     monkeypatch.setattr(
         "kinova_teleop.main._create_kortex_connection",
-        lambda _config: FalseConnection(),
+        lambda _config, *, read_only=False: ReadonlyConnection() if read_only else FalseConnection(),
     )
     monkeypatch.setattr(
         "kinova_teleop.main._create_kortex_backend",
@@ -601,6 +809,7 @@ def test_backend_construction_fallback_reports_false_connection_cleanup(
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
     monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
+    _install_passing_motion_admission(monkeypatch)
 
     assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 2
     error = capsys.readouterr().err
@@ -623,8 +832,9 @@ def test_kortex_errors_close_controller_and_backend(
     events: list[str] = []
 
     class FakeConnection:
-        def close(self) -> None:
+        def close(self, **_kwargs) -> bool:
             events.append("connection.close")
+            return True
 
     class FakeBackend:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -654,7 +864,11 @@ def test_kortex_errors_close_controller_and_backend(
 
     monkeypatch.setattr(
         "kinova_teleop.main._create_kortex_connection",
-        lambda _config: FakeConnection(),
+        lambda _config, *, read_only=False: (
+            SimpleNamespace(close=lambda **_kwargs: True)
+            if read_only
+            else FakeConnection()
+        ),
         raising=False,
     )
     monkeypatch.setattr(
@@ -668,6 +882,7 @@ def test_kortex_errors_close_controller_and_backend(
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
     monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
+    _install_passing_motion_admission(monkeypatch)
 
     assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == expected_code
     assert events == ["controller.close", "backend.close", "source.close"]
@@ -684,8 +899,9 @@ def test_kortex_cleanup_failure_blocks_success_and_closes_remaining_resources(
     events: list[str] = []
 
     class FakeConnection:
-        def close(self) -> None:
+        def close(self, **_kwargs) -> bool:
             events.append("connection.close")
+            return True
 
     class FakeBackend:
         def close(self) -> None:
@@ -712,7 +928,11 @@ def test_kortex_cleanup_failure_blocks_success_and_closes_remaining_resources(
 
     monkeypatch.setattr(
         "kinova_teleop.main._create_kortex_connection",
-        lambda _config: FakeConnection(),
+        lambda _config, *, read_only=False: (
+            SimpleNamespace(close=lambda **_kwargs: True)
+            if read_only
+            else FakeConnection()
+        ),
     )
     monkeypatch.setattr(
         "kinova_teleop.main._create_kortex_backend",
@@ -724,6 +944,7 @@ def test_kortex_cleanup_failure_blocks_success_and_closes_remaining_resources(
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
     monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
+    _install_passing_motion_admission(monkeypatch)
 
     assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 2
     captured = capsys.readouterr()

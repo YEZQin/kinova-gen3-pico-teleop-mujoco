@@ -7,8 +7,11 @@ import numpy as np
 import pytest
 
 from kinova_teleop.backend import BackendResult
+import kinova_teleop.kortex_backend as kortex_backend_module
+from kinova_teleop.kortex_backend import KortexBackend
 from kinova_teleop.pose_mapping import Pose
 from kinova_teleop.teleop_controller import TeleopConfig, TeleopController
+from kinova_teleop.workspace import AnchorEnvelope
 from kinova_teleop.xr_input import ControllerSample
 
 
@@ -216,6 +219,130 @@ def test_first_grip_reads_anchor_after_begin_and_active_cycle_adds_no_feedback()
     backend.events.clear()
     controller.step_once()
     assert backend.events == ["command_pose", "step"]
+
+
+def test_first_press_emits_only_zero_twist_before_later_moved_sample(
+    monkeypatch,
+) -> None:
+    """The press/anchor cycle cannot transmit motion before a later movement."""
+
+    class Twist:
+        linear_x = linear_y = linear_z = 0.0
+        angular_x = angular_y = angular_z = 0.0
+
+    class TwistCommand:
+        def __init__(self) -> None:
+            self.reference_frame = None
+            self.duration = None
+            self.twist = Twist()
+
+    class ServoingModeInformation:
+        def __init__(self) -> None:
+            self.servoing_mode = None
+
+    class ManualWatchdog:
+        def __init__(self, *, target, args=(), name, daemon) -> None:
+            self.args = args
+
+        def start(self) -> None:
+            self.args[0].set()
+
+        def join(self, timeout=None) -> None:
+            pass
+
+    class Base:
+        def __init__(self) -> None:
+            self.sent = []
+
+        def SetServoingMode(self, _mode, *, options=None) -> None:
+            pass
+
+        def GetArmState(self, *, options=None):
+            return type("ArmState", (), {"active_state": 31})()
+
+        def SendTwistCommand(self, command, *, options=None) -> None:
+            self.sent.append(command)
+
+        def Stop(self, *, options=None) -> None:
+            pass
+
+    class Cyclic:
+        def RefreshFeedback(self, *, options=None):
+            return type(
+                "Feedback",
+                (),
+                {"base": type("Pose", (), {
+                    "tool_pose_x": 0.0,
+                    "tool_pose_y": 0.0,
+                    "tool_pose_z": 0.0,
+                    "tool_pose_theta_x": 0.0,
+                    "tool_pose_theta_y": 0.0,
+                    "tool_pose_theta_z": 0.0,
+                })()},
+            )()
+
+    class Connection:
+        def __init__(self) -> None:
+            self.base = Base()
+            self.base_cyclic = Cyclic()
+            self.base_pb2 = type(
+                "BasePb2",
+                (),
+                {
+                    "TwistCommand": TwistCommand,
+                    "ServoingModeInformation": ServoingModeInformation,
+                    "CARTESIAN_REFERENCE_FRAME_BASE": 1,
+                    "SINGLE_LEVEL_SERVOING": 2,
+                    "ARMSTATE_SERVOING_READY": 31,
+                },
+            )()
+
+        def rpc_options(self):
+            return object()
+
+        def close(self) -> bool:
+            return True
+
+    monkeypatch.setattr(kortex_backend_module, "_watchdog_thread_factory", ManualWatchdog)
+    connection = Connection()
+    backend = KortexBackend(
+        connection,
+        anchor_envelope=AnchorEnvelope((0.02, 0.02, 0.02), 0.1),
+        max_linear_speed=0.005,
+        max_angular_speed_deg=2.0,
+    )
+    controller = TeleopController(
+        TeleopConfig(realtime=False, translation_scale=0.25),
+        ScriptedInput(
+            [
+                sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+                sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+                sample([0.04, 0.0, 0.0], 1.0, 3, 1.02),
+            ]
+        ),
+        backend,
+    )
+
+    controller.run(max_steps=3)
+
+    sent = [
+        np.array(
+            [
+                command.twist.linear_x,
+                command.twist.linear_y,
+                command.twist.linear_z,
+                command.twist.angular_x,
+                command.twist.angular_y,
+                command.twist.angular_z,
+            ]
+        )
+        for command in connection.base.sent
+    ]
+    np.testing.assert_allclose(sent[0], np.zeros(6))
+    assert 0.0 < np.linalg.norm(sent[1][:3]) <= 0.005
+    np.testing.assert_allclose(sent[1][3:], np.zeros(3))
+    assert max(np.linalg.norm(command[:3]) for command in sent) <= 0.005
+    assert max(np.linalg.norm(command[3:]) for command in sent) <= 2.0
 
 
 @pytest.mark.parametrize(

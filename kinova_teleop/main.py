@@ -17,17 +17,24 @@ from .evidence_log import EvidenceLogger, logger_event_sink
 from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
 from .hardware_profile import (
     FIRST_HARDWARE_PROFILE,
+    validate_kortex_runtime,
     validate_private_robot_ipv4,
     validate_workspace_span,
+)
+from .hardware_admission import (
+    confirm_move,
+    verify_released_now,
+    wait_for_fresh_released_input,
 )
 from .motion_lease import validate_motion_lease
 from .preflight import (
     PreflightContext,
     load_passing_preflight_report,
+    require_live_kortex_ready,
     run_kortex_readonly_preflight,
 )
 from .teleop_controller import StepDiagnostics, TeleopConfig, TeleopController
-from .workspace import WorkspaceLimits
+from .workspace import AnchorEnvelope, WorkspaceLimits
 from .xr_input import DryRunXrInput, SdkXrInput, XrInputSource
 
 
@@ -511,7 +518,10 @@ def _approve_fixed_segment(segment: Any, index: int) -> bool:
     return confirmation == "MOVE"
 
 
-def _preflight_context(args: argparse.Namespace) -> PreflightContext:
+def _preflight_context(
+    args: argparse.Namespace,
+    versions: Any | None = None,
+) -> PreflightContext:
     limits = _workspace_from_args(args)
     limit_mapping: dict[str, object] = {
         "max_linear_speed": _resolve_max_linear_speed(args),
@@ -523,8 +533,8 @@ def _preflight_context(args: argparse.Namespace) -> PreflightContext:
     return PreflightContext(
         code_revision="working-tree",
         dirty_worktree=False,
-        runtime={"python": sys.version.split()[0]},
-        driver={"name": "kortex", "version": "unknown"},
+        runtime={"python": getattr(versions, "python", sys.version.split()[0])},
+        driver={"name": "kortex", "version": getattr(versions, "kortex_api", "unknown")},
         firmware={"version": "read-only-unverified"},
         transport={"kind": "tcp", "host": args.robot_ip, "port": 10000},
         calibration=({"name": "reported-by-kortex", "sha256": "read-only-unverified"},),
@@ -669,17 +679,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         if args.check_kortex:
             return _run_kortex_readonly_check(args, password)
-        try:
-            confirmation = input("Type MOVE to enable Kortex motion: ")
-        except KeyboardInterrupt:
-            print("stopped by user", file=sys.stderr)
-            return 130
-        except Exception:
-            print("error: hardware confirmation failed", file=sys.stderr)
-            return 2
-        if confirmation != "MOVE":
-            print("error: hardware motion was not confirmed", file=sys.stderr)
-            return 2
 
     control_hz = resolve_control_hz(args)
     source = None
@@ -691,7 +690,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     exit_code = 2
     completion: str | None = None
     try:
-        if args.fixed_trajectory is None:
+        if args.fixed_trajectory is None and args.backend != "kortex":
             source = create_input(args)
         if args.backend == "kortex":
             from .kortex_transport import KortexConfig
@@ -701,8 +700,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                 evidence_logger = EvidenceLogger(
                     args.evidence_jsonl,
                     run_id=args.run_id,
-                )
+            )
             event_sink = logger_event_sink(evidence_logger) if evidence_logger is not None else None
+
+            if args.fixed_trajectory is None:
+                # Nothing that can transmit motion is constructed until the
+                # runtime, live PICO input, and current-session robot state
+                # have all been admitted.  The read-only connection is never
+                # reused for motion.
+                versions = validate_kortex_runtime()
+                source = create_input(args)
+                admitted = wait_for_fresh_released_input(
+                    source,
+                    sample_count=10,
+                    timeout_s=args.check_timeout,
+                )
+                readonly = _create_kortex_connection(
+                    KortexConfig(args.robot_ip, args.robot_user, password),
+                    read_only=True,
+                )
+                try:
+                    live_report = run_kortex_readonly_preflight(
+                        readonly,
+                        _preflight_context(args, versions),
+                    )
+                    require_live_kortex_ready(live_report)
+                finally:
+                    if not _close_resource(readonly, hardware=False, send_stop=False):
+                        raise RuntimeError("read-only Kortex cleanup failed")
+                confirm_move()
+                verify_released_now(
+                    source,
+                    after_timestamp_ns=admitted.last_timestamp_ns,
+                    admission=admitted,
+                    timeout_s=0.5,
+                )
+            else:
+                # Fixed trajectories have no live PICO path, but remain
+                # deliberately gated before a motion transport is created.
+                confirm_move()
 
             connection = _create_kortex_connection(
                 KortexConfig(args.robot_ip, args.robot_user, password),
@@ -712,6 +748,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_linear_speed=_resolve_max_linear_speed(args),
                 max_angular_speed_deg=_resolve_max_angular_speed_deg(args),
                 workspace_limits=workspace_limits,
+                anchor_envelope=AnchorEnvelope(
+                    FIRST_HARDWARE_PROFILE.anchor_translation_axis_m,
+                    math.radians(FIRST_HARDWARE_PROFILE.anchor_rotation_deg),
+                ),
                 event_sink=event_sink,
             )
         else:
@@ -743,6 +783,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     realtime=args.backend == "kortex" or not args.headless,
                     translation_scale=resolve_translation_scale(args),
                     stale_timeout=_resolve_stale_timeout(args),
+                    fatal_input_faults=args.backend == "kortex",
                 ),
                 source,
                 backend,
