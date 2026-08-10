@@ -166,15 +166,17 @@ class FixedTrajectoryRunner:
         self,
         backend: Any,
         *,
-        control_hz: float = 25.0,
+        control_hz: float | None = None,
         sleep: Callable[[float], None] = time.sleep,
         approve_segment: Callable[[RelativeSegment, int], bool] | None = None,
         event_sink: Callable[[str, str, Mapping[str, object]], None] | None = None,
     ) -> None:
-        if not math.isfinite(control_hz) or control_hz <= 0.0 or control_hz > 40.0:
+        if control_hz is not None and (
+            not math.isfinite(control_hz) or control_hz <= 0.0 or control_hz > 40.0
+        ):
             raise ValueError("control_hz must be in (0, 40]")
         self.backend = backend
-        self.control_hz = float(control_hz)
+        self.control_hz = float(control_hz) if control_hz is not None else None
         self.sleep = sleep
         self.approve_segment = approve_segment
         self.event_sink = event_sink
@@ -194,6 +196,11 @@ class FixedTrajectoryRunner:
 
     def run(self, spec: FixedTrajectorySpec) -> FixedTrajectoryResult:
         validate_trajectory(spec)
+        if self.control_hz is not None and not math.isclose(
+            self.control_hz, spec.control_hz, rel_tol=0.0, abs_tol=1e-12
+        ):
+            raise ValueError("runner control_hz must match trajectory control_hz")
+        control_hz = spec.control_hz
         self._stop_attempted = False
         self.backend.begin_control()
         stopped = False
@@ -250,7 +257,7 @@ class FixedTrajectoryRunner:
                     # the injected sleeper keeps tests deterministic and lets
                     # callers use a monotonic scheduler instead of wall time.
                     if point_index + 1 < len(segment.offsets_xyz):
-                        self.sleep(1.0 / self.control_hz)
+                        self.sleep(1.0 / control_hz)
                 confirmer = getattr(self.backend, "confirm_stationary", None)
                 if not callable(confirmer):
                     reason = "stationary confirmation is unavailable"

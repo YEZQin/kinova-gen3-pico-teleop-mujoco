@@ -55,7 +55,6 @@ def test_runner_stops_on_first_rejection_and_never_runs_next_segment():
     backend = RejectingBackend(reject_at_command=3)
     result = FixedTrajectoryRunner(
         backend,
-        control_hz=25.0,
         approve_segment=lambda *_: True,
     ).run(spec)
     assert result.completed_segments == 0
@@ -159,6 +158,16 @@ def test_runner_emits_segment_completion_only_after_software_stationary():
     ]
     assert sleeps == [1.0 / spec.control_hz] * (len(spec.segments[0].offsets_xyz) - 1)
     assert "physical_stop_observed" not in events
+
+
+def test_runner_rejects_a_control_rate_that_differs_from_the_validated_spec():
+    spec = load_trajectory(Path("configs/gen3_micro_axes.json"))
+    with pytest.raises(ValueError, match="must match trajectory control_hz"):
+        FixedTrajectoryRunner(
+            ConfirmingBackend(True),
+            control_hz=25.0,
+            approve_segment=lambda *_: True,
+        ).run(spec)
 
 
 def test_runner_propagates_backend_exception_after_one_stop():
