@@ -145,7 +145,9 @@ def test_untracked_or_stale_stream_returns_invalid_sample() -> None:
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: now[0])
     assert source.read().valid
     now[0] = 5.201
-    assert not source.read().valid
+    stale = source.read()
+    assert not stale.valid
+    assert stale.invalid_reason == "stream is stale"
     receiver.items.append(make_frame(sequence=2, tracked=False, received_at=5.202))
     now[0] = 5.202
     assert not source.read().valid
@@ -200,6 +202,7 @@ def test_healthy_same_ip_new_port_emits_boundary_and_requires_release() -> None:
     )
     boundary = source.read()
     assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
     assert source.health().active_source == ("10.0.0.2", 4000)
     assert source.health().last_error == "source changed"
     assert (
@@ -266,7 +269,9 @@ def test_stale_same_device_handoff_reports_source_changed_before_valid_frame() -
         )
     )
 
-    assert not source.read().valid
+    boundary = source.read()
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
     assert source.health().active_source == ("10.0.0.2", 4000)
     assert source.health().last_error == "source changed"
     assert source.read().valid

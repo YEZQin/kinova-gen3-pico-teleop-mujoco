@@ -457,7 +457,7 @@ class KortexBackend:
                     "STOPPING",
                     {"reason": decision.reason},
                 )
-                return BackendResult(False, False, 0.0, 0.0, decision.reason)
+                return BackendResult(False, False, 0.0, 0.0, latched_reason)
 
         if anchor is None:
             reason = "control anchor is unavailable"
@@ -601,7 +601,7 @@ class KortexBackend:
                 if require_active and not self._state_allows_command_locked(generation):
                     return None
             if self._fault_reason is not None:
-                return self._fault_reason
+                return self._effective_fault_reason_locked()
             self._fault_reason = reason
             emit_stop_request = not self._stop_requested
             token = self._request_stop_locked(force=True)
@@ -609,7 +609,8 @@ class KortexBackend:
         if emit_stop_request:
             self._emit("host_stop_requested", "STOPPING", {})
         self._attempt_stop(token=token, raise_on_failure=False)
-        return reason
+        with self._state_lock:
+            return self._effective_fault_reason_locked()
 
     def command_gripper(self, position: float) -> bool:
         """Send a rate-limited positional gripper command.

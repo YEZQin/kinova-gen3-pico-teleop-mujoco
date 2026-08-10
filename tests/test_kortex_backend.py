@@ -249,6 +249,26 @@ def test_workspace_rejection_stops_before_feedback_or_twist():
     assert backend.fault_reason == "target outside workspace"
 
 
+def test_workspace_rejection_reports_unconfirmed_stop_failure():
+    connection = _Connection(_feedback((0.0, 0.0, 0.3)))
+    backend = _backend(
+        connection,
+        workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
+    )
+    backend.begin_control()
+
+    def failed_stop(*, options=None):
+        raise RuntimeError("stop timeout")
+
+    connection.base.Stop = failed_stop
+    result = backend.command_pose(_target(position=(1.0, 0.0, 0.3)))
+
+    assert result.accepted is False
+    assert result.reason == "Stop attempted but unconfirmed"
+    assert backend.fault_reason == "Stop attempted but unconfirmed"
+    assert backend.stop_confirmed is False
+
+
 def test_stale_workspace_rejection_cannot_fault_new_rearmed_generation(
     monkeypatch,
 ):
@@ -329,6 +349,23 @@ def test_anchor_translation_rejection_latches_fault_and_stops_before_feedback():
     assert backend._fault_reason == "target outside anchor translation envelope"
     with pytest.raises(KortexSafetyError, match="latched"):
         backend.begin_control()
+
+
+def test_anchor_rejection_raises_unconfirmed_stop_failure():
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
+
+    def failed_stop(*, options=None):
+        raise RuntimeError("stop timeout")
+
+    connection.base.Stop = failed_stop
+
+    with pytest.raises(KortexSafetyError, match="Stop attempted but unconfirmed"):
+        backend.command_pose(_target(position=(0.020001, 0.0, 0.0)))
+
+    assert backend.fault_reason == "Stop attempted but unconfirmed"
+    assert backend.stop_confirmed is False
 
 
 def test_repeated_anchor_fault_latch_does_not_create_another_stop_attempt():
