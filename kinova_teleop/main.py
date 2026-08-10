@@ -743,7 +743,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     realtime=args.backend == "kortex" or not args.headless,
                     translation_scale=resolve_translation_scale(args),
                     stale_timeout=_resolve_stale_timeout(args),
-                    gripper=args.gripper,
                 ),
                 source,
                 backend,

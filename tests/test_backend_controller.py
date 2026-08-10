@@ -277,87 +277,41 @@ def test_controller_runs_generic_backend_without_a_mujoco_viewer() -> None:
     assert source.close_calls == 1
 
 
-class GripperRecordingBackend(RecordingBackend):
-    def __init__(self) -> None:
-        super().__init__()
-        self.gripper_values: list[float] = []
-
-    def command_gripper(self, position: float) -> bool:
-        self.events.append("command_gripper")
-        self.gripper_values.append(position)
-        return True
+class TriggerRejectingBackend(RecordingBackend):
+    def command_gripper(self, _position: float) -> bool:
+        raise AssertionError("PICO trigger must remain telemetry only")
 
 
-def gripper_sample(
-    grip: float,
-    trigger: float,
-    timestamp_ns: int,
-    received: float,
-) -> ControllerSample:
-    return ControllerSample(
-        position=np.zeros(3, dtype=np.float64),
-        quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
-        grip=grip,
-        timestamp_ns=timestamp_ns,
-        received_monotonic=received,
-        trigger=trigger,
-    )
-
-
-def test_gripper_config_requires_backend_support() -> None:
-    with pytest.raises(ValueError, match="gripper"):
-        TeleopController(
-            TeleopConfig(realtime=False, gripper=True),
-            ScriptedInput([]),
-            RecordingBackend(),
-        )
-
-
-def test_gripper_disabled_by_default_never_calls_backend() -> None:
+def test_controller_never_actuates_pico_trigger() -> None:
     source = ScriptedInput(
         [
-            gripper_sample(0.0, 0.9, 1, 1.00),
-            gripper_sample(1.0, 0.9, 2, 1.01),
+            ControllerSample(
+                position=np.zeros(3, dtype=np.float64),
+                quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+                grip=0.0,
+                timestamp_ns=1,
+                received_monotonic=1.0,
+                trigger=0.3,
+            ),
+            ControllerSample(
+                position=np.zeros(3, dtype=np.float64),
+                quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+                grip=1.0,
+                timestamp_ns=2,
+                received_monotonic=1.01,
+                trigger=0.7,
+            ),
         ],
     )
-    backend = GripperRecordingBackend()
+    backend = TriggerRejectingBackend()
     controller = TeleopController(TeleopConfig(realtime=False), source, backend)
 
     controller.step_once()
     controller.step_once()
 
-    assert "command_gripper" not in backend.events
-
-
-def test_gripper_forwards_trigger_only_while_clutch_is_active() -> None:
-    source = ScriptedInput(
-        [
-            gripper_sample(0.0, 0.3, 1, 1.00),
-            gripper_sample(1.0, 0.5, 2, 1.01),
-            gripper_sample(1.0, 0.7, 3, 1.02),
-            gripper_sample(0.0, 0.9, 4, 1.03),
-        ],
-    )
-    backend = GripperRecordingBackend()
-    controller = TeleopController(
-        TeleopConfig(realtime=False, gripper=True),
-        source,
-        backend,
-    )
-
-    for _ in range(4):
-        controller.step_once()
-
-    assert backend.gripper_values == [0.5, 0.7]
     assert backend.events == [
         "step",
         "begin_control",
         "command_pose",
-        "command_gripper",
-        "step",
-        "command_pose",
-        "command_gripper",
-        "step",
-        "hold",
         "step",
     ]

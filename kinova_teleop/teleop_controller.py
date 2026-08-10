@@ -25,7 +25,6 @@ class TeleopConfig:
     realtime: bool = True
     translation_scale: float = 0.5
     stale_timeout: float = 0.2
-    gripper: bool = False
     fatal_input_faults: bool = False
 
 
@@ -57,9 +56,6 @@ class TeleopController:
             raise ValueError("control_hz must be positive and finite")
         if not math.isfinite(config.translation_scale) or config.translation_scale <= 0:
             raise ValueError("translation_scale must be positive and finite")
-        if config.gripper and getattr(backend, "command_gripper", None) is None:
-            raise ValueError("The selected backend does not support a gripper")
-
         self.config = config
         self.source = source
         self.backend = backend
@@ -129,9 +125,6 @@ class TeleopController:
 
         if mapping.stale:
             self._emit("input_stale", "STOPPING", {})
-
-        if self.config.gripper and mapping.active and sample.valid:
-            self.backend.command_gripper(float(sample.trigger))
 
         self.backend.step()
         self.steps += 1

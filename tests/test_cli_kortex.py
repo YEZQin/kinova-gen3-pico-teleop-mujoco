@@ -164,12 +164,41 @@ def test_kortex_rejections_happen_before_connection(
     assert calls == []
 
 
-def test_gripper_requires_kortex_backend(monkeypatch, capsys) -> None:
-    calls = _install_unreachable_connection_factory(monkeypatch)
+def test_deprecated_gripper_flag_rejects_before_hardware_setup(monkeypatch, capsys) -> None:
+    sdk_imports = 0
+    robot_connections = 0
+    move_prompts = 0
+    original_import = builtins.__import__
+
+    def count_sdk_imports(name, *args, **kwargs):
+        nonlocal sdk_imports
+        if name.startswith("kortex_api"):
+            sdk_imports += 1
+        return original_import(name, *args, **kwargs)
+
+    def count_robot_connections(*_args, **_kwargs):
+        nonlocal robot_connections
+        robot_connections += 1
+        raise AssertionError("robot connection must not be created")
+
+    def count_move_prompts(_prompt: str) -> str:
+        nonlocal move_prompts
+        move_prompts += 1
+        raise AssertionError("motion confirmation must not be prompted")
+
+    monkeypatch.setattr(builtins, "__import__", count_sdk_imports)
+    monkeypatch.setattr(
+        "kinova_teleop.main._create_kortex_connection",
+        count_robot_connections,
+        raising=False,
+    )
+    monkeypatch.setattr("builtins.input", count_move_prompts)
 
     assert main(["--gripper"]) == 2
     assert "--gripper is disabled" in capsys.readouterr().err
-    assert calls == []
+    assert sdk_imports == 0
+    assert robot_connections == 0
+    assert move_prompts == 0
 
 
 def test_fixed_segment_approval_requires_exact_move(monkeypatch) -> None:
@@ -508,10 +537,9 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
     }
     controller_config = created["controller_config"]
     assert controller_config.translation_scale == 0.25
-    # Hardware defaults: reduced RPC rate, wall-clock pacing, gripper off.
+    # Hardware defaults: reduced RPC rate and wall-clock pacing.
     assert controller_config.control_hz == 40.0
     assert controller_config.realtime is True
-    assert controller_config.gripper is False
     assert backend.closed
 
 
@@ -534,15 +562,6 @@ def test_kortex_default_input_is_pico_udp(monkeypatch) -> None:
         "port": 15031,
         "stale_after": 0.2,
     }
-
-
-def test_kortex_gripper_flag_reaches_controller_config(monkeypatch) -> None:
-    created: dict[str, object] = {}
-    _install_valid_kortex_fakes(monkeypatch, created)
-    monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", _FakeSource)
-
-    assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware", "--gripper"])) == 2
-    assert "controller_config" not in created
 
 
 def test_kortex_headless_stays_realtime_and_needs_no_steps(monkeypatch) -> None:

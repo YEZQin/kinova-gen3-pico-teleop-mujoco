@@ -32,8 +32,6 @@ SERVO_READY_TIMEOUT = 3.0
 FAULT_POLL_INTERVAL = 0.05
 STATIONARY_MAX_LINEAR_SPEED = 0.001
 STATIONARY_MAX_ANGULAR_SPEED_DEG = 0.5
-GRIPPER_DEADBAND = 0.02
-GRIPPER_MIN_INTERVAL = 0.1
 
 # Private test seam. Production callers cannot replace or disable the watchdog.
 _watchdog_thread_factory = threading.Thread
@@ -157,8 +155,6 @@ class KortexBackend:
         self._stop_failure_reason: str | None = None
         self._closed = False
         self._connection_closed = False
-        self._gripper_last_value: float | None = None
-        self._gripper_last_time: float | None = None
 
         try:
             self._require_startup_ready()
@@ -611,78 +607,6 @@ class KortexBackend:
         self._attempt_stop(token=token, raise_on_failure=False)
         with self._state_lock:
             return self._effective_fault_reason_locked()
-
-    def command_gripper(self, position: float) -> bool:
-        """Send a rate-limited positional gripper command.
-
-        Returns ``True`` when a command was sent, ``False`` when the value was
-        deduplicated, rate-limited, or the backend is not accepting commands.
-        Gripper commands are positional and self-terminating, so they are not
-        covered by the twist watchdog.
-        """
-
-        if not math.isfinite(position):
-            token = self._request_stop(force=True)
-            self._attempt_stop(token=token, raise_on_failure=False)
-            raise ValueError("Gripper position must be finite")
-        position = float(min(1.0, max(0.0, position)))
-
-        now = self._monotonic()
-        with self._state_lock:
-            if not self._state_allows_command_locked():
-                return False
-            generation = self._generation
-            if (
-                self._gripper_last_value is not None
-                and abs(position - self._gripper_last_value) < GRIPPER_DEADBAND
-            ):
-                return False
-            if (
-                self._gripper_last_time is not None
-                and now - self._gripper_last_time < GRIPPER_MIN_INTERVAL
-            ):
-                return False
-
-        command = self.connection.base_pb2.GripperCommand()
-        command.mode = self.connection.base_pb2.GRIPPER_POSITION
-        finger = command.gripper.finger.add()
-        finger.finger_identifier = 1
-        finger.value = position
-
-        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
-            token = self._request_stop(force=True)
-            self._attempt_stop(token=token, raise_on_failure=False)
-            raise KortexSafetyError(
-                "Timed out waiting for in-flight RPC; Stop attempted but unconfirmed"
-            )
-
-        send_error: BaseException | None = None
-        sent = False
-        try:
-            with self._state_lock:
-                if not self._state_allows_command_locked(generation):
-                    return False
-            try:
-                self.connection.base.SendGripperCommand(
-                    command,
-                    options=self.connection.rpc_options(),
-                )
-                sent = True
-            except BaseException as error:
-                send_error = error
-        finally:
-            self._rpc_lock.release()
-
-        if send_error is not None:
-            token = self._request_stop(force=True)
-            self._attempt_stop(token=token, raise_on_failure=False)
-            raise send_error
-
-        if sent:
-            with self._state_lock:
-                self._gripper_last_value = position
-                self._gripper_last_time = now
-        return sent
 
     def _ensure_watchdog_ready(self) -> None:
         generation: int | None = None
