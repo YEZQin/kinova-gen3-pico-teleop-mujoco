@@ -12,8 +12,8 @@ from kinova_teleop.main import _approve_fixed_segment, _cleanup_resources, main
 
 def _motion_gate_args(arguments: list[str]) -> list[str]:
     return arguments + [
-        "--workspace-min", "-1", "-1", "-1",
-        "--workspace-max", "1", "1", "1",
+        "--workspace-min", "0", "0", "0",
+        "--workspace-max", "0.04", "0.04", "0.04",
         "--motion-lease", "fixture-motion.lock",
         "--preflight-report", "fixture-preflight.json",
     ]
@@ -112,7 +112,7 @@ def _install_unreachable_connection_factory(monkeypatch):
                 "kortex",
                 "--enable-hardware",
                 "--max-linear-speed",
-                "0.031",
+                "0.0051",
             ],
             "secret",
             "MOVE",
@@ -123,7 +123,7 @@ def _install_unreachable_connection_factory(monkeypatch):
                 "kortex",
                 "--enable-hardware",
                 "--max-angular-speed-deg",
-                "5.1",
+                "2.1",
             ],
             "secret",
             "MOVE",
@@ -134,7 +134,7 @@ def _install_unreachable_connection_factory(monkeypatch):
             "MOVE",
         ),
         (
-            ["--backend", "kortex", "--enable-hardware", "--scale", "0.6"],
+            ["--backend", "kortex", "--enable-hardware", "--scale", "0.26"],
             "secret",
             "MOVE",
         ),
@@ -218,13 +218,13 @@ def test_preflight_report_gate_precedes_password_and_prompt(monkeypatch) -> None
         "kortex",
         "--enable-hardware",
         "--workspace-min",
-        "-1",
-        "-1",
-        "-1",
+        "0",
+        "0",
+        "0",
         "--workspace-max",
-        "1",
-        "1",
-        "1",
+        "0.04",
+        "0.04",
+        "0.04",
         "--motion-lease",
         "fixture-motion.lock",
     ]
@@ -472,15 +472,15 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
     assert config.password == "secret"
     assert backend.connection is connection
     assert backend.kwargs == {
-        "max_linear_speed": 0.03,
-        "max_angular_speed_deg": 5.0,
+        "max_linear_speed": 0.005,
+        "max_angular_speed_deg": 2.0,
         "workspace_limits": backend.kwargs["workspace_limits"],
         "event_sink": None,
     }
     controller_config = created["controller_config"]
-    assert controller_config.translation_scale == 0.5
+    assert controller_config.translation_scale == 0.25
     # Hardware defaults: reduced RPC rate, wall-clock pacing, gripper off.
-    assert controller_config.control_hz == 25.0
+    assert controller_config.control_hz == 40.0
     assert controller_config.realtime is True
     assert controller_config.gripper is False
     assert backend.closed

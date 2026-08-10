@@ -15,6 +15,11 @@ from typing import Any
 from .pico_udp_input import PicoUdpInput
 from .evidence_log import EvidenceLogger, logger_event_sink
 from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
+from .hardware_profile import (
+    FIRST_HARDWARE_PROFILE,
+    validate_private_robot_ipv4,
+    validate_workspace_span,
+)
 from .motion_lease import validate_motion_lease
 from .preflight import (
     PreflightContext,
@@ -33,16 +38,31 @@ DEFAULT_MODEL = (
 )
 
 DEFAULT_MUJOCO_CONTROL_HZ = 100.0
-DEFAULT_KORTEX_CONTROL_HZ = 25.0
-MAX_KORTEX_CONTROL_HZ = 40.0
 DEFAULT_KORTEX_ROBOT_IP = "192.168.1.10"
 DEFAULT_KORTEX_ROBOT_USER = "admin"
-DEFAULT_KORTEX_LINEAR_SPEED = 0.03
-DEFAULT_KORTEX_ANGULAR_SPEED_DEG = 5.0
-MAX_KORTEX_SCALE = 0.5
-MAX_KORTEX_STALE_TIMEOUT = 0.2
+DEFAULT_MUJOCO_TRANSLATION_SCALE = 0.5
+DEFAULT_MUJOCO_STALE_TIMEOUT = 0.2
 DEFAULT_MOTION_RUN_ID = "gen3-first-hardware"
 DEFAULT_MOTION_OWNER = "kinova-teleop"
+
+
+class _BackendDefaultsParser(argparse.ArgumentParser):
+    """Resolve legacy MuJoCo presentation defaults after backend selection."""
+
+    def parse_known_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> tuple[argparse.Namespace, list[str]]:
+        parsed, extras = super().parse_known_args(args, namespace)
+        if parsed.backend == "mujoco" and parsed.scale is None:
+            parsed = argparse.Namespace(
+                **(
+                    vars(parsed)
+                    | {"scale": DEFAULT_MUJOCO_TRANSLATION_SCALE}
+                ),
+            )
+        return parsed, extras
 
 
 def _create_kortex_connection(config: Any) -> Any:
@@ -62,7 +82,7 @@ def _create_kortex_backend(connection: Any, **kwargs: Any) -> Any:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _BackendDefaultsParser(
         description=(
             "Use the PICO left controller to command a Kinova Gen3 arm in "
             "MuJoCo or, with explicit hardware gating, over Kortex."
@@ -83,8 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scale",
         type=float,
-        default=0.5,
-        help="controller-to-robot translation scale (default: 0.5)",
+        default=None,
+        help="controller-to-robot translation scale (backend-specific default)",
     )
     parser.add_argument(
         "--control-hz",
@@ -93,15 +113,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "teleoperation update rate "
             f"(default: {DEFAULT_MUJOCO_CONTROL_HZ:g} for MuJoCo, "
-            f"{DEFAULT_KORTEX_CONTROL_HZ:g} for Kortex; "
-            f"Kortex maximum: {MAX_KORTEX_CONTROL_HZ:g})"
+            f"{FIRST_HARDWARE_PROFILE.control_hz:g} for Kortex; "
+            f"Kortex maximum: {FIRST_HARDWARE_PROFILE.control_hz:g})"
         ),
     )
     parser.add_argument(
         "--stale-timeout",
         type=float,
-        default=0.2,
-        help="seconds before unchanged XR timestamps release the clutch (default: 0.2)",
+        default=None,
+        help="seconds before unchanged XR timestamps release the clutch (backend-specific default)",
     )
     parser.add_argument(
         "--dry-run",
@@ -195,14 +215,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-linear-speed",
         type=float,
-        default=DEFAULT_KORTEX_LINEAR_SPEED,
-        help="Kortex linear-speed limit in m/s (maximum: 0.03)",
+        default=None,
+        help="Kortex linear-speed limit in m/s (maximum: 0.005)",
     )
     parser.add_argument(
         "--max-angular-speed-deg",
         type=float,
-        default=DEFAULT_KORTEX_ANGULAR_SPEED_DEG,
-        help="Kortex angular-speed limit in deg/s (maximum: 5)",
+        default=None,
+        help="Kortex angular-speed limit in deg/s (maximum: 2)",
     )
     parser.add_argument(
         "--gripper",
@@ -223,8 +243,38 @@ def resolve_control_hz(args: argparse.Namespace) -> float:
     if args.control_hz is not None:
         return float(args.control_hz)
     if args.backend == "kortex":
-        return DEFAULT_KORTEX_CONTROL_HZ
+        return FIRST_HARDWARE_PROFILE.control_hz
     return DEFAULT_MUJOCO_CONTROL_HZ
+
+
+def resolve_translation_scale(args: argparse.Namespace) -> float:
+    """Resolve the backend-specific controller-to-robot translation scale."""
+
+    if args.scale is not None:
+        return float(args.scale)
+    if args.backend == "kortex":
+        return FIRST_HARDWARE_PROFILE.translation_scale
+    return DEFAULT_MUJOCO_TRANSLATION_SCALE
+
+
+def _resolve_stale_timeout(args: argparse.Namespace) -> float:
+    if args.stale_timeout is not None:
+        return float(args.stale_timeout)
+    if args.backend == "kortex":
+        return FIRST_HARDWARE_PROFILE.stale_timeout_s
+    return DEFAULT_MUJOCO_STALE_TIMEOUT
+
+
+def _resolve_max_linear_speed(args: argparse.Namespace) -> float:
+    if args.max_linear_speed is not None:
+        return float(args.max_linear_speed)
+    return FIRST_HARDWARE_PROFILE.max_linear_speed_mps
+
+
+def _resolve_max_angular_speed_deg(args: argparse.Namespace) -> float:
+    if args.max_angular_speed_deg is not None:
+        return float(args.max_angular_speed_deg)
+    return FIRST_HARDWARE_PROFILE.max_angular_speed_deg_s
 
 
 def create_input(args: argparse.Namespace) -> XrInputSource:
@@ -238,7 +288,7 @@ def create_input(args: argparse.Namespace) -> XrInputSource:
         return PicoUdpInput(
             host=args.pico_host,
             port=args.pico_port,
-            stale_after=args.stale_timeout,
+            stale_after=_resolve_stale_timeout(args),
         )
     return SdkXrInput()
 
@@ -312,9 +362,9 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         not math.isfinite(args.control_hz) or args.control_hz <= 0.0
     ):
         return "--control-hz must be positive"
-    if not math.isfinite(args.scale) or args.scale <= 0.0:
+    if not math.isfinite(resolve_translation_scale(args)) or resolve_translation_scale(args) <= 0.0:
         return "--scale must be positive"
-    if not math.isfinite(args.stale_timeout) or args.stale_timeout <= 0.0:
+    if not math.isfinite(_resolve_stale_timeout(args)) or _resolve_stale_timeout(args) <= 0.0:
         return "--stale-timeout must be positive"
     if not 1 <= args.pico_port <= 65535:
         return "--pico-port must be between 1 and 65535"
@@ -371,27 +421,33 @@ def _validate_kortex_args(
         return "--check-kortex cannot be combined with --fixed-trajectory"
     if args.fixed_trajectory and args.input != "none":
         return "--fixed-trajectory requires --input none"
-    if args.stale_timeout > MAX_KORTEX_STALE_TIMEOUT:
+    if _resolve_stale_timeout(args) > FIRST_HARDWARE_PROFILE.stale_timeout_s:
         return "--stale-timeout must not exceed 0.2 for --backend kortex"
     if not args.robot_ip.strip():
         return "--robot-ip must not be empty"
     if not args.robot_user.strip():
         return "--robot-user must not be empty"
-    if args.scale > MAX_KORTEX_SCALE:
-        return "--scale must not exceed 0.5 for --backend kortex"
-    if args.control_hz is not None and args.control_hz > MAX_KORTEX_CONTROL_HZ:
+    try:
+        validate_private_robot_ipv4(args.robot_ip)
+    except ValueError as error:
+        return str(error)
+    if resolve_translation_scale(args) > FIRST_HARDWARE_PROFILE.translation_scale:
+        return "--scale must not exceed 0.25 for --backend kortex"
+    if resolve_control_hz(args) > FIRST_HARDWARE_PROFILE.control_hz:
         return (
-            f"--control-hz must not exceed {MAX_KORTEX_CONTROL_HZ:g} "
+            f"--control-hz must not exceed {FIRST_HARDWARE_PROFILE.control_hz:g} "
             "for --backend kortex"
         )
-    if not math.isfinite(args.max_linear_speed) or not (
-        0.0 < args.max_linear_speed <= DEFAULT_KORTEX_LINEAR_SPEED
+    max_linear_speed = _resolve_max_linear_speed(args)
+    if not math.isfinite(max_linear_speed) or not (
+        0.0 < max_linear_speed <= FIRST_HARDWARE_PROFILE.max_linear_speed_mps
     ):
-        return "--max-linear-speed must be in (0, 0.03]"
-    if not math.isfinite(args.max_angular_speed_deg) or not (
-        0.0 < args.max_angular_speed_deg <= DEFAULT_KORTEX_ANGULAR_SPEED_DEG
+        return "--max-linear-speed must be in (0, 0.005]"
+    max_angular_speed_deg = _resolve_max_angular_speed_deg(args)
+    if not math.isfinite(max_angular_speed_deg) or not (
+        0.0 < max_angular_speed_deg <= FIRST_HARDWARE_PROFILE.max_angular_speed_deg_s
     ):
-        return "--max-angular-speed-deg must be in (0, 5]"
+        return "--max-angular-speed-deg must be in (0, 2]"
 
     # Read-only inspection does not authorize motion, so workspace/lease gates
     # are intentionally scoped to the motion paths only.
@@ -402,6 +458,10 @@ def _validate_kortex_args(
             return str(error)
         if limits is None:
             return "--workspace-min and --workspace-max are required for Kortex motion"
+        try:
+            validate_workspace_span(limits)
+        except ValueError as error:
+            return str(error)
         if args.motion_lease is None:
             return "--motion-lease is required for Kortex motion"
         try:
@@ -454,8 +514,8 @@ def _approve_fixed_segment(segment: Any, index: int) -> bool:
 def _preflight_context(args: argparse.Namespace) -> PreflightContext:
     limits = _workspace_from_args(args)
     limit_mapping: dict[str, object] = {
-        "max_linear_speed": args.max_linear_speed,
-        "max_angular_speed_deg": args.max_angular_speed_deg,
+        "max_linear_speed": _resolve_max_linear_speed(args),
+        "max_angular_speed_deg": _resolve_max_angular_speed_deg(args),
     }
     if limits is not None:
         limit_mapping["workspace_min"] = list(limits.minimum_xyz)
@@ -643,8 +703,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             backend = _create_kortex_backend(
                 connection,
-                max_linear_speed=args.max_linear_speed,
-                max_angular_speed_deg=args.max_angular_speed_deg,
+                max_linear_speed=_resolve_max_linear_speed(args),
+                max_angular_speed_deg=_resolve_max_angular_speed_deg(args),
                 workspace_limits=workspace_limits,
                 event_sink=event_sink,
             )
@@ -675,8 +735,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # Hardware must always run against the wall clock; free-running
                     # a headless loop against a real arm floods the robot with RPCs.
                     realtime=args.backend == "kortex" or not args.headless,
-                    translation_scale=args.scale,
-                    stale_timeout=args.stale_timeout,
+                    translation_scale=resolve_translation_scale(args),
+                    stale_timeout=_resolve_stale_timeout(args),
                     gripper=args.gripper,
                 ),
                 source,
