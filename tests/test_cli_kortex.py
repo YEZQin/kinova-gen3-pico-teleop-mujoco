@@ -27,6 +27,20 @@ def _valid_motion_argv() -> list[str]:
     return _motion_gate_args(["--backend", "kortex", "--enable-hardware"])
 
 
+def _valid_fixed_motion_argv() -> list[str]:
+    return _motion_gate_args(
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--input",
+            "none",
+            "--fixed-trajectory",
+            "fixture-trajectory.json",
+        ]
+    )
+
+
 def _install_valid_motion_gate_files(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
     monkeypatch.setattr(
@@ -215,6 +229,58 @@ def test_kortex_admission_failures_cannot_reach_motion_connect(
 
     assert main(_valid_motion_argv()) == 2
     assert events.count("motion_connect") == 0
+
+
+@pytest.mark.parametrize("failed_stage", ("runtime", "live_readiness"))
+def test_fixed_trajectory_admission_failure_cannot_reach_motion_or_send_twist(
+    monkeypatch,
+    failed_stage: str,
+) -> None:
+    """Fixed Kortex motion shares runtime and live-readiness admission gates."""
+
+    events: list[str] = []
+    twists: list[object] = []
+    _install_valid_motion_gate_files(monkeypatch)
+    monkeypatch.setattr(main_module, "load_trajectory", lambda _path: object())
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: object())
+    monkeypatch.setattr(
+        main_module,
+        "create_input",
+        lambda _args: (_ for _ in ()).throw(AssertionError("fixed trajectory has no PICO input")),
+    )
+
+    class ReadonlyConnection:
+        base = SimpleNamespace(SendTwistCommand=lambda *args, **kwargs: twists.append(args))
+
+        def close(self, **_kwargs) -> bool:
+            return True
+
+    def connection_factory(_config, *, read_only: bool = False):
+        events.append("readonly_connect" if read_only else "motion_connect")
+        return ReadonlyConnection()
+
+    monkeypatch.setattr(main_module, "_create_kortex_connection", connection_factory)
+    monkeypatch.setattr(main_module, "run_kortex_readonly_preflight", lambda *_args: _ready_report())
+    monkeypatch.setattr(main_module, "require_live_kortex_ready", lambda _report: None)
+    monkeypatch.setattr(main_module, "confirm_move", lambda: events.append("MOVE"))
+
+    failure = RuntimeError(f"{failed_stage} rejected")
+    if failed_stage == "runtime":
+        monkeypatch.setattr(
+            main_module,
+            "validate_kortex_runtime",
+            lambda: (_ for _ in ()).throw(failure),
+        )
+    else:
+        monkeypatch.setattr(
+            main_module,
+            "require_live_kortex_ready",
+            lambda _report: (_ for _ in ()).throw(failure),
+        )
+
+    assert main(_valid_fixed_motion_argv()) == 2
+    assert events.count("motion_connect") == 0
+    assert twists == []
 
 
 class _FakeSource:

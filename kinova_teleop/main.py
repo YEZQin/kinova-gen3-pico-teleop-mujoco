@@ -703,42 +703,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             event_sink = logger_event_sink(evidence_logger) if evidence_logger is not None else None
 
+            # Nothing that can transmit motion is constructed until runtime
+            # compatibility and current-session robot state are admitted.  A
+            # live PICO teleoperation path additionally requires stable
+            # released input before and after confirmation.  The read-only
+            # connection is never reused for motion.
+            versions = validate_kortex_runtime()
             if args.fixed_trajectory is None:
-                # Nothing that can transmit motion is constructed until the
-                # runtime, live PICO input, and current-session robot state
-                # have all been admitted.  The read-only connection is never
-                # reused for motion.
-                versions = validate_kortex_runtime()
                 source = create_input(args)
                 admitted = wait_for_fresh_released_input(
                     source,
                     sample_count=10,
                     timeout_s=args.check_timeout,
                 )
-                readonly = _create_kortex_connection(
-                    KortexConfig(args.robot_ip, args.robot_user, password),
-                    read_only=True,
+            readonly = _create_kortex_connection(
+                KortexConfig(args.robot_ip, args.robot_user, password),
+                read_only=True,
+            )
+            try:
+                live_report = run_kortex_readonly_preflight(
+                    readonly,
+                    _preflight_context(args, versions),
                 )
-                try:
-                    live_report = run_kortex_readonly_preflight(
-                        readonly,
-                        _preflight_context(args, versions),
-                    )
-                    require_live_kortex_ready(live_report)
-                finally:
-                    if not _close_resource(readonly, hardware=False, send_stop=False):
-                        raise RuntimeError("read-only Kortex cleanup failed")
-                confirm_move()
+                require_live_kortex_ready(live_report)
+            finally:
+                if not _close_resource(readonly, hardware=False, send_stop=False):
+                    raise RuntimeError("read-only Kortex cleanup failed")
+            confirm_move()
+            if source is not None:
                 verify_released_now(
                     source,
                     after_timestamp_ns=admitted.last_timestamp_ns,
                     admission=admitted,
                     timeout_s=0.5,
                 )
-            else:
-                # Fixed trajectories have no live PICO path, but remain
-                # deliberately gated before a motion transport is created.
-                confirm_move()
 
             connection = _create_kortex_connection(
                 KortexConfig(args.robot_ip, args.robot_user, password),
