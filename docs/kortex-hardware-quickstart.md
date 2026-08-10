@@ -1,26 +1,35 @@
 # Kinova Gen3 first-hardware quickstart
 
-This branch is implementation-ready for an onsite validation; it is not a
-claim of physical stopping performance. The first-visit profile is bare-arm
-only and keeps all motion behind explicit, independently checked gates.
+This branch is **offline verified** only. It is not a claim of physical
+stopping performance. A system becomes **read-only verified** only after a
+current-session T0 check, and **hardware-observed** only after T0--T3 are
+recorded for the same code revision and device session.
 
-## Hard constraints
+The tested first-hardware stack is Python 3.11.15, Kortex `2.8.0.post5`,
+protobuf `3.20.0`, and firmware `2.8.0-5`. Use only a matching offline
+wheelhouse; do not substitute an unreviewed SDK or firmware version.
 
-- Use a Kortex wheel matched to the robot firmware, platform, and supported
-  Python version. Keep the wheel in an offline wheelhouse and verify
-  `import kortex_api` in the target virtual environment.
-- Use trusted wired TCP to the robot on port `10000`; do not authorize motion
-  when the route is unreachable.
-- Read the password only from `KINOVA_PASSWORD`; never print, persist, or put
-  it on a command line.
-- The first-hardware profile rejects `--gripper` before password lookup,
-  imports, prompts, or a connection. It never runs `ClearFaults`, Home/action
-  playback, low-level cyclic control, or a watchdog bypass.
-- Keep the documented caps: 40 Hz, scale 0.5, stale timeout 0.2 s, linear
-  speed 0.03 m/s, and angular speed 5 deg/s. Start at 25 Hz, 0.01 m/s, and
-  2 deg/s.
+## Non-negotiable constraints
 
-## Offline gates
+- Use a trusted wired private IPv4 route to the robot on port `10000`.
+- Read credentials only from `KINOVA_PASSWORD`; never put them in command
+  lines, evidence, logs, or launcher parameters.
+- The first-hardware profile is fixed at 40 Hz, scale 0.25, stale timeout
+  0.2 s, 0.005 m/s linear speed, and 2 deg/s angular speed.
+- The anchor-relative envelope is ±0.02 m on each translation axis and 5 deg
+  in rotation. It is additional to tight, operator-reviewed, inclusive
+  absolute XYZ bounds; never use a broad reusable workspace example.
+- Gripper and vision writes are disabled. The software does not clear faults,
+  home the arm, play actions, use low-level cyclic control, bypass the
+  watchdog, or reconnect automatically.
+- Grip release is recoverable. Stale, invalid, source-change, RPC, workspace,
+  and watchdog faults latch and exit. A Stop RPC return is not proof that the
+  arm is physically still.
+
+## 1. Offline evidence
+
+Run the offline suite before travel. These commands neither import the Kortex
+SDK nor connect to the robot:
 
 ```powershell
 python -m pytest -q
@@ -28,90 +37,65 @@ python -m kinova_teleop.main --dry-run --headless --steps 2000
 python -m kinova_teleop.main --check-xr --samples 100 --input pico-udp
 ```
 
-The dry run must report a finite state. None of these commands imports the
-Kortex SDK or connects to a robot.
+Record these results as **offline verified**. The PICO must later be fresh and
+released before a live read-only connection and again before the exact `MOVE`
+confirmation. A reviewed report and a supervisor lease are necessary motion
+artifacts, but neither replaces these live checks.
 
-## Read-only Kortex check
+## 2. T0: current read-only evidence
 
-Set the password without echoing it, then run the read-only preflight. The
-program requires the exact `CONNECT` confirmation and reads only arm state and
-one feedback frame. It does not set servoing mode or issue motion commands.
+Before connecting, verify a reachable physical E-stop, second observer, clear
+workspace, fixture, cables, payload/TCP, and Kinova Web App status. Release
+Grip and ensure the PICO is producing fresh input. Set the environment
+credential without echoing it, then run only the exact read-only path with
+`CONNECT` and save a new, non-overwriting report:
 
 ```powershell
 $env:KINOVA_PASSWORD = Read-Host 'Kortex password'
 python -m kinova_teleop.main `
   --backend kortex --enable-hardware --check-kortex `
   --robot-ip 192.168.1.10 --robot-user admin `
-  --preflight-json results\gen3-preflight.json
+  --preflight-json results\gen3-t0-read-only.json
 ```
 
-Inspect the JSON report and the Kinova Web App for firmware, faults, payload,
-limits, and the physical checklist. A read-only RPC success does not certify
-the physical checklist.
+Confirm L53 / 7 DoF, firmware `2.8.0-5`, Running, Single Level Servoing,
+`SERVOING_READY`, and a finite pose. Do not continue if read-only cleanup
+fails. The `--check-kortex` JSON is read-only evidence: it intentionally does
+not become an accepted motion report. A separate central-schema report must be
+reviewed with every software check, physical check, and `passed=true` before
+it can be supplied as `--preflight-report`.
 
-## Guarded motion
+## Mandatory pause after T0
 
-Motion requires an external supervisor lease. The adapter validates the lease
-read-only; it never acquires, deletes, or transfers it. Both explicit inclusive
-XYZ bounds and a matching lease are required before the password is read or
-the exact `MOVE` prompt is shown.
+Stop here and present T0 to the onsite operator. Do not construct or present a
+motion invocation until they authorize continuing, confirm that onsite safety
+conditions still hold, review the actual anchor pose and tight absolute XYZ
+bounds, validate the separately reviewed report and lease paths, and confirm
+that Grip is released. The approved `scripts/start_kortex_pico_teleop.ps1`
+launcher accepts the reviewed artifacts and has no credential parameter; it
+fixes the first-hardware profile rather than accepting arbitrary limits.
 
-```powershell
-python -m kinova_teleop.main `
-  --backend kortex --enable-hardware `
-  --workspace-min -0.20 -0.20 0.10 `
-  --workspace-max 0.20 0.20 0.60 `
-  --motion-lease C:\path\to\motion.lock `
-  --preflight-report C:\path\to\gen3-preflight-passed.json `
-  --run-id gen3-first-hardware --lease-owner kinova-teleop `
-  --max-linear-speed 0.01 --max-angular-speed-deg 2
-```
+## 3. Hardware-observed trials
 
-The motion report must be a separately reviewed central-schema JSON with
-`passed=true`, every software check passing, and every Gen3 physical check
-confirmed. The report emitted by `--check-kortex --preflight-json` is
-read-only and intentionally fails until the onsite checklist is completed;
-pass that reviewed file as `--preflight-report`.
+After the mandatory pause, keep an evidence log and label each observation by
+the following gates:
 
-Grip must be released below 0.8 before motion authorization and pressed above
-0.9 to activate the clutch. The first valid press anchors the current
-controller pose to the measured end-effector pose; it must not command a jump.
+- **T1 — arm/no-jump:** verify no motion before Grip press, first press only
+  anchors the controller to measured end-effector pose, and release requests
+  Stop. If Stop is unconfirmed, use physical E-stop/Web intervention and do
+  not relaunch.
+- **T2 — six-axis micro-motion:** test X/Y/Z separately at millimetre scale,
+  then Roll/Pitch/Yaw separately at small angle. Record commanded and observed
+  direction, peak speed, envelope status, and Stop reason. Any sign or
+  reference-frame mismatch ends the trial.
+- **T3 — stop paths:** one at a time test Grip release, PICO stale,
+  controlled source/session loss, `Ctrl+C`, and watchdog stall. Record both
+  event-to-host-Stop-request time and feedback-to-stationary time. Automatic
+  recovery or continued motion is a failure.
 
-## Fixed micro-trajectory
-
-The checked-in trajectory contains ten independent, orientation-preserving,
-millimetre-scale excursions that return to the measured anchor. It is not a
-replacement for the physical checklist and still requires lease, bounds,
-password, and `MOVE`:
-
-```powershell
-python -m kinova_teleop.main `
-  --backend kortex --enable-hardware --input none `
-  --fixed-trajectory configs\gen3_micro_axes.json `
-  --workspace-min -0.20 -0.20 0.10 `
-  --workspace-max 0.20 0.20 0.60 `
-  --motion-lease C:\path\to\motion.lock `
-  --preflight-report C:\path\to\gen3-preflight-passed.json `
-  --run-id gen3-first-hardware --lease-owner kinova-teleop `
-  --max-linear-speed 0.01 --max-angular-speed-deg 2
-```
-
-Each segment stops on the first rejection and requires a fresh low-velocity
-feedback observation before another segment is authorized. The program asks
-for an exact `MOVE` confirmation before every segment; a missing confirmation
-hook is fail-closed. Normal RPC return or cleanup is not evidence of physical
-stillness, and the adapter never fabricates `physical_stop_observed`.
-
-## Stop semantics and observations
-
-Grip release, stale XR input, an RPC error, watchdog expiry, and program exit
-request Stop through the existing backend generation/lock path. The 0.2 s
-property is a host stop-request/admission boundary, never a physical-stop
-guarantee. Evidence distinguishes `host_stop_requested`, `stop_rpc_returned`,
-and `stop_unconfirmed`; a failed Stop requires the physical E-stop or Kinova
-Web App intervention before relaunch.
-
-Only a responsible onsite operator with a reachable physical E-stop may run a
-motion trial. Record direction, anchor behavior, and observed stopping for Grip
-release, stale input, network loss, and Ctrl+C. Label evidence as offline,
-read-only, or hardware-observed.
+The checked-in `configs/gen3_micro_axes.json` is limited to
+orientation-preserving millimetre excursions and returns to the measured
+anchor. It does not replace T0, the required lease, the reviewed report, fresh
+released PICO input, tight absolute bounds, or the operator's `MOVE`
+confirmation. Do not relaunch after a latched fault; resolve it through the
+onsite safety process first.
