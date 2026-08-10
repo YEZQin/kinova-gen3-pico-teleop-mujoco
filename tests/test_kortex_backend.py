@@ -300,6 +300,49 @@ def test_repeated_anchor_fault_latch_does_not_create_another_stop_attempt():
     assert repeated_reason == backend._fault_reason
 
 
+def test_stale_anchor_rejection_cannot_fault_new_rearmed_generation():
+    evaluation_started = threading.Event()
+    release_evaluation = threading.Event()
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
+
+    class BlockingEnvelope:
+        def evaluate(self, anchor, target):
+            evaluation_started.set()
+            assert release_evaluation.wait(timeout=1.0)
+            return FIRST_TRIAL_ANCHOR_ENVELOPE.evaluate(anchor, target)
+
+    backend.anchor_envelope = BlockingEnvelope()
+    results = []
+    errors = []
+
+    def issue_stale_command():
+        try:
+            results.append(
+                backend.command_pose(_target(position=(0.020001, 0.0, 0.0)))
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    stale_command = threading.Thread(target=issue_stale_command)
+    stale_command.start()
+    assert evaluation_started.wait(timeout=1.0)
+
+    backend.hold()
+    connection.base_cyclic.feedback = _feedback((0.1, 0.0, 0.0))
+    _begin_pose_control(backend)
+    release_evaluation.set()
+    stale_command.join(timeout=1.0)
+
+    assert not stale_command.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    assert results[0].accepted is False
+    assert backend._fault_reason is None
+    assert connection.base.stop_count == 1
+
+
 def test_anchor_rotation_rejection_stops_before_feedback_or_twist():
     connection = _Connection(_feedback())
     backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)

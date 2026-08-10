@@ -412,12 +412,22 @@ class KortexBackend:
 
         if anchor is None:
             reason = "control anchor is unavailable"
-            latched_reason = self._latch_fault_and_stop(reason)
+            latched_reason = self._latch_fault_and_stop(
+                reason,
+                generation=generation,
+            )
+            if latched_reason is None:
+                return _inactive_result()
             raise KortexSafetyError(latched_reason)
 
         decision = self.anchor_envelope.evaluate(anchor, target)
         if not decision.accepted:
-            latched_reason = self._latch_fault_and_stop(decision.reason)
+            latched_reason = self._latch_fault_and_stop(
+                decision.reason,
+                generation=generation,
+            )
+            if latched_reason is None:
+                return _inactive_result()
             raise KortexSafetyError(latched_reason)
 
         try:
@@ -515,9 +525,18 @@ class KortexBackend:
             self._emit("moving", "MOVING", {})
         return result
 
-    def _latch_fault_and_stop(self, reason: str) -> str:
+    def _latch_fault_and_stop(
+        self,
+        reason: str,
+        *,
+        generation: int | None = None,
+    ) -> str | None:
         emit_stop_request = False
         with self._state_lock:
+            if generation is not None and not self._state_allows_command_locked(
+                generation
+            ):
+                return None
             if self._fault_reason is not None:
                 return self._fault_reason
             self._fault_reason = reason
