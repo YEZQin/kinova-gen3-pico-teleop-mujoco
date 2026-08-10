@@ -59,8 +59,6 @@
 - [ ] **Step 1: Write failing profile and CLI-default tests**
 
 ```python
-from importlib.metadata import PackageNotFoundError
-
 import pytest
 
 from kinova_teleop.hardware_profile import (
@@ -655,10 +653,17 @@ git commit -m "feat: latch fatal Gen3 teleoperation faults"
 - [ ] **Step 1: Add the failing no-write-surface test**
 
 ```python
+from pathlib import Path
+
+
 def test_first_hardware_backend_exposes_no_gripper_write_surface() -> None:
-    backend = make_backend()
+    backend = _backend(_Connection())
     assert not hasattr(backend, "command_gripper")
-    assert not hasattr(backend.connection.base, "gripper_sent") or backend.connection.base.gripper_sent == []
+    production = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in Path("kinova_teleop").glob("*.py")
+    )
+    assert "SendGripperCommand" not in production
 ```
 
 - [ ] **Step 2: Run the focused tests and verify RED**
@@ -818,6 +823,10 @@ git commit -m "feat: order guarded PICO Kortex admission"
 - [ ] **Step 1: Write failing launcher contract tests**
 
 ```python
+import re
+from pathlib import Path
+
+
 def test_kortex_launcher_hardcodes_only_the_approved_profile() -> None:
     script = Path("scripts/start_kortex_pico_teleop.ps1").read_text(encoding="utf-8")
     assert "--control-hz', '40'" in script
@@ -832,8 +841,8 @@ def test_kortex_launcher_hardcodes_only_the_approved_profile() -> None:
 def test_launcher_requires_external_bounds_lease_and_reviewed_report() -> None:
     script = Path("scripts/start_kortex_pico_teleop.ps1").read_text(encoding="utf-8")
     for parameter in ("WorkspaceMin", "WorkspaceMax", "MotionLease", "PreflightReport"):
-        assert f"[Parameter(Mandatory=$true)]" in script
-        assert parameter in script
+        declaration = rf"\[Parameter\(Mandatory=\$true\)\][^\r\n]*\${parameter}\b"
+        assert re.search(declaration, script)
 ```
 
 - [ ] **Step 2: Run the new test and verify RED**
