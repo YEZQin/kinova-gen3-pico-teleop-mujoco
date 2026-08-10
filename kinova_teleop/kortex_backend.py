@@ -20,7 +20,7 @@ from .pose_mapping import (
     quat_multiply,
     quat_to_rotvec,
 )
-from .workspace import WorkspaceLimits, validate_target_pose
+from .workspace import AnchorEnvelope, WorkspaceLimits, validate_target_pose
 
 MAX_LINEAR_SPEED = 0.03
 MAX_ANGULAR_SPEED_DEG = 5.0
@@ -82,6 +82,14 @@ def _inactive_result() -> BackendResult:
     )
 
 
+def _immutable_pose_copy(pose: Pose) -> Pose:
+    position = np.asarray(pose.position, dtype=np.float64).copy()
+    quaternion = normalize_quat(pose.quaternion).copy()
+    position.setflags(write=False)
+    quaternion.setflags(write=False)
+    return Pose(position=position, quaternion=quaternion)
+
+
 class KortexBackend:
     """Convert base-frame pose errors to guarded Kortex Twist commands."""
 
@@ -89,6 +97,7 @@ class KortexBackend:
         self,
         connection: Any,
         *,
+        anchor_envelope: AnchorEnvelope,
         kp_linear: float = 1.0,
         kp_angular: float = 1.0,
         max_linear_speed: float = MAX_LINEAR_SPEED,
@@ -112,8 +121,11 @@ class KortexBackend:
             raise ValueError("Angular speed limit must be in (0, 5] deg/s")
         if connection.base is None or connection.base_cyclic is None:
             raise RuntimeError("Kortex connection is not connected")
+        if not isinstance(anchor_envelope, AnchorEnvelope):
+            raise TypeError("anchor_envelope must be an AnchorEnvelope")
 
         self.connection = connection
+        self.anchor_envelope = anchor_envelope
         self.kp_linear = float(kp_linear)
         self.kp_angular = float(kp_angular)
         self.max_linear_speed = float(max_linear_speed)
@@ -140,6 +152,8 @@ class KortexBackend:
         self._stop_confirmed = True
         self._feedback_requires_rearm = False
         self._rearm_feedback_pending = False
+        self._control_anchor: Pose | None = None
+        self._fault_reason: str | None = None
         self._closed = False
         self._connection_closed = False
         self._gripper_last_value: float | None = None
@@ -296,6 +310,7 @@ class KortexBackend:
                         raise KortexSafetyError(
                             "Stop was requested during re-arm feedback"
                         )
+                    self._control_anchor = _immutable_pose_copy(pose)
                     self._rearm_feedback_pending = False
                     self._feedback_requires_rearm = False
             return pose
@@ -358,6 +373,10 @@ class KortexBackend:
         with self._state_lock:
             if self._closed:
                 raise RuntimeError("Kortex backend is closed")
+            if self._fault_reason is not None:
+                raise KortexSafetyError(
+                    f"Kortex safety fault is latched: {self._fault_reason}"
+                )
             if self._stop_requested and not self._stop_confirmed:
                 raise KortexSafetyError(
                     "Cannot resume while the previous Stop is unconfirmed"
@@ -369,6 +388,7 @@ class KortexBackend:
             self._stop_token = None
             self._deadline = None
             self._rearm_feedback_pending = True
+            self._control_anchor = None
         self._emit("control_started", "ARMED", {})
 
     def command_pose(self, target: Pose) -> BackendResult:
@@ -376,6 +396,7 @@ class KortexBackend:
             if not self._state_allows_command_locked():
                 return _inactive_result()
             generation = self._generation
+            anchor = self._control_anchor
 
         # Workspace checks are deliberately before any feedback or Twist RPC.
         if self.workspace_limits is not None:
@@ -388,6 +409,16 @@ class KortexBackend:
                 )
                 self.hold()
                 return BackendResult(False, False, 0.0, 0.0, decision.reason)
+
+        if anchor is None:
+            reason = "control anchor is unavailable"
+            latched_reason = self._latch_fault_and_stop(reason)
+            raise KortexSafetyError(latched_reason)
+
+        decision = self.anchor_envelope.evaluate(anchor, target)
+        if not decision.accepted:
+            latched_reason = self._latch_fault_and_stop(decision.reason)
+            raise KortexSafetyError(latched_reason)
 
         try:
             target_position = np.asarray(target.position, dtype=np.float64)
@@ -483,6 +514,20 @@ class KortexBackend:
         if nonzero:
             self._emit("moving", "MOVING", {})
         return result
+
+    def _latch_fault_and_stop(self, reason: str) -> str:
+        emit_stop_request = False
+        with self._state_lock:
+            if self._fault_reason is not None:
+                return self._fault_reason
+            self._fault_reason = reason
+            emit_stop_request = not self._stop_requested
+            token = self._request_stop_locked(force=True)
+        self._emit("faulted", "FAULTED", {"reason": reason})
+        if emit_stop_request:
+            self._emit("host_stop_requested", "STOPPING", {})
+        self._attempt_stop(token=token, raise_on_failure=False)
+        return reason
 
     def command_gripper(self, position: float) -> bool:
         """Send a rate-limited positional gripper command.

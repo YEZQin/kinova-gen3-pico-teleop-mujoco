@@ -16,6 +16,10 @@ from kinova_teleop.kortex_backend import (
     KortexSafetyError,
 )
 from kinova_teleop.pose_mapping import Pose
+from kinova_teleop.workspace import AnchorEnvelope
+
+
+TEST_ANCHOR_ENVELOPE = AnchorEnvelope((1.0, 1.0, 1.0), float(np.pi))
 
 
 class _Twist:
@@ -189,6 +193,7 @@ def _backend(connection, clock=None):
     clock = clock or _Clock()
     return KortexBackend(
         connection,
+        anchor_envelope=TEST_ANCHOR_ENVELOPE,
         monotonic=clock,
         sleep=clock.sleep,
     )
@@ -295,6 +300,7 @@ def test_running_fault_is_not_cleared_automatically():
     connection = _Connection()
     backend = _backend(connection)
     backend.begin_control()
+    backend.current_pose()
 
     def failing_send(command, *, options=None):
         raise RuntimeError("robot is in fault")
@@ -474,6 +480,7 @@ def test_first_nonzero_twist_is_watchdog_covered_during_send():
     connection = _Connection()
     backend = _backend(connection, clock)
     backend.begin_control()
+    backend.current_pose()
 
     send_started = threading.Event()
     release_send = threading.Event()

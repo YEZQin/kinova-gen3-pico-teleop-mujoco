@@ -8,9 +8,16 @@ import numpy as np
 import pytest
 
 import kinova_teleop.kortex_backend as kortex_backend_module
-from kinova_teleop.kortex_backend import KortexBackend
+from kinova_teleop.kortex_backend import KortexBackend, KortexSafetyError
 from kinova_teleop.pose_mapping import Pose
-from kinova_teleop.workspace import WorkspaceLimits
+from kinova_teleop.workspace import AnchorEnvelope, WorkspaceLimits
+
+
+TEST_ANCHOR_ENVELOPE = AnchorEnvelope((1.0, 1.0, 1.0), math.pi)
+FIRST_TRIAL_ANCHOR_ENVELOPE = AnchorEnvelope(
+    (0.02, 0.02, 0.02),
+    math.radians(5.0),
+)
 
 
 class _Twist:
@@ -189,7 +196,16 @@ def _velocity(command):
 
 
 def _backend(connection, **kwargs):
-    return KortexBackend(connection, **kwargs)
+    return KortexBackend(
+        connection,
+        anchor_envelope=kwargs.pop("anchor_envelope", TEST_ANCHOR_ENVELOPE),
+        **kwargs,
+    )
+
+
+def _begin_pose_control(backend):
+    backend.begin_control()
+    return backend.current_pose()
 
 
 @pytest.fixture(autouse=True)
@@ -232,6 +248,124 @@ def test_workspace_rejection_stops_before_feedback_or_twist():
     assert connection.base.stop_count == 1
 
 
+def test_command_without_rearm_anchor_faults_before_feedback_or_twist():
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    backend.begin_control()
+
+    with pytest.raises(KortexSafetyError, match="control anchor is unavailable"):
+        backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+
+    assert connection.base_cyclic.options == []
+    assert connection.base.sent == []
+    assert connection.base.stop_count == 1
+
+
+def test_anchor_translation_rejection_latches_fault_and_stops_before_feedback():
+    connection = _Connection(_feedback((0.1, -0.2, 0.3)))
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
+    feedback_count = len(connection.base_cyclic.options)
+
+    with pytest.raises(
+        KortexSafetyError,
+        match="target outside anchor translation envelope",
+    ):
+        backend.command_pose(_target(position=(0.120001, -0.2, 0.3)))
+
+    assert len(connection.base_cyclic.options) == feedback_count
+    assert connection.base.sent == []
+    assert connection.base.stop_count == 1
+    assert backend.stop_requested is True
+    assert backend._fault_reason == "target outside anchor translation envelope"
+    with pytest.raises(KortexSafetyError, match="latched"):
+        backend.begin_control()
+
+
+def test_repeated_anchor_fault_latch_does_not_create_another_stop_attempt():
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    backend.begin_control()
+
+    first_reason = backend._latch_fault_and_stop(
+        "target outside anchor translation envelope"
+    )
+    repeated_reason = backend._latch_fault_and_stop(
+        "target outside anchor rotation envelope"
+    )
+
+    assert connection.base.stop_count == 1
+    assert backend._fault_reason == "target outside anchor translation envelope"
+    assert first_reason == backend._fault_reason
+    assert repeated_reason == backend._fault_reason
+
+
+def test_anchor_rotation_rejection_stops_before_feedback_or_twist():
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
+    outside = (
+        math.cos(math.radians(5.01) / 2.0),
+        0.0,
+        0.0,
+        math.sin(math.radians(5.01) / 2.0),
+    )
+    feedback_count = len(connection.base_cyclic.options)
+
+    with pytest.raises(KortexSafetyError, match="anchor rotation envelope"):
+        backend.command_pose(_target(quaternion=outside))
+
+    assert len(connection.base_cyclic.options) == feedback_count
+    assert connection.base.sent == []
+    assert connection.base.stop_count == 1
+
+
+def test_control_anchor_is_an_immutable_copy_of_rearm_feedback():
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    returned = _begin_pose_control(backend)
+    returned.position[0] = 0.020001
+    returned.quaternion[:] = [0.0, 0.0, 0.0, 1.0]
+
+    with pytest.raises(KortexSafetyError, match="anchor translation envelope"):
+        backend.command_pose(_target(position=(0.020001, 0.0, 0.0)))
+
+    assert connection.base.sent == []
+    assert connection.base.stop_count == 1
+
+
+def test_ordinary_feedback_does_not_refresh_control_anchor():
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
+    connection.base_cyclic.feedback = _feedback((0.1, 0.0, 0.0))
+    backend.current_pose()
+    feedback_count = len(connection.base_cyclic.options)
+
+    with pytest.raises(KortexSafetyError, match="anchor translation envelope"):
+        backend.command_pose(_target(position=(0.1, 0.0, 0.0)))
+
+    assert len(connection.base_cyclic.options) == feedback_count
+    assert connection.base.sent == []
+    assert connection.base.stop_count == 1
+
+
+def test_healthy_reclutch_refreshes_control_anchor():
+    connection = _Connection(_feedback())
+    backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
+    backend.hold()
+    connection.base_cyclic.feedback = _feedback((0.1, 0.0, 0.0))
+
+    refreshed = _begin_pose_control(backend)
+    result = backend.command_pose(_target(position=(0.12, 0.0, 0.0)))
+
+    np.testing.assert_allclose(refreshed.position, [0.1, 0.0, 0.0])
+    assert result.accepted is True
+    assert len(connection.base.sent) == 1
+    assert connection.base.stop_count == 1
+
+
 def test_servoing_mode_error_stops_before_propagating():
     connection = _Connection(_feedback())
 
@@ -249,7 +383,7 @@ def test_servoing_mode_error_stops_before_propagating():
 def test_position_error_is_base_frame_and_clipped_by_vector_norm():
     connection = _Connection(_feedback())
     backend = _backend(connection, kp_linear=1.0)
-    backend.begin_control()
+    _begin_pose_control(backend)
 
     backend.command_pose(_target(position=(0.1, 0.0, 0.0)))
 
@@ -262,7 +396,7 @@ def test_position_error_is_base_frame_and_clipped_by_vector_norm():
 def test_rotation_error_is_converted_from_radians_and_clipped_in_degrees():
     connection = _Connection(_feedback())
     backend = _backend(connection, kp_angular=1.0)
-    backend.begin_control()
+    _begin_pose_control(backend)
     z_90 = (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
 
     result = backend.command_pose(_target(quaternion=z_90))
@@ -274,7 +408,7 @@ def test_rotation_error_is_converted_from_radians_and_clipped_in_degrees():
 def test_hold_stops_only_once_and_close_is_idempotent():
     connection = _Connection(_feedback())
     backend = _backend(connection)
-    backend.begin_control()
+    _begin_pose_control(backend)
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
     backend.hold()
@@ -306,7 +440,7 @@ def test_watchdog_crossing_200_ms_stops_once_and_latches():
     clock = _Clock()
     connection = _Connection(_feedback())
     backend = _backend(connection, monotonic=clock)
-    backend.begin_control()
+    _begin_pose_control(backend)
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
     clock.now = 0.2
@@ -325,7 +459,7 @@ def test_fresh_successful_command_resets_watchdog_deadline():
     clock = _Clock()
     connection = _Connection(_feedback())
     backend = _backend(connection, monotonic=clock)
-    backend.begin_control()
+    _begin_pose_control(backend)
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
     clock.now = 0.15
     backend.command_pose(_target(position=(0.02, 0.0, 0.0)))
@@ -341,9 +475,13 @@ def test_fresh_successful_command_resets_watchdog_deadline():
 def test_nonzero_command_arms_independent_daemon_watchdog():
     clock = _Clock()
     connection = _Connection(_feedback())
-    backend = KortexBackend(connection, monotonic=clock)
+    backend = KortexBackend(
+        connection,
+        anchor_envelope=TEST_ANCHOR_ENVELOPE,
+        monotonic=clock,
+    )
     assert _ManualThread.instances == []
-    backend.begin_control()
+    _begin_pose_control(backend)
 
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
     clock.now = 0.200001
@@ -393,7 +531,7 @@ def test_watchdog_stop_while_feedback_is_in_flight_prevents_late_send():
     release_feedback = threading.Event()
     connection = _Connection(_feedback())
     backend = _backend(connection, monotonic=clock)
-    backend.begin_control()
+    _begin_pose_control(backend)
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
     def blocking_feedback(*, options=None):
@@ -426,7 +564,7 @@ def test_blocked_send_has_bounded_options_and_watchdog_latches_before_stop_rpc()
     release_send = threading.Event()
     connection = _Connection(_feedback())
     backend = _backend(connection, monotonic=clock)
-    backend.begin_control()
+    _begin_pose_control(backend)
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
     original_send = connection.base.SendTwistCommand
@@ -497,7 +635,7 @@ def test_watchdog_stop_exception_does_not_escape_and_is_retried():
     clock = _Clock()
     connection = _Connection(_feedback())
     backend = _backend(connection, monotonic=clock)
-    backend.begin_control()
+    _begin_pose_control(backend)
     backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
     attempts = []
 
@@ -538,8 +676,8 @@ def test_watchdog_thread_start_failure_attempts_stop_and_reports_unconfirmed(
         StartFailure,
     )
     connection.base.Stop = failed_stop
-    backend = KortexBackend(connection)
-    backend.begin_control()
+    backend = KortexBackend(connection, anchor_envelope=TEST_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
 
     with pytest.raises(RuntimeError, match="Stop attempted but unconfirmed"):
         backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
@@ -561,8 +699,8 @@ def test_watchdog_thread_construction_failure_attempts_stop(monkeypatch):
         "_watchdog_thread_factory",
         ConstructionFailure,
     )
-    backend = KortexBackend(connection)
-    backend.begin_control()
+    backend = KortexBackend(connection, anchor_envelope=TEST_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
 
     with pytest.raises(RuntimeError, match="Failed to start Kortex watchdog"):
         backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
@@ -591,8 +729,8 @@ def test_watchdog_thread_that_never_reports_ready_stops_before_first_nonzero_sen
         "_watchdog_thread_factory",
         SilentThread,
     )
-    backend = KortexBackend(connection)
-    backend.begin_control()
+    backend = KortexBackend(connection, anchor_envelope=TEST_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
 
     with pytest.raises(RuntimeError, match="ready"):
         backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
@@ -613,7 +751,7 @@ def test_twist_adaptation_error_attempts_stop():
         ARMSTATE_IN_FAULT=ARMSTATE_IN_FAULT,
     )
     backend = _backend(connection)
-    backend.begin_control()
+    _begin_pose_control(backend)
 
     with pytest.raises(RuntimeError, match="bad message"):
         backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
@@ -626,11 +764,23 @@ def test_watchdog_cannot_be_disabled_through_production_constructor():
     connection = _Connection(_feedback())
 
     with pytest.raises(TypeError):
-        KortexBackend(connection, start_watchdog=False)
+        KortexBackend(
+            connection,
+            anchor_envelope=TEST_ANCHOR_ENVELOPE,
+            start_watchdog=False,
+        )
     with pytest.raises(TypeError):
-        KortexBackend(connection, shutdown_event=threading.Event())
+        KortexBackend(
+            connection,
+            anchor_envelope=TEST_ANCHOR_ENVELOPE,
+            shutdown_event=threading.Event(),
+        )
     with pytest.raises(TypeError):
-        KortexBackend(connection, thread_factory=_ManualThread)
+        KortexBackend(
+            connection,
+            anchor_envelope=TEST_ANCHOR_ENVELOPE,
+            thread_factory=_ManualThread,
+        )
 
 
 def test_stop_attempt_token_cannot_cross_into_new_control_epoch():
@@ -804,8 +954,8 @@ def test_close_never_joins_standard_thread_before_start_completes(monkeypatch):
         "_watchdog_thread_factory",
         GatedStandardThread,
     )
-    backend = KortexBackend(connection)
-    backend.begin_control()
+    backend = KortexBackend(connection, anchor_envelope=TEST_ANCHOR_ENVELOPE)
+    _begin_pose_control(backend)
     command_errors = []
     command = threading.Thread(
         target=lambda: _capture_error(
@@ -839,7 +989,7 @@ def test_command_failure_after_close_token_cannot_override_close_confirmation():
     connection_closed = threading.Event()
     connection = _Connection(_feedback())
     backend = _backend(connection)
-    backend.begin_control()
+    _begin_pose_control(backend)
 
     def failing_send(command, *, options=None):
         send_entered.set()
