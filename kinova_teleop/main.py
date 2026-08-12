@@ -17,6 +17,7 @@ from .evidence_log import EvidenceLogger, logger_event_sink
 from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
 from .hardware_profile import (
     FIRST_HARDWARE_PROFILE,
+    MAX_TRANSLATION_ONLY_SCALE,
     validate_kortex_runtime,
     validate_private_robot_ipv4,
     validate_workspace_span,
@@ -450,8 +451,13 @@ def _validate_kortex_args(
         validate_private_robot_ipv4(args.robot_ip)
     except ValueError as error:
         return str(error)
-    if resolve_translation_scale(args) > FIRST_HARDWARE_PROFILE.translation_scale:
-        return "--scale must not exceed 0.25 for --backend kortex"
+    maximum_scale = (
+        MAX_TRANSLATION_ONLY_SCALE
+        if args.translation_only
+        else FIRST_HARDWARE_PROFILE.translation_scale
+    )
+    if resolve_translation_scale(args) > maximum_scale:
+        return f"--scale must not exceed {maximum_scale:g} for --backend kortex"
     if resolve_control_hz(args) > FIRST_HARDWARE_PROFILE.control_hz:
         return (
             f"--control-hz must not exceed {FIRST_HARDWARE_PROFILE.control_hz:g} "

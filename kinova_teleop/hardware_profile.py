@@ -43,6 +43,8 @@ FIRST_HARDWARE_PROFILE = HardwareProfile(
     anchor_rotation_deg=5.0,
 )
 
+MAX_TRANSLATION_ONLY_SCALE = 0.5
+
 
 @dataclass(frozen=True)
 class KortexRuntimeVersions:
