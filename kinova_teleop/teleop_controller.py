@@ -26,6 +26,7 @@ class TeleopConfig:
     translation_scale: float = 0.5
     stale_timeout: float = 0.2
     fatal_input_faults: bool = False
+    orientation_enabled: bool = True
 
 
 class TeleopSafetyError(RuntimeError):
@@ -63,6 +64,7 @@ class TeleopController:
         self.mapper = RelativePoseMapper(
             MappingConfig(
                 translation_scale=config.translation_scale,
+                orientation_enabled=config.orientation_enabled,
                 stale_timeout=config.stale_timeout,
             ),
         )

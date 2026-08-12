@@ -119,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="controller-to-robot translation scale (backend-specific default)",
     )
     parser.add_argument(
+        "--translation-only",
+        action="store_true",
+        help="map controller translation while holding the anchored tool orientation",
+    )
+    parser.add_argument(
         "--control-hz",
         type=float,
         default=None,
@@ -787,6 +792,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     # a headless loop against a real arm floods the robot with RPCs.
                     realtime=args.backend == "kortex" or not args.headless,
                     translation_scale=resolve_translation_scale(args),
+                    orientation_enabled=not args.translation_only,
                     stale_timeout=_resolve_stale_timeout(args),
                     fatal_input_faults=args.backend == "kortex",
                 ),

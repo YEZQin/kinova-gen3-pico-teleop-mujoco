@@ -299,6 +299,34 @@ def test_held_grip_maps_full_relative_pose() -> None:
     assert np.linalg.norm(quat_to_rotvec(output.target.quaternion)) == pytest.approx(0.2)
 
 
+def test_translation_only_mapping_keeps_anchor_orientation() -> None:
+    mapper = RelativePoseMapper(
+        unfiltered_config(translation_scale=1.0, orientation_enabled=False)
+    )
+    ee = Pose(
+        np.array([0.4, -0.2, 0.3], dtype=np.float64),
+        quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), 0.4),
+    )
+    release_then_press(mapper, ee)
+    moved_wxyz = quat_from_axis_angle(np.array([0.0, 0.0, 1.0]), 0.6)
+
+    output = mapper.update(
+        sample([0.1, 0.0, 0.0], np.roll(moved_wxyz, -1), 1.0, 3, 1.02),
+        ee,
+        now=1.02,
+    )
+
+    np.testing.assert_allclose(
+        output.target.position,
+        ee.position + PICO_TO_WORLD @ [0.1, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        quat_to_matrix(output.target.quaternion),
+        quat_to_matrix(ee.quaternion),
+        atol=1e-8,
+    )
+
+
 def test_release_holds_last_target() -> None:
     mapper = RelativePoseMapper(unfiltered_config())
     ee = identity_pose()

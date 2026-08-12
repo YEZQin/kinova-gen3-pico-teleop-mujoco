@@ -48,6 +48,7 @@ class MappingConfig:
     filter_time_constant: float = 0.05
     max_position_step: float = 0.02
     max_rotation_step: float = 0.15
+    orientation_enabled: bool = True
 
     def __post_init__(self) -> None:
         thresholds = np.asarray(
@@ -416,13 +417,16 @@ class RelativePoseMapper:
         desired_position = self._ee_reference.position + self.config.translation_scale * (
             controller_pose.position - self._controller_reference.position
         )
-        controller_delta = quat_multiply(
-            controller_pose.quaternion,
-            quat_conjugate(self._controller_reference.quaternion),
-        )
-        desired_quaternion = quat_multiply(
-            controller_delta, self._ee_reference.quaternion
-        )
+        if self.config.orientation_enabled:
+            controller_delta = quat_multiply(
+                controller_pose.quaternion,
+                quat_conjugate(self._controller_reference.quaternion),
+            )
+            desired_quaternion = quat_multiply(
+                controller_delta, self._ee_reference.quaternion
+            )
+        else:
+            desired_quaternion = self._ee_reference.quaternion
 
         delta_time = max(0.0, now - (self._last_update_time or now))
         if self.config.filter_time_constant <= 0.0:
