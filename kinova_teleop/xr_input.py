@@ -6,13 +6,20 @@ MuJoCo dry run and the automated tests do not require its native extension.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import importlib
 import math
+import threading
 import time
 from typing import Callable, Protocol
 
 import numpy as np
+
+
+_MAX_PENDING_INVALIDS = 256
+_RECEIVER_STOP_GRACE_S = 0.1
+_RECEIVER_INTERRUPT_GRACE_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -31,10 +38,151 @@ class ControllerSample:
 
 class XrInputSource(Protocol):
     def read(self) -> ControllerSample:
-        """Return the newest available controller sample."""
+        """Return promptly with the newest available controller sample."""
 
     def close(self) -> None:
         """Release source resources. Implementations must be idempotent."""
+
+
+class ContinuousInputBuffer:
+    """Continuously ingest a prompt, close-interruptible input source."""
+
+    def __init__(
+        self,
+        source: XrInputSource,
+        *,
+        poll_interval_s: float = 0.005,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not math.isfinite(poll_interval_s) or poll_interval_s <= 0.0:
+            raise ValueError("poll_interval_s must be positive and finite")
+        self._source = source
+        self._poll_interval_s = float(poll_interval_s)
+        self._monotonic = monotonic
+        self._source_lock = threading.Lock()
+        self._sample_lock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._latest: ControllerSample | None = None
+        self._pending_invalids: deque[ControllerSample] = deque()
+        self._error: Exception | None = None
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._receive_loop,
+            name="pico-input-receiver",
+            daemon=True,
+        )
+        try:
+            self._thread.start()
+        except BaseException as start_error:
+            self._stop.set()
+            try:
+                self._source.close()
+            except Exception as close_error:
+                start_error.add_note(
+                    f"input cleanup also failed: {close_error!r}"
+                )
+            self._closed = True
+            raise
+
+    def read(self) -> ControllerSample:
+        with self._sample_lock:
+            error = self._error
+            if self._pending_invalids:
+                sample = self._pending_invalids.popleft()
+            else:
+                sample = self._latest
+        if error is not None:
+            raise RuntimeError("continuous controller input failed") from error
+        if sample is None:
+            return ControllerSample(
+                position=np.zeros(3, dtype=np.float64),
+                quaternion_xyzw=np.array(
+                    [0.0, 0.0, 0.0, 1.0],
+                    dtype=np.float64,
+                ),
+                grip=0.0,
+                timestamp_ns=0,
+                received_monotonic=self._monotonic(),
+                valid=False,
+                trigger=0.0,
+                invalid_reason="stream is stale",
+            )
+        return ControllerSample(
+            position=np.array(sample.position, dtype=np.float64, copy=True),
+            quaternion_xyzw=np.array(
+                sample.quaternion_xyzw,
+                dtype=np.float64,
+                copy=True,
+            ),
+            grip=float(sample.grip),
+            timestamp_ns=int(sample.timestamp_ns),
+            received_monotonic=float(sample.received_monotonic),
+            valid=bool(sample.valid),
+            trigger=float(sample.trigger),
+            invalid_reason=str(sample.invalid_reason),
+        )
+
+    def health(self):
+        with self._source_lock:
+            health_reader = getattr(self._source, "health", None)
+            if not callable(health_reader):
+                raise RuntimeError("controller health is unavailable")
+            return health_reader()
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._stop.set()
+            self._thread.join(timeout=_RECEIVER_STOP_GRACE_S)
+            if self._thread.is_alive():
+                try:
+                    self._source.close()
+                except Exception as close_error:
+                    raise RuntimeError(
+                        "continuous controller input could not be interrupted"
+                    ) from close_error
+                self._thread.join(timeout=_RECEIVER_INTERRUPT_GRACE_S)
+                if self._thread.is_alive():
+                    raise RuntimeError("continuous controller input did not stop")
+            else:
+                with self._source_lock:
+                    self._source.close()
+            self._closed = True
+
+    def _receive_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                with self._source_lock:
+                    sample = self._source.read()
+            except Exception as error:
+                with self._sample_lock:
+                    self._latest = None
+                    self._error = error
+                self._stop.set()
+                return
+            with self._sample_lock:
+                if not sample.valid and self._queue_new_invalid(sample):
+                    if len(self._pending_invalids) >= _MAX_PENDING_INVALIDS:
+                        self._latest = None
+                        self._error = RuntimeError(
+                            "continuous controller invalid queue overflow"
+                        )
+                        self._stop.set()
+                        return
+                    self._pending_invalids.append(sample)
+                self._latest = sample
+            self._stop.wait(self._poll_interval_s)
+
+    def _queue_new_invalid(self, sample: ControllerSample) -> bool:
+        if not self._pending_invalids:
+            return True
+        previous = self._pending_invalids[-1]
+        return (
+            previous.timestamp_ns != sample.timestamp_ns
+            or previous.invalid_reason != sample.invalid_reason
+        )
 
 
 class SdkXrInput:

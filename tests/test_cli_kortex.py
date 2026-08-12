@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import threading
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from kinova_teleop.main import _approve_fixed_segment, _cleanup_resources, main
+from kinova_teleop.xr_input import ControllerSample
 
 
 main_module = importlib.import_module("kinova_teleop.main")
@@ -813,7 +816,7 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
     assert backend.closed
 
 
-def test_kortex_default_input_is_pico_udp(monkeypatch) -> None:
+def test_kortex_default_input_is_continuously_buffered_pico_udp(monkeypatch) -> None:
     created: dict[str, object] = {}
     pico_kwargs: dict[str, object] = {}
     _install_valid_kortex_fakes(monkeypatch, created)
@@ -823,15 +826,94 @@ def test_kortex_default_input_is_pico_udp(monkeypatch) -> None:
             super().__init__()
             pico_kwargs.update(kwargs)
 
+        def read(self) -> ControllerSample:
+            return ControllerSample(
+                position=np.zeros(3, dtype=float),
+                quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+                grip=0.0,
+                timestamp_ns=1,
+                received_monotonic=1.0,
+            )
+
     monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", FakePicoInput)
 
     assert main(_motion_gate_args(["--backend", "kortex", "--enable-hardware"])) == 0
-    assert isinstance(created["source"], FakePicoInput)
+    assert isinstance(created["source"], main_module.ContinuousInputBuffer)
     assert pico_kwargs == {
         "host": "0.0.0.0",
         "port": 15031,
         "stale_after": 0.2,
     }
+
+
+def test_kortex_pico_input_keeps_receiving_during_blocking_startup(
+    monkeypatch,
+) -> None:
+    """A blocking Kortex setup phase must not pause PICO packet ingestion."""
+
+    sampled = threading.Event()
+    observed_during_setup: list[bool] = []
+
+    class StreamingPico:
+        def __init__(self, *args, **kwargs) -> None:
+            self.reads = 0
+            self.closed = False
+
+        def read(self) -> ControllerSample:
+            self.reads += 1
+            if self.reads >= 3:
+                sampled.set()
+            return ControllerSample(
+                position=np.zeros(3, dtype=float),
+                quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+                grip=0.0,
+                timestamp_ns=self.reads,
+                received_monotonic=float(self.reads),
+            )
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Connection:
+        def close(self, *, send_stop: bool = True) -> bool:
+            return True
+
+    def connect(_config, *, read_only: bool = False):
+        if read_only:
+            observed_during_setup.append(sampled.wait(0.1))
+        return Connection()
+
+    class Backend:
+        def close(self) -> None:
+            pass
+
+    class Controller:
+        steps = 0
+
+        def __init__(self, _config, source, backend, **_kwargs) -> None:
+            self.source = source
+            self.backend = backend
+
+        def run(self, **_kwargs) -> None:
+            pass
+
+        def close(self) -> None:
+            self.backend.close()
+            self.source.close()
+
+    _install_valid_motion_gate_files(monkeypatch)
+    _install_passing_motion_admission(monkeypatch)
+    monkeypatch.setattr(main_module, "PicoUdpInput", StreamingPico)
+    monkeypatch.setattr(main_module, "_create_kortex_connection", connect)
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_backend",
+        lambda *_args, **_kwargs: Backend(),
+    )
+    monkeypatch.setattr(main_module, "TeleopController", Controller)
+
+    assert main(_valid_motion_argv()) == 0
+    assert observed_during_setup == [True]
 
 
 def test_kortex_headless_stays_realtime_and_needs_no_steps(monkeypatch) -> None:

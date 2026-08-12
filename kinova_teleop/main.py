@@ -35,7 +35,12 @@ from .preflight import (
 )
 from .teleop_controller import StepDiagnostics, TeleopConfig, TeleopController
 from .workspace import AnchorEnvelope, WorkspaceLimits
-from .xr_input import DryRunXrInput, SdkXrInput, XrInputSource
+from .xr_input import (
+    ContinuousInputBuffer,
+    DryRunXrInput,
+    SdkXrInput,
+    XrInputSource,
+)
 
 
 DEFAULT_MODEL = (
@@ -292,10 +297,12 @@ def create_input(args: argparse.Namespace) -> XrInputSource:
     if args.dry_run:
         return DryRunXrInput(control_hz=control_hz)
     if args.input == "pico-udp":
-        return PicoUdpInput(
-            host=args.pico_host,
-            port=args.pico_port,
-            stale_after=_resolve_stale_timeout(args),
+        return ContinuousInputBuffer(
+            PicoUdpInput(
+                host=args.pico_host,
+                port=args.pico_port,
+                stale_after=_resolve_stale_timeout(args),
+            ),
         )
     return SdkXrInput()
 
