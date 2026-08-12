@@ -64,7 +64,7 @@ def wait_for_fresh_released_input(
             raise InputAdmissionError("timed out waiting for fresh controller input")
 
         candidate = _read_sample(source)
-        if previous_timestamp is None and _is_initial_stale_placeholder(candidate):
+        if previous_timestamp is None and _is_waitable_stale_placeholder(candidate):
             sleep(_POLL_INTERVAL_S)
             continue
         sample = _validate_finite_sample(candidate)
@@ -121,7 +121,12 @@ def verify_released_now(
     _validate_timeout(timeout_s)
     deadline = monotonic() + timeout_s
     while monotonic() < deadline:
-        sample = _read_finite_sample(source)
+        candidate = _read_sample(source)
+        if _is_waitable_stale_placeholder(candidate):
+            _verify_source_continuity(source, admission)
+            sleep(_POLL_INTERVAL_S)
+            continue
+        sample = _validate_finite_sample(candidate)
         _verify_source_continuity(source, admission)
         if float(sample.grip) >= _GRIP_RELEASE_THRESHOLD:
             raise InputAdmissionError("Grip must remain released after confirmation")
@@ -153,8 +158,8 @@ def _read_sample(source: XrInputSource) -> ControllerSample:
         raise InputAdmissionError("unable to read controller input") from error
 
 
-def _is_initial_stale_placeholder(sample: ControllerSample) -> bool:
-    """Recognize only the UDP adapter's pre-first-packet sentinel."""
+def _is_waitable_stale_placeholder(sample: ControllerSample) -> bool:
+    """Recognize only the UDP adapter's no-current-packet sentinel."""
 
     try:
         return (

@@ -276,6 +276,66 @@ def test_release_recheck_waits_past_cached_sample_for_newer_frame() -> None:
     assert result.timestamp_ns == 4
 
 
+def test_release_recheck_waits_past_stale_boundary_after_move_prompt() -> None:
+    clock = FakeClock()
+    source = MutableHealthSource([
+        sample(timestamp_ns=1, grip=0.0),
+        sample(timestamp_ns=2, grip=0.0),
+        sample(timestamp_ns=3, grip=0.0),
+        sample(
+            timestamp_ns=0,
+            grip=0.0,
+            valid=False,
+            invalid_reason="stream is stale",
+        ),
+        sample(timestamp_ns=4, grip=0.0),
+    ])
+    admission = wait_for_fresh_released_input(
+        source,
+        sample_count=3,
+        timeout_s=1.0,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    result = verify_released_now(
+        source,
+        after_timestamp_ns=admission.last_timestamp_ns,
+        admission=admission,
+        timeout_s=0.5,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    assert result.timestamp_ns == 4
+
+
+def test_release_recheck_times_out_when_stale_stream_does_not_recover() -> None:
+    clock = FakeClock()
+    stale = sample(
+        timestamp_ns=0,
+        grip=0.0,
+        valid=False,
+        invalid_reason="stream is stale",
+    )
+
+    class StalledSource:
+        def read(self) -> ControllerSample:
+            return stale
+
+        def close(self) -> None:
+            return None
+
+    with pytest.raises(InputAdmissionError, match="timed out"):
+        verify_released_now(
+            StalledSource(),
+            after_timestamp_ns=3,
+            timeout_s=0.02,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+
 def test_release_recheck_rejects_source_change_after_admission() -> None:
     source = MutableHealthSource([
         sample(timestamp_ns=1, grip=0.0),
