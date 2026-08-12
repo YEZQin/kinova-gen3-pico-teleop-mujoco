@@ -2,6 +2,7 @@ import pytest
 
 from kinova_teleop.hardware_profile import (
     FIRST_HARDWARE_PROFILE,
+    MAX_TRANSLATION_ONLY_SCALE,
     validate_kortex_runtime,
     validate_private_robot_ipv4,
     validate_workspace_span,
@@ -19,6 +20,7 @@ def test_first_hardware_profile_is_the_approved_envelope() -> None:
     assert profile.max_angular_speed_deg_s == 2.0
     assert profile.anchor_translation_axis_m == (0.02, 0.02, 0.02)
     assert profile.anchor_rotation_deg == 5.0
+    assert MAX_TRANSLATION_ONLY_SCALE == 0.5
 
 
 def test_backend_specific_defaults_preserve_mujoco() -> None:

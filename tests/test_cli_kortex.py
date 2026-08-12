@@ -406,6 +406,18 @@ def _install_unreachable_connection_factory(monkeypatch):
             "MOVE",
         ),
         (
+            [
+                "--backend",
+                "kortex",
+                "--enable-hardware",
+                "--translation-only",
+                "--scale",
+                "0.500001",
+            ],
+            "secret",
+            "MOVE",
+        ),
+        (
             ["--backend", "kortex", "--enable-hardware", "--control-hz", "40.1"],
             "secret",
             "MOVE",
@@ -831,6 +843,27 @@ def test_translation_only_kortex_disables_orientation_mapping(monkeypatch) -> No
     ])) == 0
 
     assert created["controller_config"].orientation_enabled is False
+
+
+def test_translation_only_kortex_accepts_explicit_scale_half(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    _install_valid_kortex_fakes(monkeypatch, created)
+    monkeypatch.setattr("kinova_teleop.main.SdkXrInput", _FakeSource)
+
+    assert main(_motion_gate_args([
+        "--backend",
+        "kortex",
+        "--enable-hardware",
+        "--input",
+        "xrobotoolkit",
+        "--translation-only",
+        "--scale",
+        "0.5",
+    ])) == 0
+
+    controller_config = created["controller_config"]
+    assert controller_config.translation_scale == 0.5
+    assert controller_config.orientation_enabled is False
 
 
 def test_kortex_default_input_is_continuously_buffered_pico_udp(monkeypatch) -> None:
