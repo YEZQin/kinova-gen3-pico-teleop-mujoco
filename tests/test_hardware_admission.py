@@ -19,6 +19,7 @@ def sample(
     timestamp_ns: int,
     grip: float,
     valid: bool = True,
+    invalid_reason: str = "",
 ) -> ControllerSample:
     return ControllerSample(
         position=np.zeros(3, dtype=np.float64),
@@ -27,6 +28,7 @@ def sample(
         timestamp_ns=timestamp_ns,
         received_monotonic=0.0,
         valid=valid,
+        invalid_reason=invalid_reason,
     )
 
 
@@ -108,6 +110,53 @@ def test_admission_requires_advancing_finite_samples_and_current_release() -> No
     assert source.closed is False
 
 
+def test_admission_waits_for_initial_stale_placeholder_before_valid_window() -> None:
+    clock = FakeClock()
+    source = ScriptedSource([
+        sample(
+            timestamp_ns=0,
+            grip=0.0,
+            valid=False,
+            invalid_reason="stream is stale",
+        ),
+        sample(timestamp_ns=1, grip=0.0),
+        sample(timestamp_ns=2, grip=0.0),
+        sample(timestamp_ns=3, grip=0.0),
+    ])
+
+    result = wait_for_fresh_released_input(
+        source,
+        sample_count=3,
+        timeout_s=1.0,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    assert result.accepted_samples == 3
+    assert result.last_timestamp_ns == 3
+
+
+def test_admission_waits_past_cached_timestamp_for_distinct_samples() -> None:
+    clock = FakeClock()
+    source = ScriptedSource([
+        sample(timestamp_ns=1, grip=0.0),
+        sample(timestamp_ns=1, grip=0.0),
+        sample(timestamp_ns=2, grip=0.0),
+        sample(timestamp_ns=3, grip=0.0),
+    ])
+
+    result = wait_for_fresh_released_input(
+        source,
+        sample_count=3,
+        timeout_s=1.0,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    assert result.accepted_samples == 3
+    assert result.last_timestamp_ns == 3
+
+
 def test_admission_rejects_source_change_without_connecting_robot() -> None:
     source = HealthScriptedSource(source_changes_during_window=True)
 
@@ -146,20 +195,33 @@ def test_admission_rejects_non_finite_or_invalid_samples(
         )
 
 
-def test_admission_rejects_nonadvancing_timestamps_and_pressed_final_sample() -> None:
+def test_admission_rejects_regressing_timestamps_and_pressed_final_sample() -> None:
     with pytest.raises(InputAdmissionError, match="timestamps"):
         wait_for_fresh_released_input(
             ScriptedSource([
-                sample(timestamp_ns=1, grip=0.0),
+                sample(timestamp_ns=2, grip=0.0),
                 sample(timestamp_ns=1, grip=0.0),
             ]),
             sample_count=2,
             timeout_s=1.0,
         )
-    with pytest.raises(InputAdmissionError, match="Grip must be released"):
+    with pytest.raises(InputAdmissionError, match="Grip must remain released"):
         wait_for_fresh_released_input(
             ScriptedSource([sample(timestamp_ns=1, grip=0.8)]),
             sample_count=1,
+            timeout_s=1.0,
+        )
+
+
+def test_admission_rejects_pressed_grip_anywhere_in_release_window() -> None:
+    with pytest.raises(InputAdmissionError, match="Grip must remain released"):
+        wait_for_fresh_released_input(
+            ScriptedSource([
+                sample(timestamp_ns=1, grip=1.0),
+                sample(timestamp_ns=2, grip=0.0),
+                sample(timestamp_ns=3, grip=0.0),
+            ]),
+            sample_count=3,
             timeout_s=1.0,
         )
 
@@ -177,17 +239,40 @@ def test_move_confirmation_is_exact_and_requires_released_recheck() -> None:
 
 
 def test_release_recheck_requires_a_newer_finite_sample() -> None:
-    with pytest.raises(InputAdmissionError, match="newer"):
+    clock = FakeClock()
+    with pytest.raises(InputAdmissionError, match="timed out"):
         verify_released_now(
-            ScriptedSource([sample(timestamp_ns=3, grip=0.0)]),
+            ScriptedSource([
+                sample(timestamp_ns=3, grip=0.0),
+                sample(timestamp_ns=3, grip=0.0),
+            ]),
             after_timestamp_ns=3,
-            timeout_s=0.5,
+            timeout_s=0.02,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
         )
     result = verify_released_now(
         ScriptedSource([sample(timestamp_ns=4, grip=0.0)]),
         after_timestamp_ns=3,
         timeout_s=0.5,
     )
+    assert result.timestamp_ns == 4
+
+
+def test_release_recheck_waits_past_cached_sample_for_newer_frame() -> None:
+    clock = FakeClock()
+    result = verify_released_now(
+        ScriptedSource([
+            sample(timestamp_ns=3, grip=0.0),
+            sample(timestamp_ns=3, grip=0.0),
+            sample(timestamp_ns=4, grip=0.0),
+        ]),
+        after_timestamp_ns=3,
+        timeout_s=0.5,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
     assert result.timestamp_ns == 4
 
 

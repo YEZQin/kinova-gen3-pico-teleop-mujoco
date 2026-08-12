@@ -58,16 +58,19 @@ def wait_for_fresh_released_input(
     active_source: tuple[str, int] | None = None
     foreign_count: int | None = None
     accepted_samples = 0
-    last_grip = 0.0
 
     while accepted_samples < sample_count:
         if monotonic() >= deadline:
             raise InputAdmissionError("timed out waiting for fresh controller input")
 
-        sample = _read_finite_sample(source)
+        candidate = _read_sample(source)
+        if previous_timestamp is None and _is_initial_stale_placeholder(candidate):
+            sleep(_POLL_INTERVAL_S)
+            continue
+        sample = _validate_finite_sample(candidate)
         timestamp = _sample_timestamp(sample)
-        if previous_timestamp is not None and timestamp <= previous_timestamp:
-            raise InputAdmissionError("controller timestamps must strictly advance")
+        if float(sample.grip) >= _GRIP_RELEASE_THRESHOLD:
+            raise InputAdmissionError("Grip must remain released during admission")
 
         observed_source, observed_foreign = _observe_source_health(source)
         if observed_source is not None or observed_foreign is not None:
@@ -81,15 +84,19 @@ def wait_for_fresh_released_input(
             elif observed_foreign != foreign_count:
                 raise InputAdmissionError("foreign packet count changed during admission")
 
+        if previous_timestamp is not None:
+            if timestamp < previous_timestamp:
+                raise InputAdmissionError("controller timestamps must not regress")
+            if timestamp == previous_timestamp:
+                sleep(_POLL_INTERVAL_S)
+                continue
+
         previous_timestamp = timestamp
-        last_grip = float(sample.grip)
         accepted_samples += 1
 
         if accepted_samples < sample_count:
             sleep(_POLL_INTERVAL_S)
 
-    if last_grip >= _GRIP_RELEASE_THRESHOLD:
-        raise InputAdmissionError("Grip must be released before hardware motion")
     return InputAdmissionResult(
         accepted_samples=accepted_samples,
         last_timestamp_ns=previous_timestamp,
@@ -115,11 +122,15 @@ def verify_released_now(
     deadline = monotonic() + timeout_s
     while monotonic() < deadline:
         sample = _read_finite_sample(source)
-        if _sample_timestamp(sample) <= after_timestamp_ns:
-            raise InputAdmissionError("controller sample must be newer than admission")
         _verify_source_continuity(source, admission)
         if float(sample.grip) >= _GRIP_RELEASE_THRESHOLD:
             raise InputAdmissionError("Grip must remain released after confirmation")
+        timestamp = _sample_timestamp(sample)
+        if timestamp < after_timestamp_ns:
+            raise InputAdmissionError("controller timestamp regressed after admission")
+        if timestamp == after_timestamp_ns:
+            sleep(_POLL_INTERVAL_S)
+            continue
         return sample
     raise InputAdmissionError("timed out waiting for a newer controller sample")
 
@@ -135,11 +146,27 @@ def _validate_timeout(timeout_s: float) -> None:
         raise ValueError("timeout_s must be positive and finite")
 
 
-def _read_finite_sample(source: XrInputSource) -> ControllerSample:
+def _read_sample(source: XrInputSource) -> ControllerSample:
     try:
-        sample = source.read()
+        return source.read()
     except Exception as error:
         raise InputAdmissionError("unable to read controller input") from error
+
+
+def _is_initial_stale_placeholder(sample: ControllerSample) -> bool:
+    """Recognize only the UDP adapter's pre-first-packet sentinel."""
+
+    try:
+        return (
+            sample.valid is False
+            and sample.timestamp_ns == 0
+            and sample.invalid_reason == "stream is stale"
+        )
+    except AttributeError:
+        return False
+
+
+def _validate_finite_sample(sample: ControllerSample) -> ControllerSample:
     try:
         position = np.asarray(sample.position, dtype=np.float64)
         quaternion = np.asarray(sample.quaternion_xyzw, dtype=np.float64)
@@ -158,6 +185,10 @@ def _read_finite_sample(source: XrInputSource) -> ControllerSample:
         raise InputAdmissionError("controller sample must be finite valid input")
     _sample_timestamp(sample)
     return sample
+
+
+def _read_finite_sample(source: XrInputSource) -> ControllerSample:
+    return _validate_finite_sample(_read_sample(source))
 
 
 def _sample_timestamp(sample: ControllerSample) -> int:
