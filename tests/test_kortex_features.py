@@ -51,6 +51,7 @@ class _ServoingModeInformation:
 
 
 READY = 31
+MANUALLY_CONTROLLED = 33
 FAULT = 32
 
 BASE_PB2 = SimpleNamespace(
@@ -59,6 +60,7 @@ BASE_PB2 = SimpleNamespace(
     CARTESIAN_REFERENCE_FRAME_BASE=17,
     SINGLE_LEVEL_SERVOING=23,
     ARMSTATE_SERVOING_READY=READY,
+    ARMSTATE_SERVOING_MANUALLY_CONTROLLED=MANUALLY_CONTROLLED,
     ARMSTATE_IN_FAULT=FAULT,
 )
 
@@ -228,6 +230,17 @@ def test_init_accepts_string_ready_state():
     assert connection.base.clear_faults_count == 0
     assert connection.base.arm_state_reads == 2
     assert connection.base.servo_modes == [23]
+
+
+def test_init_accepts_manual_control_after_single_level_servoing():
+    connection = _Connection()
+    connection.base.arm_states = [READY, MANUALLY_CONTROLLED]
+
+    _backend(connection)
+
+    assert connection.base.arm_state_reads == 2
+    assert connection.base.servo_modes == [23]
+    assert connection.base.stop_count == 0
 
 
 def test_init_fails_safely_when_fault_never_clears():

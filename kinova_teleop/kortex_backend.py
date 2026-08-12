@@ -215,18 +215,29 @@ class KortexBackend:
             )
 
     def _wait_until_servo_ready(self) -> None:
-        """Wait for SERVOING_READY after single-level servoing was requested."""
+        """Wait until single-level manual control is ready for Twist commands."""
 
         base_pb2 = self.connection.base_pb2
         ready_state = base_pb2.ARMSTATE_SERVOING_READY
+        manual_state = getattr(
+            base_pb2,
+            "ARMSTATE_SERVOING_MANUALLY_CONTROLLED",
+            object(),
+        )
         deadline = self._monotonic() + SERVO_READY_TIMEOUT
         while True:
             state = self._read_arm_state()
-            if state == ready_state or state == "ARMSTATE_SERVOING_READY":
+            if state in (
+                ready_state,
+                manual_state,
+                "ARMSTATE_SERVOING_READY",
+                "ARMSTATE_SERVOING_MANUALLY_CONTROLLED",
+            ):
                 return
             if self._monotonic() >= deadline:
                 raise KortexSafetyError(
-                    f"Kortex arm did not reach SERVOING_READY (state={state}); "
+                    f"Kortex arm did not reach a manual-control-ready state "
+                    f"(state={state}); "
                     "check faults and the servoing mode in the Kinova Web App "
                     "and retry"
                 )
