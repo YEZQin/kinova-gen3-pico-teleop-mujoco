@@ -513,7 +513,11 @@ class KortexBackend:
             command.reference_frame = (
                 self.connection.base_pb2.CARTESIAN_REFERENCE_FRAME_BASE
             )
-            command.duration = 0
+            # Kortex 2.8 removed the legacy duration field from
+            # TwistCommand.  Older supported schemas still expose it and use
+            # zero for an open-ended command stopped by the host watchdog.
+            if hasattr(command, "duration"):
+                command.duration = 0
             (
                 command.twist.linear_x,
                 command.twist.linear_y,

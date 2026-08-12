@@ -522,6 +522,36 @@ def test_position_error_is_base_frame_and_clipped_by_vector_norm():
     assert connection.base.send_options[-1].timeout_ms < 200
 
 
+def test_twist_command_supports_kortex_28_schema_without_duration():
+    """Kortex 2.8 TwistCommand has only reference_frame and twist fields."""
+
+    class TwistCommandV28:
+        __slots__ = ("reference_frame", "twist")
+
+        def __init__(self):
+            self.reference_frame = None
+            self.twist = _Twist()
+
+    connection = _Connection(_feedback())
+    connection.base_pb2 = SimpleNamespace(
+        **{
+            **vars(BASE_PB2),
+            "TwistCommand": TwistCommandV28,
+        }
+    )
+    backend = _backend(connection, kp_linear=1.0)
+    _begin_pose_control(backend)
+
+    result = backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
+
+    assert result.accepted
+    assert len(connection.base.sent) == 1
+    np.testing.assert_allclose(
+        _velocity(connection.base.sent[0]),
+        [0.01, 0, 0, 0, 0, 0],
+    )
+
+
 def test_rotation_error_is_converted_from_radians_and_clipped_in_degrees():
     connection = _Connection(_feedback())
     backend = _backend(connection, kp_angular=1.0)
