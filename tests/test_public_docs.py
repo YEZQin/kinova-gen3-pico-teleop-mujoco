@@ -77,19 +77,42 @@ def test_hardware_lifecycle_is_an_operator_sequence_not_inert_commands() -> None
 
 def test_bootstrap_is_gated_by_the_release_asset_state() -> None:
     manifest = json.loads((ROOT / "release" / "public-release-assets.json").read_text(encoding="utf-8"))
-    apk = next(asset for asset in manifest["assets"] if asset["name"] == "kinova-pico-udp-bridge.apk")
-    fixture = apk["sha256"] == "a" * 64 and apk["size_bytes"] == 3
     for path in README_PATHS:
-        document = path.read_text(encoding="utf-8").lower()
-        bootstrap = next(block.lower() for block in _powershell_blocks(document) if "lifecycle: bootstrap" in block)
-        if fixture:
-            assert "v0.2.0-rc.1 is not yet published" in document
-            assert "do not run until published" in document
-            assert "post-release only" in bootstrap
-        else:
-            assert "v0.2.0-rc.1 is not yet published" not in document
-            assert "do not run until published" not in document
-            assert "post-release only" not in bootstrap
+        _assert_release_asset_documentation_state(path.read_text(encoding="utf-8"), manifest)
+
+
+def _assert_release_asset_documentation_state(document: str, manifest: dict[str, object]) -> None:
+    assets = manifest["assets"]
+    assert isinstance(assets, list)
+    apk = next(asset for asset in assets if asset["name"] == "kinova-pico-udp-bridge.apk")
+    assert isinstance(apk, dict)
+    fixture = apk["sha256"] == "a" * 64 and apk["size_bytes"] == 3
+    normalized = document.lower()
+    bootstrap = next(block.lower() for block in _powershell_blocks(document) if "lifecycle: bootstrap" in block.lower())
+    prepublication_terms = (
+        "prepublication-fixture", "not yet published", "do not run until published",
+        "post-release only", "publication fixture", "not an installable binary",
+        "task 6 replaces", "cannot be installed", "不能安装", "发布占位",
+    )
+    if fixture:
+        assert "<!-- release-asset-state: prepublication-fixture -->" in normalized
+        assert "v0.2.0-rc.1 is not yet published" in normalized
+        assert "do not run until published" in normalized
+        assert "post-release only" in bootstrap
+    else:
+        assert "<!-- release-asset-state: published -->" in normalized
+        assert all(term not in normalized for term in prepublication_terms)
+
+
+def test_real_manifest_branch_rejects_all_prepublication_wording() -> None:
+    real_manifest = {
+        "assets": [{
+            "name": "kinova-pico-udp-bridge.apk", "sha256": "b" * 64, "size_bytes": 4,
+        }]
+    }
+    for path in README_PATHS:
+        with __import__("pytest").raises(AssertionError):
+            _assert_release_asset_documentation_state(path.read_text(encoding="utf-8"), real_manifest)
 
 
 def test_public_commands_reference_tracked_scripts_or_release_assets() -> None:

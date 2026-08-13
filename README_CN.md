@@ -16,6 +16,8 @@ Grip 是离合器：先释放到低于 `0.8`，再按到高于 `0.9` 才会建�
 
 请使用原生 Windows 10/11 PowerShell 5.1+（不使用 WSL）、Git、CPython **3.11.x**，以及用于 USB 安装的 Android platform tools/ADB。若选择从源码构建 APK，请通过 Unity Hub 安装 Unity `2022.3.62f3c1`，并勾选 Android Build Support、SDK/NDK 和 OpenJDK。桥接源码固定 PICO OpenXR SDK `3aa3e62bff41df618529eeb60ff02c29a515dafe`。
 
+<!-- RELEASE-ASSET-STATE: prepublication-fixture -->
+
 APK 和 Kortex wheel 是带 SHA-256 校验的 `v0.2.0-rc.1` 发布资产，不是仓库二进制文件。**`v0.2.0-rc.1 is not yet published`; do not run until published.** [release/public-release-assets.json](release/public-release-assets.json) 跟踪其预期名称、URL、哈希和大小；当前仓库的 APK 声明是发布占位，不能安装。Task 6 将以真实资产替换该占位；届时必须删除本警告，bootstrap 才可执行。
 
 将头显和 PC 放入同一受信任 LAN/VLAN；不要设置固定 PICO 地址。如果 Windows Firewall 提示，仅在受信任网络配置文件中允许 Python 入站 UDP `15031`。不要创建宽泛规则、把端口暴露给公用网络、使用 `adb tcpip`、`adb connect` 或 ADB reverse；脚本不会创建防火墙规则。
