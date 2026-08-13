@@ -350,6 +350,37 @@ def test_public_bootstrap_default_discovers_python_311_via_py_launcher(tmp_path:
     assert "-3.11" in Path(environment["FAKE_PYTHON_LOG"]).read_text(encoding="utf-8")
 
 
+def test_public_bootstrap_falls_back_to_path_python_when_py_has_no_311(tmp_path: Path) -> None:
+    project, fake_python, environment = _prepare_offline_project(tmp_path)
+    py_launcher = tmp_path / "py.exe"
+    shutil.copy2(fake_python, py_launcher)
+    environment["FAKE_PYTHON_311"] = ""
+
+    result = _run_bootstrap(
+        project, fake_python, environment, "-SkipOfflineTests", explicit_python=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "-3.11" in Path(environment["FAKE_PYTHON_LOG"]).read_text(encoding="utf-8")
+
+
+def test_public_bootstrap_reports_clear_error_when_no_python_candidate_exists(
+    tmp_path: Path,
+) -> None:
+    project, fake_python, environment = _prepare_offline_project(tmp_path)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    git_directory = Path(shutil.which("git") or "").parent
+    environment["PATH"] = f"{empty_path}{os.pathsep}{git_directory}"
+
+    result = _run_bootstrap(
+        project, fake_python, environment, "-SkipOfflineTests", explicit_python=False
+    )
+
+    assert result.returncode != 0
+    assert "Python 3.11 executable" in result.stderr
+
+
 def test_public_bootstrap_rejects_non_windows_before_any_tool_invocation(tmp_path: Path) -> None:
     project, fake_python, environment = _prepare_offline_project(tmp_path)
     environment["OS"] = "Linux"

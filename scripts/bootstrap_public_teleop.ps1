@@ -169,16 +169,25 @@ if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
     $pyLauncher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($null -ne $pyLauncher) {
-        $launcherCandidate = (& $pyLauncher.Source -3.11 -c 'import sys; print(sys.executable)' |
-            Select-Object -Last 1).ToString().Trim()
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($launcherCandidate) -and
+        $launcherOutput = @(& $pyLauncher.Source -3.11 -c 'import sys; print(sys.executable)')
+        $launcherCandidate = $null
+        if ($LASTEXITCODE -eq 0 -and $launcherOutput.Count -gt 0) {
+            $launcherCandidate = ($launcherOutput | Select-Object -Last 1).ToString().Trim()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($launcherCandidate) -and
             (Test-Path -LiteralPath $launcherCandidate -PathType Leaf)) {
             $pythonCandidate = $launcherCandidate
         }
     }
     if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
-        $pythonCandidate = (Get-Command python -CommandType Application -ErrorAction Stop |
-            Select-Object -First 1).Source
+        $pathPython = Get-Command python -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $pathPython) {
+            $pythonCandidate = $pathPython.Source
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
+        throw 'No Python 3.11 executable was found. Supply -PythonExe or install Python 3.11.'
     }
 }
 $resolvedPython = Resolve-RequiredFile $pythonCandidate 'PythonExe'
