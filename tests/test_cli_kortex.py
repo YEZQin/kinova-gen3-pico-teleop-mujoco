@@ -456,6 +456,52 @@ def test_expanded_envelope_input_checks_reject_before_hardware_side_effects(
     assert "--expanded-translation-envelope requires" in capsys.readouterr().err
 
 
+def test_expanded_envelope_disabled_input_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+) -> None:
+    """An input-disabled motion path is not live hardware teleoperation."""
+
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr(
+        main_module,
+        "load_passing_preflight_report",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.create_input",
+        lambda _args: (_ for _ in ()).throw(AssertionError("input constructed")),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+
+    assert main(
+        _expanded_motion_gate_args(
+            [
+                "--backend",
+                "kortex",
+                "--enable-hardware",
+                "--translation-only",
+                "--expanded-translation-envelope",
+                "--input",
+                "none",
+            ]
+        )
+    ) == 2
+    assert calls == []
+    assert prompts == []
+    assert "--expanded-translation-envelope requires" in capsys.readouterr().err
+
+
 def test_expanded_envelope_workspace_overrun_rejects_before_hardware_side_effects(
     monkeypatch,
     capsys,

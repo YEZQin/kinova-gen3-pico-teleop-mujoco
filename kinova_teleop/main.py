@@ -402,6 +402,7 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         and not args.check_kortex
         and not args.check_input
         and not args.check_xr
+        and args.input != "none"
         and args.fixed_trajectory is None
     )
     if args.expanded_translation_envelope and not expanded_mode_valid:
