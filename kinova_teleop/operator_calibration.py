@@ -54,16 +54,39 @@ def _reject_non_finite_constant(value: str) -> None:
     raise _fail(f"contains non-finite JSON constant {value}")
 
 
+def _validate_regular_file_metadata(metadata: Any) -> None:
+    if stat.S_ISLNK(metadata.st_mode):
+        raise _fail("must not be a symbolic link")
+    if getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT:
+        raise _fail("must not be a Windows reparse point")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise _fail("must be a regular file")
+
+
+def _file_identity(metadata: Any) -> tuple[int, int, int]:
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(getattr(metadata, "st_file_attributes", 0)),
+    )
+
+
 def _load_strict_regular_json(path: Path) -> tuple[dict[str, Any], bytes]:
     try:
-        if path.is_symlink():
-            raise _fail("must not be a symbolic link")
-        metadata = os.lstat(path)
-        if getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT:
-            raise _fail("must not be a Windows reparse point")
-        if not stat.S_ISREG(metadata.st_mode):
-            raise _fail("must be a regular file")
-        raw = path.read_bytes()
+        before = os.lstat(path)
+        _validate_regular_file_metadata(before)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as artifact:
+            opened = os.fstat(artifact.fileno())
+            _validate_regular_file_metadata(opened)
+            if _file_identity(before) != _file_identity(opened):
+                raise _fail("file identity changed before opening")
+            raw = artifact.read()
+        after = os.lstat(path)
+        _validate_regular_file_metadata(after)
+        if _file_identity(before) != _file_identity(after):
+            raise _fail("file identity changed while reading")
         decoded = raw.decode("utf-8")
         payload = json.loads(
             decoded,
@@ -153,8 +176,12 @@ def _validate_capture(payload: dict[str, Any]) -> np.ndarray:
         "right_forward": abs(float(np.dot(units[0], units[2]))),
         "up_forward": abs(float(np.dot(units[1], units[2]))),
     }
-    if determinant <= 0.0 or condition > 2.0 or max(dots.values()) > 0.35:
-        raise _fail("raw basis fails quality thresholds")
+    if determinant <= 0.0:
+        raise _fail("raw basis determinant must be positive")
+    if condition > 2.0:
+        raise _fail("raw basis condition number exceeds 2.0")
+    if max(dots.values()) > 0.35:
+        raise _fail("raw basis pairwise dot exceeds 0.35")
     if not np.isclose(_finite_number(payload["basis_determinant"], "basis_determinant"), determinant, rtol=0.0, atol=_ATOL):
         raise _fail("basis determinant summary is inconsistent")
     if not np.isclose(_finite_number(payload["basis_condition_number"], "basis_condition_number"), condition, rtol=0.0, atol=_ATOL):

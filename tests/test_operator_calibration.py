@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,27 @@ def write_capture(tmp_path: Path, payload: object, *, raw: str | None = None) ->
     path = tmp_path / "capture.json"
     path.write_bytes((raw if raw is not None else json.dumps(payload)).encode("utf-8"))
     return path
+
+
+def set_consistent_basis(payload: dict[str, object], columns: list[list[float]]) -> None:
+    neutral = np.asarray(payload["shared_neutral_m"], dtype=np.float64)
+    magnitudes = (0.02, 0.021, 0.022)
+    for gesture, column, magnitude in zip(payload["gestures"], columns, magnitudes):
+        unit = np.asarray(column, dtype=np.float64)
+        delta = unit * magnitude
+        gesture.update(
+            neutral_m=neutral.tolist(), endpoint_m=(neutral + delta).tolist(),
+            raw_delta_m=delta.tolist(), unit_raw=unit.tolist(), magnitude_m=magnitude,
+        )
+    basis = np.asarray(columns, dtype=np.float64).T
+    payload["raw_operator_basis_columns_right_up_forward"] = basis.tolist()
+    payload["basis_determinant"] = float(np.linalg.det(basis))
+    payload["basis_condition_number"] = float(np.linalg.cond(basis))
+    payload["pairwise_abs_dots"] = {
+        "right_up": abs(float(np.dot(basis[:, 0], basis[:, 1]))),
+        "right_forward": abs(float(np.dot(basis[:, 0], basis[:, 2]))),
+        "up_forward": abs(float(np.dot(basis[:, 1], basis[:, 2]))),
+    }
 
 
 def test_loader_derives_expected_proper_rotation(tmp_path: Path) -> None:
@@ -76,6 +98,18 @@ def test_loader_rejects_malformed_or_low_quality_capture(tmp_path: Path, mutate)
         load_operator_axis_calibration(write_capture(tmp_path, payload))
 
 
+@pytest.mark.parametrize(("columns", "message"), [
+    ([[1.0, 0.0, 0.0], [0.5, np.sqrt(0.75), 0.0], [0.0, 0.0, 1.0]], "pairwise"),
+    ([[1.0, 0.0, 0.0], [0.34, np.sqrt(1.0 - 0.34**2), 0.0], [0.34, -0.34 * (1.0 + 0.34 / np.sqrt(1.0 - 0.34**2)), np.sqrt(1.0 - 0.34**2 - (0.34 * (1.0 + 0.34 / np.sqrt(1.0 - 0.34**2)))**2)]], "condition"),
+    ([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]], "determinant"),
+])
+def test_loader_rejects_each_recomputed_quality_threshold(tmp_path: Path, columns, message: str) -> None:
+    payload = copy.deepcopy(RIGHT_UP_FORWARD_CAPTURE)
+    set_consistent_basis(payload, columns)
+    with pytest.raises(ValueError, match=message):
+        load_operator_axis_calibration(write_capture(tmp_path, payload))
+
+
 def test_loader_rejects_symlink(tmp_path: Path) -> None:
     target = write_capture(tmp_path, RIGHT_UP_FORWARD_CAPTURE)
     symlink = tmp_path / "capture-link.json"
@@ -89,7 +123,30 @@ def test_loader_rejects_symlink(tmp_path: Path) -> None:
 
 def test_loader_rejects_windows_reparse_file(tmp_path: Path, monkeypatch) -> None:
     target = write_capture(tmp_path, RIGHT_UP_FORWARD_CAPTURE)
-    monkeypatch.setattr(Path, "is_symlink", lambda _: False)
-    monkeypatch.setattr("kinova_teleop.operator_calibration.os.lstat", lambda _: SimpleNamespace(st_file_attributes=0x400))
+    metadata = os.lstat(target)
+    monkeypatch.setattr(
+        "kinova_teleop.operator_calibration.os.lstat",
+        lambda _: SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_file_attributes=0x400,
+        ),
+    )
     with pytest.raises(ValueError, match="operator calibration"):
+        load_operator_axis_calibration(target)
+
+
+def test_loader_rejects_file_replaced_between_identity_check_and_open(tmp_path: Path, monkeypatch) -> None:
+    target = write_capture(tmp_path, RIGHT_UP_FORWARD_CAPTURE)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(json.dumps(RIGHT_UP_FORWARD_CAPTURE).encode("utf-8"))
+    real_open = os.open
+
+    def replace_then_open(path, flags, *args):
+        replacement.replace(target)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr("kinova_teleop.operator_calibration.os.open", replace_then_open)
+    with pytest.raises(ValueError, match="identity changed"):
         load_operator_axis_calibration(target)
