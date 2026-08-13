@@ -27,6 +27,24 @@ def test_evidence_logger_writes_schema_compatible_records(tmp_path):
     assert record["state"] == "CONNECTED_READ_ONLY"
 
 
+def test_evidence_logger_writes_anchor_rejection_reason(tmp_path):
+    path = tmp_path / "events.jsonl"
+    logger = EvidenceLogger(path, run_id="g-001", monotonic_ns=lambda: 10)
+
+    record = logger.event(
+        "anchor_rejected",
+        "STOPPING",
+        {"reason": "target outside anchor translation envelope"},
+    )
+
+    assert record["kind"] == "anchor_rejected"
+    assert record["state"] == "STOPPING"
+    assert record["payload"] == {
+        "reason": "target outside anchor translation envelope"
+    }
+    assert json.loads(path.read_text(encoding="utf-8")) == record
+
+
 def test_evidence_logger_monotonic_order_is_strict(tmp_path):
     values = iter((3, 3))
     logger = EvidenceLogger(tmp_path / "events.jsonl", run_id="g-001", monotonic_ns=lambda: next(values))

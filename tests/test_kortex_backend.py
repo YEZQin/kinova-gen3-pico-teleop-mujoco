@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import threading
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import numpy as np
 import pytest
 
 import kinova_teleop.kortex_backend as kortex_backend_module
+from kinova_teleop.evidence_log import EvidenceLogger, logger_event_sink
 from kinova_teleop.kortex_backend import KortexBackend, KortexSafetyError
 from kinova_teleop.pose_mapping import Pose
 from kinova_teleop.workspace import AnchorEnvelope, WorkspaceLimits
@@ -351,6 +353,28 @@ def test_anchor_translation_rejection_stops_recoverably_before_feedback():
     assert connection.base.stop_count == 1
     assert backend.stop_confirmed is True
     assert backend.fault_reason is None
+
+
+def test_anchor_rejection_is_written_to_evidence_logger(tmp_path):
+    connection = _Connection(_feedback())
+    events_path = tmp_path / "events.jsonl"
+    logger = EvidenceLogger(events_path, run_id="g-001", monotonic_ns=lambda: 10)
+    backend = _backend(
+        connection,
+        anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE,
+        event_sink=logger_event_sink(logger),
+    )
+    _begin_pose_control(backend)
+
+    result = backend.command_pose(_target(position=(0.020001, 0.0, 0.0)))
+
+    records = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert result.reanchor_required is True
+    assert records[-2]["kind"] == "anchor_rejected"
+    assert records[-2]["state"] == "STOPPING"
+    assert records[-2]["payload"] == {
+        "reason": "target outside anchor translation envelope"
+    }
 
 
 def test_anchor_rejection_raises_unconfirmed_stop_failure():
