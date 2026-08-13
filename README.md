@@ -16,9 +16,9 @@ Grip is a clutch: release below `0.8`, then press above `0.9` to create a new an
 
 Use native Windows 10/11 PowerShell 5.1+ (not WSL), Git, CPython **3.11.x**, and Android platform tools/ADB for USB installation. For an APK build alternative, install Unity `2022.3.62f3c1` with Android Build Support, SDK/NDK, and OpenJDK. The bridge source pins PICO OpenXR SDK `3aa3e62bff41df618529eeb60ff02c29a515dafe`.
 
-<!-- RELEASE-ASSET-STATE: prepublication-fixture -->
+<!-- RELEASE-ASSET-STATE: published -->
 
-The APK and Kortex wheel are intended to be hash-checked `v0.2.0-rc.1` release assets, not repository blobs. **`v0.2.0-rc.1 is not yet published`; do not run until published.** Their expected names, URLs, hashes, and sizes are tracked in [release/public-release-assets.json](release/public-release-assets.json); the currently committed APK declaration is a publication fixture and is not an installable binary. Task 6 replaces this fixture with real assets, after which this warning must be removed and bootstrap becomes runnable.
+The APK and Kortex wheel are hash-checked `v0.2.0-rc.1` release assets, not repository blobs. Their exact names, URLs, hashes, and sizes are tracked in [release/public-release-assets.json](release/public-release-assets.json), and bootstrap verifies every local or downloaded asset before use.
 
 Put the headset and PC on the same trusted LAN/VLAN. Do not set fixed PICO addresses. Permit only inbound UDP `15031` for Python on that trusted profile if Windows Firewall asks; do not add broad rules, expose the port to public networks, use `adb tcpip`, `adb connect`, or ADB reverse. The scripts never create a firewall rule.
 
@@ -36,7 +36,6 @@ If you cannot use Git, download the ZIP from that same publication branch and ex
 
 ```powershell
 # LIFECYCLE: bootstrap
-# POST-RELEASE ONLY: run after v0.2.0-rc.1 is published with real verified assets.
 .\scripts\bootstrap_public_teleop.ps1
 ```
 
