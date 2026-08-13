@@ -60,7 +60,17 @@ def _initialize_git_fixture(project: Path) -> str:
     ).stdout.strip()
 
 
-@pytest.mark.parametrize("hook_name", ("sitecustomize.py", "usercustomize.py"))
+@pytest.mark.parametrize(
+    "hook_name",
+    (
+        "sitecustomize.py",
+        "usercustomize.py",
+        "sitecustomize/__init__.py",
+        "usercustomize/__init__.py",
+        "sitecustomize.pyc",
+        "usercustomize.pyd",
+    ),
+)
 def test_untracked_root_python_startup_hook_rejects_before_hardware_side_effects(
     tmp_path: Path,
     monkeypatch,
@@ -69,7 +79,9 @@ def test_untracked_root_python_startup_hook_rejects_before_hardware_side_effects
 ) -> None:
     project = tmp_path / "repo"
     _initialize_git_fixture(project)
-    (project / hook_name).write_text("raise AssertionError('imported')\n", encoding="utf-8")
+    hook_path = project / hook_name
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("raise AssertionError('imported')\n", encoding="utf-8")
     monkeypatch.setattr(
         main_module,
         "__file__",
@@ -103,6 +115,37 @@ def test_untracked_root_python_startup_hook_rejects_before_hardware_side_effects
     assert calls == []
     assert prompts == []
     assert f"untracked Python startup hook: {hook_name}" in capsys.readouterr().err
+
+
+def test_readonly_kortex_rejects_startup_hook_before_secret_or_connection(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        main_module,
+        "_current_clean_code_revision",
+        lambda: (_ for _ in ()).throw(
+            ValueError("untracked Python startup hook: sitecustomize.py")
+        ),
+    )
+    monkeypatch.setattr(
+        main_module.os,
+        "getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "CONNECT")
+
+    assert main(["--backend", "kortex", "--enable-hardware", "--check-kortex"]) == 2
+    assert calls == []
+    assert prompts == []
+    assert "untracked Python startup hook: sitecustomize.py" in capsys.readouterr().err
 
 
 def test_untracked_non_hook_artifacts_do_not_block_clean_revision(

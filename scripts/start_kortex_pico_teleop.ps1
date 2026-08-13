@@ -34,6 +34,12 @@ function Resolve-RequiredFile([string]$Value, [string]$Label) {
     return (Resolve-Path -LiteralPath $Value).Path
 }
 
+$projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$startupHookGate = Resolve-RequiredFile `
+    (Join-Path $PSScriptRoot 'assert_no_untracked_python_startup_hooks.ps1') `
+    'PythonStartupHookGate'
+& $startupHookGate -ProjectRoot $projectRoot
+
 Assert-ThreeFiniteValues $WorkspaceMin 'WorkspaceMin'
 Assert-ThreeFiniteValues $WorkspaceMax 'WorkspaceMax'
 $resolvedLease = Resolve-RequiredFile $MotionLease 'MotionLease'

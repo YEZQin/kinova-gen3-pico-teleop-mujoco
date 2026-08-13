@@ -951,12 +951,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"error: {error}", file=sys.stderr)
                 return 2
         code_revision: str | None = None
-        if not args.check_kortex:
-            try:
-                code_revision = _current_clean_code_revision()
-            except ValueError as error:
-                print(f"error: {error}", file=sys.stderr)
-                return 2
+        try:
+            code_revision = _current_clean_code_revision()
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
         # Fail closed on every non-secret package gate before looking up the
         # password, constructing controller input, prompting MOVE, or opening
         # any Kortex connection.

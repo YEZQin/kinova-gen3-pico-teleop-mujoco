@@ -51,6 +51,8 @@ credential without echoing it, then run only the exact read-only path with
 `CONNECT` and save a new, non-overwriting report:
 
 ```powershell
+& .\scripts\assert_no_untracked_python_startup_hooks.ps1 `
+  -ProjectRoot (Get-Location).Path
 $securePassword = Read-Host 'Kortex password' -AsSecureString
 try {
   $env:KINOVA_PASSWORD = [System.Net.NetworkCredential]::new('', $securePassword).Password
