@@ -413,6 +413,49 @@ def test_expanded_envelope_invalid_modes_reject_before_connection(
     assert "--expanded-translation-envelope requires" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("input_check", ("--check-input", "--check-xr"))
+def test_expanded_envelope_input_checks_reject_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    input_check: str,
+) -> None:
+    """Input-only preflight must not be admitted as hardware teleoperation."""
+
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.create_input",
+        lambda _args: (_ for _ in ()).throw(AssertionError("input preflight ran")),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+
+    assert main(
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--input",
+            "xrobotoolkit",
+            input_check,
+            "--samples",
+            "1",
+        ]
+    ) == 2
+    assert calls == []
+    assert prompts == []
+    assert "--expanded-translation-envelope requires" in capsys.readouterr().err
+
+
 def test_expanded_envelope_workspace_overrun_rejects_before_hardware_side_effects(
     monkeypatch,
     capsys,
