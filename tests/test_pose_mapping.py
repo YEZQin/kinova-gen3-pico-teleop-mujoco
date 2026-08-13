@@ -78,6 +78,98 @@ def unfiltered_config(**overrides) -> MappingConfig:
     return MappingConfig(**values)
 
 
+CALIBRATED_TRANSLATION_ROTATION = (
+    (0.861288411785, 0.469277688168, -0.194835117758),
+    (-0.470679958298, 0.881303368425, 0.042008923554),
+    (0.191422696095, 0.055523186053, 0.979935981190),
+)
+
+
+def move_after_anchor(
+    config: MappingConfig,
+    raw_delta: list[float],
+    ee: Pose,
+) -> Pose:
+    mapper = RelativePoseMapper(config)
+    release_then_press(mapper, ee)
+    return mapper.update(
+        sample(raw_delta, grip=1.0, stamp=3, received=1.02),
+        ee,
+        now=1.02,
+    ).target
+
+
+@pytest.mark.parametrize(
+    ("raw_delta", "expected_base"),
+    [
+        pytest.param(
+            [0.881303368425, -0.042008923554, -0.470679958298],
+            [0.0, -1.0, 0.0],
+            id="right",
+        ),
+        pytest.param(
+            [-0.055523186053, 0.979935981190, -0.191422696095],
+            [0.0, 0.0, 1.0],
+            id="up",
+        ),
+        pytest.param(
+            [0.469277688168, 0.194835117758, 0.861288411785],
+            [-1.0, 0.0, 0.0],
+            id="forward",
+        ),
+    ],
+)
+def test_operator_calibration_maps_measured_directions(
+    raw_delta, expected_base
+) -> None:
+    ee = Pose(
+        np.array([0.4, -0.2, 0.3], dtype=np.float64),
+        quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), 0.4),
+    )
+
+    target = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+        ),
+        raw_delta,
+        ee,
+    )
+
+    np.testing.assert_allclose(
+        (target.position - ee.position) / np.linalg.norm(target.position - ee.position),
+        expected_base,
+        atol=0.11,
+    )
+    np.testing.assert_allclose(
+        quat_to_matrix(target.quaternion), quat_to_matrix(ee.quaternion), atol=1e-8
+    )
+
+
+@pytest.mark.parametrize(
+    "translation_rotation",
+    [
+        pytest.param(((1.0, 0.0), (0.0, 1.0)), id="wrong-shape"),
+        pytest.param(((np.nan, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), id="nonfinite"),
+        pytest.param(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 2.0)), id="nonorthogonal"),
+        pytest.param(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, -1.0)), id="reflection"),
+    ],
+)
+def test_mapping_config_rejects_invalid_translation_rotation(
+    translation_rotation,
+) -> None:
+    with pytest.raises(ValueError):
+        MappingConfig(translation_rotation=translation_rotation)
+
+
+def test_mapping_config_rejects_inversion_with_translation_rotation() -> None:
+    with pytest.raises(ValueError):
+        MappingConfig(
+            invert_translation=True,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+        )
+
+
 @pytest.mark.parametrize(
     ("thresholds", "expected_press", "expected_release"),
     [

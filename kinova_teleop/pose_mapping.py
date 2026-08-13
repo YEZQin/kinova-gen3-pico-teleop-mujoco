@@ -51,6 +51,7 @@ class MappingConfig:
     orientation_enabled: bool = True
     invert_translation: bool = False
     release_stability_samples: int = 1
+    translation_rotation: tuple[tuple[float, float, float], ...] | None = None
 
     def __post_init__(self) -> None:
         thresholds = np.asarray(
@@ -69,6 +70,21 @@ class MappingConfig:
             or self.release_stability_samples <= 0
         ):
             raise ValueError("release_stability_samples must be a positive integer")
+        if self.translation_rotation is not None:
+            try:
+                rotation = np.asarray(self.translation_rotation, dtype=np.float64)
+            except (TypeError, ValueError) as error:
+                raise ValueError("translation_rotation must be a finite 3x3 rotation") from error
+            if rotation.shape != (3, 3) or not np.isfinite(rotation).all():
+                raise ValueError("translation_rotation must be a finite 3x3 rotation")
+            if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-9, rtol=0.0):
+                raise ValueError("translation_rotation must be orthogonal")
+            if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-9, rtol=0.0):
+                raise ValueError("translation_rotation must have determinant +1")
+            if self.invert_translation:
+                raise ValueError(
+                    "invert_translation cannot be combined with translation_rotation"
+                )
 
 
 @dataclass(frozen=True)
@@ -433,11 +449,14 @@ class RelativePoseMapper:
         if self._controller_reference is None or self._ee_reference is None:
             raise RuntimeError("Active mapper is missing reference poses")
 
+        delta = controller_pose.position - self._controller_reference.position
+        if self.config.translation_rotation is not None:
+            delta = np.asarray(self.config.translation_rotation) @ delta
         translation_sign = -1.0 if self.config.invert_translation else 1.0
         desired_position = self._ee_reference.position + (
             translation_sign
             * self.config.translation_scale
-            * (controller_pose.position - self._controller_reference.position)
+            * delta
         )
         if self.config.orientation_enabled:
             controller_delta = quat_multiply(

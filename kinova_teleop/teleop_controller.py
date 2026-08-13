@@ -30,6 +30,7 @@ class TeleopConfig:
     invert_translation: bool = False
     recover_stale_input: bool = False
     recovery_release_samples: int = 1
+    translation_rotation: tuple[tuple[float, float, float], ...] | None = None
 
 
 class TeleopSafetyError(RuntimeError):
@@ -77,6 +78,7 @@ class TeleopController:
                 invert_translation=config.invert_translation,
                 release_stability_samples=config.recovery_release_samples,
                 stale_timeout=config.stale_timeout,
+                translation_rotation=config.translation_rotation,
             ),
         )
         self.mapper.reset(backend.current_pose())

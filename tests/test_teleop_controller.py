@@ -426,6 +426,24 @@ def test_controller_uses_only_backend_contract_and_owns_resources() -> None:
     assert backend.close_calls == 1
 
 
+def test_controller_passes_translation_rotation_to_mapper() -> None:
+    rotation = (
+        (0.0, -1.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    controller = TeleopController(
+        TeleopConfig(realtime=False, translation_rotation=rotation),
+        ScriptedInput([]),
+        RecordingBackend(),
+    )
+
+    try:
+        assert controller.mapper.config.translation_rotation == rotation
+    finally:
+        controller.close()
+
+
 def test_run_reports_only_meaningful_state_and_reason_transitions() -> None:
     class RejectingBackend(RecordingBackend):
         def command_pose(self, target):
