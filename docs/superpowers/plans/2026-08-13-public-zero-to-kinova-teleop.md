@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `D:\yezq\26.7.24_Kinova_controll\.worktrees\kortex-merge`; preserve unrelated ignored/untracked artifacts.
+- Work only in the designated isolated publication worktree; preserve unrelated ignored/untracked artifacts.
 - Publish source on `codex/public-gen3-pico-hardware-teleop`; keep `main` unchanged and open a Draft PR.
 - English `README.md` and complete Chinese `README_CN.md` must have command parity and no developer-machine absolute path.
 - Public first motion is translation-only, no gripper writes, 40 Hz, stale timeout at most 0.2 s, angular cap at most 2 deg/s, and operator-selected linear cap no greater than 0.02 m/s.
@@ -244,7 +244,7 @@ Parse fenced PowerShell commands and require both READMEs to contain the same or
 clone -> bootstrap -> APK install -> PICO gate -> MuJoCo finite -> calibration -> T0 -> local bounds/package -> offline validation -> physical checklist -> hardware launcher -> Grip release -> MOVE -> stop/troubleshooting
 ```
 
-Reject any `D:\yezq`, local laboratory report/lease/event filename, literal password, broad copied workspace, `admin` presented as a password, untracked script path, missing evidence table, missing SDK/APK licenses, or hardware-validated claim for the final expanded profile.
+Reject any developer-machine absolute path, local laboratory report/lease/event filename, literal password, broad copied workspace, `admin` presented as a password, untracked script path, missing evidence table, missing SDK/APK licenses, or hardware-validated claim for the final expanded profile.
 
 - [ ] **Step 2: Run docs RED**
 

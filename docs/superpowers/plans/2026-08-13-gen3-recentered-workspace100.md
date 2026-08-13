@@ -183,7 +183,7 @@ Review both artifacts and all task reports. Require no Critical/High/Medium find
 Do not merge, push, delete reports, clean `results`, or remove the worktree. Tell the onsite operator that the new bounds are hardware-unverified. Require current physical checklist confirmation and released Grip before presenting:
 
 ```powershell
-cd D:\yezq\26.7.24_Kinova_controll\.worktrees\kortex-merge
+Set-Location (git rev-parse --show-toplevel)
 & .\results\start-gen3-pico-calibrated080-workspace100-20260813.ps1
 ```
 

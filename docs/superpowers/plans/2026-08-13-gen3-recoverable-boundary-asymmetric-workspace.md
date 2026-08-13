@@ -258,7 +258,7 @@ After the last tracked commit, set the reviewed report `code_revision` to exact 
 Only after the operator reconfirms the complete asymmetric sweep volume, fixture/payload/cables, reachable E-stop/Web Stop, second observer, foreground PICO, and released Grip, present:
 
 ```powershell
-cd D:\yezq\26.7.24_Kinova_controll\.worktrees\kortex-merge
+Set-Location (git rev-parse --show-toplevel)
 & .\results\start-gen3-pico-asymmetric020-20260813.ps1
 ```
 

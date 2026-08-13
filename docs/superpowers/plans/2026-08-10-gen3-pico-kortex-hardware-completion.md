@@ -124,7 +124,7 @@ def test_first_hardware_workspace_cannot_exceed_four_centimetres_per_axis() -> N
 - [ ] **Step 2: Run the focused tests and verify RED**
 
 ```powershell
-$python = 'D:\yezq\26.7.24_Kinova_controll\.venv\Scripts\python.exe'
+$python = Join-Path (Get-Location).Path '.venv\Scripts\python.exe'
 & $python -m pytest tests\test_hardware_profile.py tests\test_cli_kortex.py -q
 ```
 
@@ -906,7 +906,7 @@ Expected: all tests pass and total `kinova_teleop` coverage is at least 80%.
 - [ ] **Step 6: Verify the exact Kortex runtime without network access**
 
 ```powershell
-$kortexPython = 'D:\yezq\26.7.26_paper_prepare_CC\Kinova_Gen3\.venv-kortex-2.8\Scripts\python.exe'
+$kortexPython = $env:KORTEX_PYTHON
 & $kortexPython -c "from importlib.metadata import version; import kortex_api; assert version('kortex-api') == '2.8.0.post5'; assert version('protobuf') == '3.20.0'; print('Kortex offline import OK')"
 ```
 

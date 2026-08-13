@@ -176,6 +176,14 @@ def test_public_docs_exclude_private_paths_secrets_and_laboratory_artifacts() ->
             assert re.search(pattern, text, flags=re.IGNORECASE) is None, f"{path.name}: {pattern}"
 
 
+def test_all_tracked_markdown_excludes_developer_machine_paths() -> None:
+    for relative_path in _tracked_files():
+        if not relative_path.lower().endswith(".md"):
+            continue
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert re.search(r"(?:D:[\\/]+yezq|C:[\\/]+Users[\\/]+qqxx)", text, re.IGNORECASE) is None, relative_path
+
+
 def test_evidence_licenses_and_final_profile_limit_are_explicit() -> None:
     english = (ROOT / "README.md").read_text(encoding="utf-8").lower()
     chinese = (ROOT / "README_CN.md").read_text(encoding="utf-8").lower()

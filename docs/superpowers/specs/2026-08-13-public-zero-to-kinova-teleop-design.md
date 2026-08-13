@@ -85,7 +85,7 @@ Both documents must contain this zero-to-run sequence:
 
 The quick-start block at the end must use only commands that exist in the
 published commit. Machine-specific paths will be variables or discovered
-paths. The development computer's `D:\yezq\...` paths, password, calibration
+paths. Developer-machine absolute paths, passwords, calibration
 report, lease, evidence JSONL, and wide workspace values must not appear as
 copyable defaults.
 
