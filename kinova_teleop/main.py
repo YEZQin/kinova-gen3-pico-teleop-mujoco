@@ -394,12 +394,12 @@ def create_pico_udp_input(
     host: str = "0.0.0.0",
     port: int = 15031,
     stale_timeout: float = DEFAULT_MUJOCO_STALE_TIMEOUT,
-    allow_stale_source_handoff: bool | None = None,
+    allow_stale_source_handoff: bool = False,
 ) -> XrInputSource:
     """Create the continuously buffered PICO input used by non-robot tools."""
 
     pico_kwargs: dict[str, object] = {}
-    if allow_stale_source_handoff is False:
+    if not allow_stale_source_handoff:
         pico_kwargs["allow_stale_source_handoff"] = False
     return ContinuousInputBuffer(
         PicoUdpInput(host=host, port=port, stale_after=stale_timeout, **pico_kwargs)
