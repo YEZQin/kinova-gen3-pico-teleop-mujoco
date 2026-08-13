@@ -60,14 +60,14 @@ def _read_released_sample(
     source: XrInputSource,
     *,
     after_timestamp_ns: int,
-    admission: _PicoSourceAdmission,
+    admission: _PicoSourceAdmission | None,
 ) -> tuple[np.ndarray, int, _PicoSourceAdmission]:
-    _verify_source_health(source, admission)
+    if admission is not None:
+        _verify_source_health(source, admission)
     try:
         sample = source.read()
     except StopIteration as error:
         raise _capture_error("input ended before a pose was complete") from error
-    admission = _verify_source_health(source, admission)
 
     if not sample.valid:
         reason = sample.invalid_reason or "invalid controller sample"
@@ -93,13 +93,18 @@ def _read_released_sample(
         or timestamp <= after_timestamp_ns
     ):
         raise _capture_error("sample timestamps must be positive and strictly increasing")
-    return np.array(position, dtype=np.float64, copy=True), timestamp, admission
+    admitted = _verify_source_health(source, admission)
+    return np.array(position, dtype=np.float64, copy=True), timestamp, admitted
 
 
-def _read_source_health(source: XrInputSource) -> _PicoSourceAdmission:
-    health_reader = getattr(source, "health", None)
-    if not callable(health_reader):
+def _require_health_reader(source: XrInputSource) -> None:
+    if not callable(getattr(source, "health", None)):
         raise _capture_error("source health is unavailable")
+
+
+def _read_source_health(source: XrInputSource) -> _PicoSourceAdmission | None:
+    _require_health_reader(source)
+    health_reader = getattr(source, "health")
     try:
         health = health_reader()
         active_source = health.active_source
@@ -107,15 +112,20 @@ def _read_source_health(source: XrInputSource) -> _PicoSourceAdmission:
     except Exception as error:
         raise _capture_error("source health is unavailable") from error
     if (
+        isinstance(foreign, bool)
+        or not isinstance(foreign, int)
+        or foreign < 0
+    ):
+        raise _capture_error("source health is unavailable")
+    if active_source is None:
+        return None
+    if (
         not isinstance(active_source, tuple)
         or len(active_source) != 2
         or not isinstance(active_source[0], str)
         or isinstance(active_source[1], bool)
         or not isinstance(active_source[1], int)
         or active_source[1] <= 0
-        or isinstance(foreign, bool)
-        or not isinstance(foreign, int)
-        or foreign < 0
     ):
         raise _capture_error("source health is unavailable")
     return _PicoSourceAdmission(active_source=active_source, foreign=foreign)
@@ -126,6 +136,8 @@ def _verify_source_health(
     admission: _PicoSourceAdmission | None,
 ) -> _PicoSourceAdmission:
     observed = _read_source_health(source)
+    if observed is None:
+        raise _capture_error("source health is unavailable")
     if admission is None:
         return observed
     if observed.active_source != admission.active_source:
@@ -142,7 +154,7 @@ def _capture_pose(
     samples_per_pose: int,
     *,
     after_timestamp_ns: int,
-    admission: _PicoSourceAdmission,
+    admission: _PicoSourceAdmission | None,
 ) -> tuple[np.ndarray, int, int, _PicoSourceAdmission]:
     prompts.wait_for_pose(label)
     positions: list[np.ndarray] = []
@@ -236,14 +248,14 @@ def capture_operator_calibration(
     if isinstance(samples_per_pose, bool) or not isinstance(samples_per_pose, int) or samples_per_pose <= 0:
         raise ValueError("samples_per_pose must be a positive integer")
 
-    admission = _verify_source_health(source, None)
+    _require_health_reader(source)
     neutral, neutral_timestamp, last_timestamp, admission = _capture_pose(
         source,
         prompts,
         _POSE_SEQUENCE[0],
         samples_per_pose,
         after_timestamp_ns=0,
-        admission=admission,
+        admission=None,
     )
     gestures: list[dict[str, object]] = []
     for label in _GESTURE_LABELS:

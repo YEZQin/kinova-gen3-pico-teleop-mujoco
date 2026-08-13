@@ -22,12 +22,14 @@ class ScriptedSource:
         self,
         samples: list[ControllerSample],
         *,
-        active_source: tuple[str, int] = ("192.0.2.10", 15031),
+        active_source: tuple[str, int] | None = ("192.0.2.10", 15031),
+        active_source_available_after_reads: int | None = None,
         foreign_after_reads: int | None = None,
         changed_source_after_reads: int | None = None,
     ) -> None:
         self._samples = iter(samples)
         self._active_source = active_source
+        self._active_source_available_after_reads = active_source_available_after_reads
         self._foreign_after_reads = foreign_after_reads
         self._changed_source_after_reads = changed_source_after_reads
         self._read_count = 0
@@ -39,6 +41,12 @@ class ScriptedSource:
 
     def health(self) -> SimpleNamespace:
         active_source = self._active_source
+        if (
+            active_source is None
+            and self._active_source_available_after_reads is not None
+            and self._read_count >= self._active_source_available_after_reads
+        ):
+            active_source = ("192.0.2.10", 15031)
         if (
             self._changed_source_after_reads is not None
             and self._read_count >= self._changed_source_after_reads
@@ -153,15 +161,36 @@ def test_capture_requires_stable_admitted_pico_source_health() -> None:
     assert payload["controller"] == "left"
 
 
+def test_capture_admits_a_source_that_becomes_active_after_first_valid_sample() -> None:
+    source = ScriptedSource(
+        valid_capture_samples(),
+        active_source=None,
+        active_source_available_after_reads=1,
+    )
+
+    payload = capture_operator_calibration(source, no_op_prompts(), samples_per_pose=3)
+
+    assert payload["controller"] == "left"
+
+
+def test_capture_fails_boundedly_when_source_never_becomes_active() -> None:
+    source = ScriptedSource(valid_capture_samples(), active_source=None)
+
+    with pytest.raises(ValueError, match="source health is unavailable"):
+        capture_operator_calibration(source, no_op_prompts(), samples_per_pose=3)
+
+    assert source._read_count == 1
+
+
 @pytest.mark.parametrize(
     ("source", "error"),
     [
         (
-            ScriptedSource(valid_capture_samples(), changed_source_after_reads=1),
+            ScriptedSource(valid_capture_samples(), changed_source_after_reads=2),
             "source changed",
         ),
         (
-            ScriptedSource(valid_capture_samples(), foreign_after_reads=1),
+            ScriptedSource(valid_capture_samples(), foreign_after_reads=2),
             "foreign",
         ),
         (ScriptedSource(valid_capture_samples(), active_source=None), "unavailable"),  # type: ignore[arg-type]
