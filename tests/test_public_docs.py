@@ -7,6 +7,8 @@ import subprocess
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 README_PATHS = (ROOT / "README.md", ROOT / "README_CN.md")
@@ -90,9 +92,10 @@ def _assert_release_asset_documentation_state(document: str, manifest: dict[str,
     normalized = document.lower()
     bootstrap = next(block.lower() for block in _powershell_blocks(document) if "lifecycle: bootstrap" in block.lower())
     prepublication_terms = (
-        "prepublication-fixture", "not yet published", "do not run until published",
-        "post-release only", "publication fixture", "not an installable binary",
-        "task 6 replaces", "cannot be installed", "不能安装", "发布占位",
+        "prepublication-fixture", "uninstallable", "not yet published",
+        "do not run until published", "post-release only", "publication fixture",
+        "not an installable binary", "task 6 replaces", "cannot be installed",
+        "task 6 将以真实资产替换", "不能安装", "发布占位", "未发布",
     )
     if fixture:
         assert "<!-- release-asset-state: prepublication-fixture -->" in normalized
@@ -101,18 +104,51 @@ def _assert_release_asset_documentation_state(document: str, manifest: dict[str,
         assert "post-release only" in bootstrap
     else:
         assert "<!-- release-asset-state: published -->" in normalized
+        assert re.search(r"(?<!device-)(?<!device/)(?<!network/)fixture\b", normalized) is None
         assert all(term not in normalized for term in prepublication_terms)
 
 
-def test_real_manifest_branch_rejects_all_prepublication_wording() -> None:
+def _published_document(document: str) -> str:
+    state_and_warning = r"<!-- RELEASE-ASSET-STATE: prepublication-fixture -->\n\n[^\n]*\n"
+    published = re.sub(
+        state_and_warning,
+        "<!-- RELEASE-ASSET-STATE: published -->\n",
+        document,
+    )
+    return re.sub(r"^# POST-RELEASE ONLY:.*\n", "", published, flags=re.MULTILINE)
+
+
+def test_real_manifest_branch_accepts_clean_published_readmes() -> None:
     real_manifest = {
         "assets": [{
             "name": "kinova-pico-udp-bridge.apk", "sha256": "b" * 64, "size_bytes": 4,
         }]
     }
     for path in README_PATHS:
-        with __import__("pytest").raises(AssertionError):
-            _assert_release_asset_documentation_state(path.read_text(encoding="utf-8"), real_manifest)
+        _assert_release_asset_documentation_state(
+            _published_document(path.read_text(encoding="utf-8")), real_manifest
+        )
+
+
+@pytest.mark.parametrize(
+    "stale_phrase",
+    (
+        "fixture", "uninstallable", "Task 6 replaces this fixture",
+        "not yet published", "do not run until published", "post-release only",
+        "publication fixture", "not an installable binary", "cannot be installed",
+        "Task 6 将以真实资产替换", "发布占位", "不能安装", "未发布",
+    ),
+)
+def test_real_manifest_branch_rejects_each_stale_prepublication_phrase(stale_phrase: str) -> None:
+    real_manifest = {
+        "assets": [{
+            "name": "kinova-pico-udp-bridge.apk", "sha256": "b" * 64, "size_bytes": 4,
+        }]
+    }
+    for path in README_PATHS:
+        published = _published_document(path.read_text(encoding="utf-8"))
+        with pytest.raises(AssertionError):
+            _assert_release_asset_documentation_state(f"{published}\n{stale_phrase}\n", real_manifest)
 
 
 def test_public_commands_reference_tracked_scripts_or_release_assets() -> None:
