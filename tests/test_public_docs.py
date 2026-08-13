@@ -184,6 +184,19 @@ def test_all_tracked_markdown_excludes_developer_machine_paths() -> None:
         assert re.search(r"(?:D:[\\/]+yezq|C:[\\/]+Users[\\/]+qqxx)", text, re.IGNORECASE) is None, relative_path
 
 
+def test_public_source_archive_excludes_internal_plans() -> None:
+    result = subprocess.run(
+        [
+            "git", "-C", str(ROOT), "check-attr", "export-ignore", "--",
+            "docs/superpowers/specs/2026-08-10-gen3-pico-kortex-hardware-teleop-design.md",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert result.stdout.rstrip().endswith(": export-ignore: set")
+
+
 def test_evidence_licenses_and_final_profile_limit_are_explicit() -> None:
     english = (ROOT / "README.md").read_text(encoding="utf-8").lower()
     chinese = (ROOT / "README_CN.md").read_text(encoding="utf-8").lower()
