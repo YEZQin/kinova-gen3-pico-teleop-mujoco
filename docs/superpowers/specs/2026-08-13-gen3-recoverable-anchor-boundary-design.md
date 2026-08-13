@@ -12,26 +12,41 @@ successfully commanded for 434, 96, and 24 control cycles before the same
 `target outside anchor translation envelope` condition. Every trial recorded
 `stop_rpc_returned` and `cleanup_completed`, with no unconfirmed Stop.
 
-## Retained Limits
+## Approved Asymmetric Workspace and Limits
 
-- The absolute Cartesian workspace remains the already approved XYZ ±100 mm
-  box centered at `[0.746914864, -0.082188472, 0.064038418]` m.
+The latest read-only Kortex feedback pose is
+`[0.743218601, -0.070251882, 0.057065614]` m. The onsite operator explicitly
+approved 600 mm in both directions on X and Y, 40 mm downward on Z, and
+600 mm upward on Z. The resulting absolute bounds are:
+
+```text
+minimum_m = [ 0.143218601, -0.670251882, 0.017065614]
+maximum_m = [ 1.343218601,  0.529748118, 0.657065614]
+```
+
+This is a 1.2 m total X span, 1.2 m total Y span, and asymmetric 0.64 m Z
+span. The limits are an operator-confirmed collision-clear software box; they
+do not claim that every point is kinematically reachable by the arm.
+
 - The per-Grip translation envelope remains ±50 mm per robot axis.
-- Translation scale remains 0.8, maximum linear speed remains 0.01 m/s,
+- Translation scale remains 0.8, maximum linear speed is raised to 0.02 m/s,
   control rate remains 40 Hz, and stale timeout remains 0.2 s.
 - Translation-only mapping and the accepted operator-axis calibration remain
   unchanged.
 - Exact `MOVE`, source locking, post-`MOVE` release recheck, watchdog, motion
   lease, reviewed preflight, and cleanup remain mandatory.
-- No unbounded workspace or ±600 mm workspace is introduced.
+- No unbounded workspace is introduced. The approved asymmetric bounds above
+  remain mandatory on every target.
 
 ## Boundary Behavior
 
-For a target outside the per-Grip translation envelope only:
+For a target outside the per-Grip translation envelope or the approved
+absolute workspace:
 
 1. Reject the target before feedback or `SendTwistCommand`.
 2. Request Kortex Stop and require the Stop RPC to return successfully.
-3. Record an `anchor_rejected` evidence event with the stable reason.
+3. Record a stable boundary-rejection evidence event identifying whether the
+   per-Grip or absolute workspace boundary rejected the target.
 4. Put the controller clutch into `waiting_for_release` without terminating
    the process.
 5. While Grip remains pressed, transmit no target commands.
@@ -42,10 +57,12 @@ For a target outside the per-Grip translation envelope only:
    activation cycle remains anchor-only and sends no Twist.
 
 If Stop is not confirmed, the condition remains fatal and the program exits.
-Absolute workspace rejection, invalid or changed input source, Kortex RPC
-failure, watchdog failure, robot fault, and cleanup failure retain their
-current fatal behavior. Rotation-envelope rejection is unchanged because the
-onsite mode is translation-only.
+An absolute workspace rejection may recover only after a confirmed Stop and
+fresh release/re-clutch sequence; it never clamps or transmits an out-of-box
+target. Invalid or changed input source, Kortex RPC failure, watchdog failure,
+robot fault, and cleanup failure retain their current fatal behavior.
+Rotation-envelope rejection is unchanged because the onsite mode is
+translation-only.
 
 ## Interface and Ownership
 
@@ -71,7 +88,13 @@ TDD must demonstrate:
 - fresh stable Grip release returns the clutch to `ready`;
 - the next press re-arms feedback and anchors without sending Twist;
 - an unconfirmed Stop remains fatal;
-- absolute workspace rejection remains fatal;
+- absolute workspace rejection sends no Twist and follows the same confirmed
+  Stop/release/re-anchor recovery;
+- the exact X/Y/Z bounds above are accepted while any target outside them is
+  rejected;
+- the new 0.02 m/s limit is accepted only by the approved calibrated
+  responsive hardware profile, while larger values and other profiles retain
+  their existing lower caps;
 - default simulation behavior and all existing Kortex safety tests remain
   unchanged.
 
