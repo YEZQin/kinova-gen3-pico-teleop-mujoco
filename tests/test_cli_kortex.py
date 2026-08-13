@@ -1071,12 +1071,12 @@ def test_responsive_reversed_expanded_translation_wires_approved_values(monkeypa
             "--invert-translation",
             "--recover-stale-input",
             "--scale", "0.8",
-            "--max-linear-speed", "0.02",
+            "--max-linear-speed", "0.01",
         ]
     )
 
     assert main(argv) == 0
-    assert created["backend"].kwargs["max_linear_speed"] == 0.02
+    assert created["backend"].kwargs["max_linear_speed"] == 0.01
     assert created["backend"].kwargs["anchor_envelope"].maximum_translation_axis_m == (0.05, 0.05, 0.05)
     controller_config = created["controller_config"]
     assert controller_config.translation_scale == 0.8
@@ -1121,28 +1121,28 @@ def test_responsive_calibrated_translation_accepts_exact_asymmetric_absolute_wor
     )
     workspace_min_index = argv.index("--workspace-min")
     argv[workspace_min_index + 1 : workspace_min_index + 4] = [
-        "-0.6",
-        "-0.6",
-        "-0.32",
+        "0.143218601",
+        "-0.670251882",
+        "0.017065614",
     ]
     workspace_max_index = argv.index("--workspace-max")
     argv[workspace_max_index + 1 : workspace_max_index + 4] = [
-        "0.6",
-        "0.6",
-        "0.32",
+        "1.343218601",
+        "0.529748118",
+        "0.657065614",
     ]
 
     assert main(argv) == 0
     backend = created["backend"]
     assert backend.kwargs["workspace_limits"].minimum_xyz == (
-        -0.6,
-        -0.6,
-        -0.32,
+        0.143218601,
+        -0.670251882,
+        0.017065614,
     )
     assert backend.kwargs["workspace_limits"].maximum_xyz == (
-        0.6,
-        0.6,
-        0.32,
+        1.343218601,
+        0.529748118,
+        0.657065614,
     )
     assert backend.kwargs["anchor_envelope"].maximum_translation_axis_m == (
         0.05,
@@ -1153,7 +1153,11 @@ def test_responsive_calibrated_translation_accepts_exact_asymmetric_absolute_wor
 
 @pytest.mark.parametrize(
     ("axis", "maximum"),
-    ((0, "1.200001"), (1, "1.200001"), (2, "0.640001")),
+    (
+        (0, "1.343219601"),
+        (1, "0.529749118"),
+        (2, "0.657066614"),
+    ),
 )
 def test_responsive_workspace_overrun_rejects_before_hardware_side_effects(
     monkeypatch,
@@ -1182,14 +1186,20 @@ def test_responsive_workspace_overrun_rejects_before_hardware_side_effects(
             "--translation-only",
             "--expanded-translation-envelope",
             "--responsive-translation-profile",
-            "--invert-translation",
+            "--operator-calibration", "operator-axis.json",
             "--recover-stale-input",
             "--scale", "0.8",
             "--max-linear-speed", "0.02",
         ]
     )
+    workspace_min_index = argv.index("--workspace-min")
     workspace_max_index = argv.index("--workspace-max")
-    argv[workspace_max_index + 1 : workspace_max_index + 4] = ["1.2", "1.2", "0.64"]
+    argv[workspace_min_index + 1 : workspace_min_index + 4] = [
+        "0.143218601", "-0.670251882", "0.017065614"
+    ]
+    argv[workspace_max_index + 1 : workspace_max_index + 4] = [
+        "1.343218601", "0.529748118", "0.657065614"
+    ]
     argv[workspace_max_index + 1 + axis] = maximum
 
     assert main(argv) == 2
@@ -1220,8 +1230,8 @@ def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_valid
             "--recover-stale-input",
             "--scale", "0.8",
             "--max-linear-speed", "0.02",
-            "--workspace-min", "-0.6", "-0.6", "-0.32",
-            "--workspace-max", "0.6", "0.6", "0.32",
+            "--workspace-min", "0.143218601", "-0.670251882", "0.017065614",
+            "--workspace-max", "1.343218601", "0.529748118", "0.657065614",
             "--motion-lease", "fixture-motion.lock",
             "--preflight-report", "fixture-preflight.json",
         ]
@@ -1244,6 +1254,99 @@ def test_nonresponsive_translation_only_retains_the_default_linear_speed_cap() -
     assert (
         _validate_kortex_args(args, None, check_password=False)
         == "--max-linear-speed must be in (0, 0.005]"
+    )
+
+
+def test_legacy_invert_responsive_profile_rejects_calibrated_limits_before_password_or_motion(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr("kinova_teleop.main.create_input", lambda _args: (_ for _ in ()).throw(AssertionError("input constructed")))
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--invert-translation",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.02",
+        ]
+    )
+    workspace_min_index = argv.index("--workspace-min")
+    argv[workspace_min_index + 1 : workspace_min_index + 4] = [
+        "0.143218601", "-0.670251882", "0.017065614"
+    ]
+    workspace_max_index = argv.index("--workspace-max")
+    argv[workspace_max_index + 1 : workspace_max_index + 4] = [
+        "1.343218601", "0.529748118", "0.657065614"
+    ]
+
+    assert main(argv) == 2
+    assert calls == []
+    assert prompts == []
+    assert "--max-linear-speed must be in (0, 0.01]" in capsys.readouterr().err
+
+
+def test_legacy_invert_responsive_profile_rejects_calibrated_workspace_before_password_or_motion(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr("kinova_teleop.main.create_input", lambda _args: (_ for _ in ()).throw(AssertionError("input constructed")))
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--invert-translation",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.01",
+        ]
+    )
+    workspace_min_index = argv.index("--workspace-min")
+    argv[workspace_min_index + 1 : workspace_min_index + 4] = [
+        "0.143218601", "-0.670251882", "0.017065614"
+    ]
+    workspace_max_index = argv.index("--workspace-max")
+    argv[workspace_max_index + 1 : workspace_max_index + 4] = [
+        "1.343218601", "0.529748118", "0.657065614"
+    ]
+
+    assert main(argv) == 2
+    assert calls == []
+    assert prompts == []
+    assert (
+        "workspace span must not exceed per-axis maxima [0.2, 0.2, 0.2] m"
+        in capsys.readouterr().err
     )
 
 

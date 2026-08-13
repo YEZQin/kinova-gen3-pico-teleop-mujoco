@@ -16,6 +16,8 @@ from .pico_udp_input import PicoUdpInput
 from .evidence_log import EvidenceLogger, logger_event_sink
 from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
 from .hardware_profile import (
+    CALIBRATED_RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS,
+    CALIBRATED_RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
     EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
     FIRST_HARDWARE_PROFILE,
     MAX_TRANSLATION_ONLY_SCALE,
@@ -327,9 +329,17 @@ def resolve_workspace_half_width_axis(
 ) -> tuple[float, float, float]:
     """Resolve absolute bounds independently from the per-Grip anchor."""
 
+    if _uses_calibrated_responsive_translation(args):
+        return CALIBRATED_RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M
     if args.responsive_translation_profile:
         return RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M
     return resolve_anchor_translation_axis(args)
+
+
+def _uses_calibrated_responsive_translation(args: argparse.Namespace) -> bool:
+    """Whether responsive limits are backed by the strict operator calibration."""
+
+    return args.responsive_translation_profile and args.operator_calibration is not None
 
 
 def _resolve_stale_timeout(args: argparse.Namespace) -> float:
@@ -570,11 +580,12 @@ def _validate_kortex_args(
             "for --backend kortex"
         )
     max_linear_speed = _resolve_max_linear_speed(args)
-    maximum_linear_speed = (
-        RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
-        if args.responsive_translation_profile
-        else FIRST_HARDWARE_PROFILE.max_linear_speed_mps
-    )
+    if _uses_calibrated_responsive_translation(args):
+        maximum_linear_speed = CALIBRATED_RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
+    elif args.responsive_translation_profile:
+        maximum_linear_speed = RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
+    else:
+        maximum_linear_speed = FIRST_HARDWARE_PROFILE.max_linear_speed_mps
     if not math.isfinite(max_linear_speed) or not (
         0.0 < max_linear_speed <= maximum_linear_speed
     ):

@@ -31,8 +31,8 @@ def test_first_hardware_profile_is_the_approved_envelope() -> None:
     assert profile.anchor_rotation_deg == 5.0
     assert MAX_TRANSLATION_ONLY_SCALE == 0.5
     assert RESPONSIVE_TRANSLATION_MAX_SCALE == 0.8
-    assert RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS == 0.02
-    assert RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M == (0.6, 0.6, 0.32)
+    assert RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS == 0.01
+    assert RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M == (0.1, 0.1, 0.1)
 
 
 def test_backend_specific_defaults_preserve_mujoco() -> None:
@@ -136,18 +136,28 @@ def test_expanded_workspace_accepts_exact_ten_centimetres_only() -> None:
 
 
 def test_responsive_workspace_accepts_exact_asymmetric_spans_only() -> None:
-    exact = WorkspaceLimits((0.0, 0.0, 0.0), (1.2, 1.2, 0.64))
+    exact = WorkspaceLimits(
+        (0.143218601, -0.670251882, 0.017065614),
+        (1.343218601, 0.529748118, 0.657065614),
+    )
     validate_workspace_span(
         exact,
-        RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
+        (0.6, 0.6, 0.32),
     )
 
-    for maximum_xyz in ((1.200001, 1.2, 0.64), (1.2, 1.200001, 0.64), (1.2, 1.2, 0.640001)):
+    for maximum_xyz in (
+        (1.343219601, 0.529748118, 0.657065614),
+        (1.343218601, 0.529749118, 0.657065614),
+        (1.343218601, 0.529748118, 0.657066614),
+    ):
         with pytest.raises(
             ValueError,
             match=r"workspace span must not exceed per-axis maxima \[1.2, 1.2, 0.64\] m",
         ):
             validate_workspace_span(
-                WorkspaceLimits((0.0, 0.0, 0.0), maximum_xyz),
-                RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
+                WorkspaceLimits(
+                    (0.143218601, -0.670251882, 0.017065614),
+                    maximum_xyz,
+                ),
+                (0.6, 0.6, 0.32),
             )
