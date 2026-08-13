@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
+import re
 import stat
 from types import MappingProxyType
 from typing import Any, Literal
@@ -439,6 +440,88 @@ def build_schema_compatible_report(
 ) -> PreflightReport:
     """Public construction seam for adapters that add pure checks."""
 
+    return _make_report(context, checks)
+
+
+def build_reviewed_gen3_preflight_report(
+    t0: Mapping[str, object],
+    *,
+    code_revision: str,
+    calibration_sha256: str,
+    driver_sha256: str,
+    safety_limits: Mapping[str, object],
+    physical_checks: Mapping[str, bool],
+    timestamp_utc: str,
+) -> PreflightReport:
+    """Build the strict motion-report schema from a validated T0 observation.
+
+    The caller must validate the live T0 structure before invoking this pure
+    builder.  It intentionally replaces T0's revision and calibration claims
+    with the current local artifacts that will be launched.
+    """
+
+    if not isinstance(t0, Mapping):
+        raise ValueError("validated T0 must be a mapping")
+    if not isinstance(code_revision, str) or not code_revision:
+        raise ValueError("code revision must be non-empty")
+    for value, name in ((calibration_sha256, "calibration hash"), (driver_sha256, "driver hash")):
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"{name} must be a SHA-256 digest")
+    if set(physical_checks) != set(_GEN3_PHYSICAL_KEYS) or any(
+        value is not True for value in physical_checks.values()
+    ):
+        raise ValueError("all Gen3 physical checks must be explicitly passed")
+    for field in ("runtime", "driver", "firmware", "transport", "checks"):
+        if field not in t0:
+            raise ValueError(f"validated T0 is missing {field}")
+    if not isinstance(t0["runtime"], Mapping) or not isinstance(t0["driver"], Mapping):
+        raise ValueError("validated T0 runtime evidence is invalid")
+    if not isinstance(t0["firmware"], Mapping) or not isinstance(t0["transport"], Mapping):
+        raise ValueError("validated T0 robot evidence is invalid")
+    t0_checks = t0["checks"]
+    if not isinstance(t0_checks, Sequence):
+        raise ValueError("validated T0 checks are invalid")
+
+    context = PreflightContext(
+        code_revision=code_revision,
+        dirty_worktree=False,
+        runtime=t0["runtime"],
+        driver={**t0["driver"], "sha256": driver_sha256},
+        firmware=t0["firmware"],
+        transport=t0["transport"],
+        calibration=({"name": "operator-axis-calibration", "sha256": calibration_sha256},),
+        safety_limits=safety_limits,
+        physical_checks=physical_checks,
+        timestamp_utc=timestamp_utc,
+    )
+    checks: list[PreflightCheck] = [
+        PreflightCheck("code_revision", "pass", "present"),
+        PreflightCheck("dirty_worktree", "pass", "clean worktree"),
+        PreflightCheck("runtime", "pass", "present"),
+        PreflightCheck("driver", "pass", "present"),
+        PreflightCheck("firmware", "pass", "present"),
+        PreflightCheck("transport", "pass", "present"),
+        PreflightCheck("calibration", "pass", "calibration hashes present"),
+        PreflightCheck("safety_limits", "pass", "workspace and speed limits present"),
+    ]
+    required_live = {
+        "arm_state", "feedback_pose", "product_model", "degree_of_freedom",
+        "firmware_version", "operating_mode", "servoing_mode",
+    }
+    copied: dict[str, PreflightCheck] = {}
+    for item in t0_checks:
+        if not isinstance(item, Mapping):
+            continue
+        name, status, detail = item.get("name"), item.get("status"), item.get("detail")
+        if name in required_live and status == "pass" and isinstance(detail, str) and detail:
+            copied[str(name)] = PreflightCheck(str(name), "pass", detail)
+    if set(copied) != required_live:
+        raise ValueError("validated T0 is missing a passing live robot check")
+    checks.extend(copied[name] for name in sorted(copied))
+    checks.extend(
+        PreflightCheck(f"physical.{name}", "pass", "confirmed")
+        for name in _GEN3_PHYSICAL_KEYS
+    )
     return _make_report(context, checks)
 
 

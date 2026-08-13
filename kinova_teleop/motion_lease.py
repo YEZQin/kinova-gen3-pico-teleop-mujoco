@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -69,6 +70,33 @@ class MotionLease:
             "owner": self.owner,
             "acquired_utc": self.acquired_utc,
         }
+
+
+def create_motion_lease(
+    run_id: str,
+    owner: str,
+    now: str,
+    nonce: str,
+) -> MotionLease:
+    """Create an immutable Gen3 lease from caller-supplied fresh entropy.
+
+    This deliberately does not read a clock, acquire a lock, or write a file;
+    the package generator owns those side effects and can keep them offline.
+    """
+
+    if not isinstance(nonce, str) or not nonce:
+        raise ValueError("lease nonce must be a non-empty string")
+    # Constructing the dataclass validates the public identifiers and UTC
+    # timestamp before the derived identifier can escape this function.
+    provisional = MotionLease("0" * 32, "gen3", run_id, owner, now)
+    material = "\0".join((provisional.run_id, provisional.owner, provisional.acquired_utc, nonce))
+    return MotionLease(
+        hashlib.sha256(material.encode("utf-8")).hexdigest()[:32],
+        "gen3",
+        provisional.run_id,
+        provisional.owner,
+        provisional.acquired_utc,
+    )
 
 
 def _reject_constant(value: str) -> None:
