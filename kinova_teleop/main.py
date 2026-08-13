@@ -380,21 +380,30 @@ def create_input(args: argparse.Namespace) -> XrInputSource:
     if args.dry_run:
         return DryRunXrInput(control_hz=control_hz)
     if args.input == "pico-udp":
-        pico_kwargs: dict[str, object] = {}
-        if args.recover_stale_input:
-            # A recoverable stale boundary must not turn the old adapter's
-            # post-stale endpoint handoff into motion authority without a new
-            # MOVE admission. Keep the endpoint selected before motion locked.
-            pico_kwargs["allow_stale_source_handoff"] = False
-        return ContinuousInputBuffer(
-            PicoUdpInput(
-                host=args.pico_host,
-                port=args.pico_port,
-                stale_after=_resolve_stale_timeout(args),
-                **pico_kwargs,
-            ),
+        return create_pico_udp_input(
+            host=args.pico_host,
+            port=args.pico_port,
+            stale_timeout=_resolve_stale_timeout(args),
+            allow_stale_source_handoff=not args.recover_stale_input,
         )
     return SdkXrInput()
+
+
+def create_pico_udp_input(
+    *,
+    host: str = "0.0.0.0",
+    port: int = 15031,
+    stale_timeout: float = DEFAULT_MUJOCO_STALE_TIMEOUT,
+    allow_stale_source_handoff: bool | None = None,
+) -> XrInputSource:
+    """Create the continuously buffered PICO input used by non-robot tools."""
+
+    pico_kwargs: dict[str, object] = {}
+    if allow_stale_source_handoff is False:
+        pico_kwargs["allow_stale_source_handoff"] = False
+    return ContinuousInputBuffer(
+        PicoUdpInput(host=host, port=port, stale_after=stale_timeout, **pico_kwargs)
+    )
 
 
 def check_input(
