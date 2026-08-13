@@ -24,6 +24,11 @@ from kinova_teleop.xr_input import ControllerSample
 main_module = importlib.import_module("kinova_teleop.main")
 
 
+@pytest.fixture(autouse=True)
+def _stable_test_code_revision(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_current_clean_code_revision", lambda: "b" * 40)
+
+
 def _motion_gate_args(arguments: list[str]) -> list[str]:
     return arguments + [
         "--workspace-min", "0", "0", "0",
@@ -1103,6 +1108,7 @@ def test_responsive_calibrated_translation_accepts_exact_asymmetric_absolute_wor
                 (0.0, 1.0, 0.0),
                 (0.0, 0.0, 1.0),
             ),
+            source_sha256="a" * 64,
         ),
     )
     argv = _expanded_motion_gate_args(
@@ -1243,7 +1249,13 @@ def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_valid
     )
 
     assert _validate_args(args) is None
-    assert _validate_kortex_args(args, None, check_password=False) is None
+    assert _validate_kortex_args(
+        args,
+        None,
+        check_password=False,
+        operator_calibration_sha256="a" * 64,
+        expected_code_revision="b" * 40,
+    ) is None
     assert captured["expected_safety_limits"] == {
         "workspace_min_m": [0.143218601, -0.670251882, 0.017065614],
         "workspace_max_m": [1.343218601, 0.529748118, 0.657065614],
@@ -1253,6 +1265,7 @@ def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_valid
         "expanded_translation_envelope": True,
         "responsive_translation_profile": True,
         "operator_axis_calibration": True,
+        "operator_calibration_sha256": "a" * 64,
         "recover_stale_input": True,
         "stale_timeout_s": 0.2,
         "control_hz": 40.0,
@@ -1260,6 +1273,81 @@ def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_valid
         "anchor_translation_axis_m": [0.05, 0.05, 0.05],
         "anchor_rotation_deg": 5.0,
     }
+    assert captured["expected_code_revision"] == "b" * 40
+    assert captured["expected_calibration_sha256"] == "a" * 64
+
+
+def test_existing_evidence_path_rejects_before_password_or_hardware(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    evidence = tmp_path / "already-used.jsonl"
+    evidence.write_text("{}\n", encoding="utf-8")
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr(
+        main_module,
+        "load_passing_preflight_report",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        main_module.os,
+        "getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+
+    assert main(_valid_motion_argv() + ["--evidence-jsonl", str(evidence)]) == 2
+    assert calls == []
+    assert "evidence path must be absent" in capsys.readouterr().err
+
+
+def test_validate_motion_package_never_reads_password_or_touches_hardware(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls: list[str] = []
+    _install_valid_motion_gate_files(monkeypatch)
+    monkeypatch.delenv("KINOVA_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        main_module.os,
+        "getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_current_clean_code_revision",
+        lambda: "a" * 40,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_kortex_runtime",
+        lambda: calls.append("runtime") or object(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "create_input",
+        lambda _args: (_ for _ in ()).throw(AssertionError("input constructed")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("connected")),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("MOVE prompted")),
+    )
+
+    assert main(_valid_motion_argv() + ["--validate-motion-package"]) == 0
+    assert calls == ["runtime"]
+    assert "offline motion package validation passed" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("mismatched_field", ("workspace_max_m", "max_linear_speed_m_s"))
@@ -1278,6 +1366,18 @@ def test_motion_contract_mismatch_rejects_before_password_or_hardware_side_effec
         raise ValueError(f"preflight report safety limit mismatch: {mismatched_field}")
 
     monkeypatch.setattr(main_module, "load_passing_preflight_report", reject_mismatch)
+    monkeypatch.setattr(
+        main_module,
+        "load_operator_axis_calibration",
+        lambda _path: SimpleNamespace(
+            translation_rotation=(
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            ),
+            source_sha256="a" * 64,
+        ),
+    )
     monkeypatch.setattr(
         main_module.os,
         "getenv",
@@ -1454,6 +1554,7 @@ def test_responsive_calibrated_expanded_translation_wires_loaded_rotation_once(
         "load_operator_axis_calibration",
         lambda path: loaded_paths.append(path) or SimpleNamespace(
             translation_rotation=expected_rotation,
+            source_sha256="a" * 64,
         ),
     )
     argv = _expanded_motion_gate_args(

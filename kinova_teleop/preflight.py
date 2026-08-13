@@ -586,6 +586,8 @@ def load_passing_preflight_report(
     *,
     expected_device: Literal["gen3"] = "gen3",
     expected_safety_limits: Mapping[str, object] | None = None,
+    expected_code_revision: str | None = None,
+    expected_calibration_sha256: str | None = None,
 ) -> Mapping[str, object]:
     """Read-only strict admission gate for a supervisor-confirmed report.
 
@@ -624,6 +626,11 @@ def load_passing_preflight_report(
         raise ValueError("preflight report timestamp_utc is invalid")
     if not isinstance(payload["code_revision"], str) or not payload["code_revision"].strip():
         raise ValueError("preflight report code_revision is invalid")
+    if (
+        expected_code_revision is not None
+        and payload["code_revision"] != expected_code_revision
+    ):
+        raise ValueError("preflight report code_revision does not match running code")
     if not isinstance(payload["dirty_worktree"], bool) or payload["dirty_worktree"]:
         raise ValueError("preflight report worktree is not clean")
 
@@ -645,6 +652,11 @@ def load_passing_preflight_report(
             raise ValueError("preflight report calibration contains placeholder evidence")
         if _unknown(item.get("sha256")):
             raise ValueError("preflight report calibration is incomplete")
+    if expected_calibration_sha256 is not None and not any(
+        item.get("sha256") == expected_calibration_sha256
+        for item in calibration
+    ):
+        raise ValueError("preflight report calibration hash does not match loaded artifact")
     limits = payload["safety_limits"]
     if not isinstance(limits, Mapping) or not limits or _unknown(limits):
         raise ValueError("preflight report safety_limits is incomplete")

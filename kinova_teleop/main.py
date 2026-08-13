@@ -8,6 +8,8 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import time
 from typing import Any
@@ -64,6 +66,7 @@ DEFAULT_MUJOCO_TRANSLATION_SCALE = 0.5
 DEFAULT_MUJOCO_STALE_TIMEOUT = 0.2
 DEFAULT_MOTION_RUN_ID = "gen3-first-hardware"
 DEFAULT_MOTION_OWNER = "kinova-teleop"
+_FULL_GIT_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 class _BackendDefaultsParser(argparse.ArgumentParser):
@@ -228,6 +231,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--preflight-report",
         type=Path,
         help="supervisor-reviewed passing preflight JSON required for Kortex motion",
+    )
+    parser.add_argument(
+        "--validate-motion-package",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--check-timeout",
@@ -525,6 +533,14 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         return "--preflight-report cannot be combined with --check-kortex"
     if args.preflight_report is not None and args.backend != "kortex":
         return "--preflight-report requires --backend kortex"
+    if args.validate_motion_package and (
+        args.backend != "kortex"
+        or not args.enable_hardware
+        or args.check_input
+        or args.check_xr
+        or args.check_kortex
+    ):
+        return "--validate-motion-package requires Kortex motion arguments"
     if args.check_kortex and args.fixed_trajectory:
         return "--check-kortex cannot be combined with --fixed-trajectory"
     if args.fixed_trajectory and args.input != "none":
@@ -543,10 +559,12 @@ def _workspace_from_args(args: argparse.Namespace) -> WorkspaceLimits | None:
 def _preflight_motion_contract(
     args: argparse.Namespace,
     limits: WorkspaceLimits,
+    *,
+    operator_calibration_sha256: str | None = None,
 ) -> dict[str, object]:
     """Produce the exact reviewed limits required for this motion launch."""
 
-    return {
+    contract: dict[str, object] = {
         "workspace_min_m": list(limits.minimum_xyz),
         "workspace_max_m": list(limits.maximum_xyz),
         "max_linear_speed_m_s": _resolve_max_linear_speed(args),
@@ -562,6 +580,40 @@ def _preflight_motion_contract(
         "anchor_translation_axis_m": list(resolve_anchor_translation_axis(args)),
         "anchor_rotation_deg": FIRST_HARDWARE_PROFILE.anchor_rotation_deg,
     }
+    if args.operator_calibration is not None:
+        contract["operator_calibration_sha256"] = operator_calibration_sha256
+    return contract
+
+
+def _current_clean_code_revision() -> str:
+    """Return the exact tracked-clean Git revision for motion admission."""
+
+    project = Path(__file__).resolve().parents[1]
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        revision_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("cannot establish the running code revision") from error
+    if status.stdout.strip():
+        raise ValueError("tracked worktree must be clean for Kortex motion")
+    revision = revision_result.stdout.strip().lower()
+    if _FULL_GIT_REVISION.fullmatch(revision) is None:
+        raise ValueError("running code revision is invalid")
+    return revision
 
 
 def _validate_kortex_args(
@@ -569,6 +621,9 @@ def _validate_kortex_args(
     password: str | None,
     *,
     check_password: bool = True,
+    operator_calibration_sha256: str | None = None,
+    expected_code_revision: str | None = None,
+    stop_after_workspace: bool = False,
 ) -> str | None:
     """Validate hardware gates in their fail-closed order before SDK import."""
 
@@ -633,6 +688,8 @@ def _validate_kortex_args(
             validate_workspace_span(limits, resolve_workspace_half_width_axis(args))
         except ValueError as error:
             return str(error)
+        if stop_after_workspace:
+            return None
         if args.motion_lease is None:
             return "--motion-lease is required for Kortex motion"
         try:
@@ -641,10 +698,18 @@ def _validate_kortex_args(
             return f"invalid motion lease: {error}"
         if args.preflight_report is None:
             return "--preflight-report is required for Kortex motion"
+        if args.evidence_jsonl is not None and os.path.lexists(args.evidence_jsonl):
+            return f"evidence path must be absent before Kortex motion: {args.evidence_jsonl}"
         try:
             load_passing_preflight_report(
                 args.preflight_report,
-                expected_safety_limits=_preflight_motion_contract(args, limits),
+                expected_safety_limits=_preflight_motion_contract(
+                    args,
+                    limits,
+                    operator_calibration_sha256=operator_calibration_sha256,
+                ),
+                expected_code_revision=expected_code_revision,
+                expected_calibration_sha256=operator_calibration_sha256,
             )
         except (OSError, ValueError) as error:
             return f"invalid preflight report: {error}"
@@ -835,8 +900,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     password: str | None = None
     calibration = None
     if args.backend == "kortex":
-        # Fail closed on non-secret gates before even looking up the password.
-        error = _validate_kortex_args(args, None, check_password=False)
+        # Reject malformed endpoints, speeds, mode combinations, and workspace
+        # spans before opening even a local calibration/report/lease artifact.
+        error = _validate_kortex_args(
+            args,
+            None,
+            check_password=False,
+            stop_after_workspace=True,
+        )
         if error is not None:
             print(f"error: {error}", file=sys.stderr)
             return 2
@@ -848,8 +919,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             except (OSError, ValueError) as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 2
+        code_revision: str | None = None
+        if not args.check_kortex:
+            try:
+                code_revision = _current_clean_code_revision()
+            except ValueError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+        # Fail closed on every non-secret package gate before looking up the
+        # password, constructing controller input, prompting MOVE, or opening
+        # any Kortex connection.
+        calibration_sha256 = (
+            calibration.source_sha256 if calibration is not None else None
+        )
+        error = _validate_kortex_args(
+            args,
+            None,
+            check_password=False,
+            operator_calibration_sha256=calibration_sha256,
+            expected_code_revision=code_revision,
+        )
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        if args.validate_motion_package:
+            try:
+                validate_kortex_runtime()
+            except (OSError, RuntimeError, ValueError) as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+            print("offline motion package validation passed", flush=True)
+            return 0
         password = os.getenv("KINOVA_PASSWORD")
-        error = _validate_kortex_args(args, password)
+        error = _validate_kortex_args(
+            args,
+            password,
+            operator_calibration_sha256=calibration_sha256,
+            expected_code_revision=code_revision,
+        )
         if error is not None:
             print(f"error: {error}", file=sys.stderr)
             return 2
@@ -876,7 +983,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 evidence_logger = EvidenceLogger(
                     args.evidence_jsonl,
                     run_id=args.run_id,
-            )
+                    require_absent=True,
+                )
             event_sink = logger_event_sink(evidence_logger) if evidence_logger is not None else None
 
             # Nothing that can transmit motion is constructed until runtime

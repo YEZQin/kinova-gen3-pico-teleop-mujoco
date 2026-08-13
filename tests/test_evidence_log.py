@@ -29,6 +29,14 @@ def test_evidence_logger_writes_schema_compatible_records(tmp_path):
     assert record["state"] == "CONNECTED_READ_ONLY"
 
 
+def test_evidence_logger_can_reserve_only_a_new_events_path(tmp_path):
+    path = tmp_path / "events.jsonl"
+    logger = EvidenceLogger(path, run_id="g-001", require_absent=True)
+    logger.event("connected", "CONNECTED_READ_ONLY", {})
+    with pytest.raises(ValueError, match="evidence path must be absent"):
+        EvidenceLogger(path, run_id="g-002", require_absent=True)
+
+
 def test_evidence_logger_writes_anchor_rejection_reason(tmp_path):
     path = tmp_path / "events.jsonl"
     logger = EvidenceLogger(path, run_id="g-001", monotonic_ns=lambda: 10)

@@ -129,6 +129,7 @@ class EvidenceLogger:
         run_id: str,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
         samples_path: str | Path | None = None,
+        require_absent: bool = False,
     ) -> None:
         if not isinstance(run_id, str) or not run_id:
             raise ValueError("run_id must be a non-empty string")
@@ -138,6 +139,17 @@ class EvidenceLogger:
         self.run_id = run_id
         self._monotonic_ns = monotonic_ns
         self._last_monotonic_ns: int | None = None
+        if require_absent:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                descriptor = os.open(
+                    self.path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                    | getattr(os, "O_BINARY", 0),
+                )
+            except FileExistsError as error:
+                raise ValueError("evidence path must be absent") from error
+            os.close(descriptor)
 
     def _next_monotonic_ns(self) -> int:
         try:

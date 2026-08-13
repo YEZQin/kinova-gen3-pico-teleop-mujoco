@@ -247,6 +247,37 @@ def test_passing_preflight_report_binds_exact_motion_contract(tmp_path) -> None:
     )["passed"] is True
 
 
+def test_passing_preflight_report_binds_code_revision_and_calibration_hash(
+    tmp_path,
+) -> None:
+    payload = passing_motion_report_payload()
+    payload["code_revision"] = "a" * 40
+    payload["calibration"] = (
+        {"name": "operator-axis.json", "sha256": "b" * 64},
+    )
+    path = tmp_path / "bound-motion-report.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load_passing_preflight_report(
+        path,
+        expected_code_revision="a" * 40,
+        expected_calibration_sha256="b" * 64,
+    )["passed"] is True
+
+    with pytest.raises(ValueError, match="code_revision does not match"):
+        load_passing_preflight_report(
+            path,
+            expected_code_revision="c" * 40,
+            expected_calibration_sha256="b" * 64,
+        )
+    with pytest.raises(ValueError, match="calibration hash does not match"):
+        load_passing_preflight_report(
+            path,
+            expected_code_revision="a" * 40,
+            expected_calibration_sha256="d" * 64,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
