@@ -22,12 +22,12 @@ if ($LASTEXITCODE -ne 0 -or $insideWorktree -ne 'true') {
 $modulePattern = '^(sitecustomize|usercustomize)(\.py|\.pyc|(\.[A-Za-z0-9_-]+)*\.(pyd|so))$'
 $packagePattern = '^__init__(\.py|\.pyc|(\.[A-Za-z0-9_-]+)*\.(pyd|so))$'
 $candidates = @(
-    Get-ChildItem -LiteralPath $resolvedProject -Force -File | Where-Object {
+    Get-ChildItem -LiteralPath $resolvedProject -Force -File -ErrorAction Stop | Where-Object {
         $_.Name -match $modulePattern
     }
 )
 
-$packageDirectories = Get-ChildItem -LiteralPath $resolvedProject -Force -Directory |
+$packageDirectories = Get-ChildItem -LiteralPath $resolvedProject -Force -Directory -ErrorAction Stop |
     Where-Object { $_.Name -ieq 'sitecustomize' -or $_.Name -ieq 'usercustomize' }
 foreach ($directory in $packageDirectories) {
     $candidates += @(
