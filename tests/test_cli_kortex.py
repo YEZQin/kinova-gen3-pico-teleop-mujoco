@@ -1076,6 +1076,102 @@ def test_responsive_reversed_expanded_translation_wires_approved_values(monkeypa
     assert controller_config.recovery_release_samples == 3
 
 
+def test_responsive_translation_accepts_twenty_centimetre_absolute_workspace(
+    monkeypatch,
+) -> None:
+    """Responsive motion may use a wider absolute box without widening Grip."""
+
+    created: dict[str, object] = {}
+    _install_valid_kortex_fakes(monkeypatch, created)
+    monkeypatch.setattr("kinova_teleop.main.SdkXrInput", _FakeSource)
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--invert-translation",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.01",
+        ]
+    )
+    workspace_min_index = argv.index("--workspace-min")
+    argv[workspace_min_index + 1 : workspace_min_index + 4] = [
+        "0.646914864",
+        "-0.182188472",
+        "-0.035961582",
+    ]
+    workspace_max_index = argv.index("--workspace-max")
+    argv[workspace_max_index + 1 : workspace_max_index + 4] = [
+        "0.846914864",
+        "0.017811528",
+        "0.164038418",
+    ]
+
+    assert main(argv) == 0
+    backend = created["backend"]
+    assert backend.kwargs["workspace_limits"].minimum_xyz == (
+        0.646914864,
+        -0.182188472,
+        -0.035961582,
+    )
+    assert backend.kwargs["workspace_limits"].maximum_xyz == (
+        0.846914864,
+        0.017811528,
+        0.164038418,
+    )
+    assert backend.kwargs["anchor_envelope"].maximum_translation_axis_m == (
+        0.05,
+        0.05,
+        0.05,
+    )
+
+
+def test_responsive_workspace_overrun_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+) -> None:
+    """A responsive absolute span over 200 mm must fail before credentials."""
+
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--invert-translation",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.01",
+        ]
+    )
+    workspace_max_index = argv.index("--workspace-max")
+    argv[workspace_max_index + 1] = "0.200001"
+    argv[workspace_max_index + 2] = "0.20"
+    argv[workspace_max_index + 3] = "0.20"
+
+    assert main(argv) == 2
+    assert calls == []
+    assert prompts == []
+    assert "workspace span must not exceed 0.2 m per axis" in capsys.readouterr().err
+
+
 def test_responsive_calibrated_expanded_translation_wires_loaded_rotation_once(
     monkeypatch,
     tmp_path,

@@ -21,6 +21,7 @@ from .hardware_profile import (
     MAX_TRANSLATION_ONLY_SCALE,
     RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS,
     RESPONSIVE_TRANSLATION_MAX_SCALE,
+    RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
     validate_kortex_runtime,
     validate_private_robot_ipv4,
     validate_workspace_span,
@@ -321,6 +322,16 @@ def resolve_anchor_translation_axis(
     return FIRST_HARDWARE_PROFILE.anchor_translation_axis_m
 
 
+def resolve_workspace_half_width_axis(
+    args: argparse.Namespace,
+) -> tuple[float, float, float]:
+    """Resolve absolute bounds independently from the per-Grip anchor."""
+
+    if args.responsive_translation_profile:
+        return RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M
+    return resolve_anchor_translation_axis(args)
+
+
 def _resolve_stale_timeout(args: argparse.Namespace) -> float:
     if args.stale_timeout is not None:
         return float(args.stale_timeout)
@@ -584,7 +595,7 @@ def _validate_kortex_args(
         if limits is None:
             return "--workspace-min and --workspace-max are required for Kortex motion"
         try:
-            validate_workspace_span(limits, resolve_anchor_translation_axis(args))
+            validate_workspace_span(limits, resolve_workspace_half_width_axis(args))
         except ValueError as error:
             return str(error)
         if args.motion_lease is None:

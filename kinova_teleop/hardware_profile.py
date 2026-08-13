@@ -49,6 +49,7 @@ EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M = (0.05, 0.05, 0.05)
 MAX_TRANSLATION_ONLY_SCALE = 0.5
 RESPONSIVE_TRANSLATION_MAX_SCALE = 0.8
 RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS = 0.01
+RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M = (0.1, 0.1, 0.1)
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,8 @@ def validate_workspace_span(
         raise ValueError("maximum translation axis must contain three positive finite values")
     span = np.asarray(limits.maximum_xyz) - np.asarray(limits.minimum_xyz)
     maximum = 2.0 * np.asarray(maximum_translation_axis_m)
-    if np.any(span > maximum):
+    tolerance = 4.0 * np.spacing(np.maximum(np.abs(span), maximum))
+    if np.any(span > maximum + tolerance):
         raise ValueError(
             "workspace span must not exceed "
             f"{maximum[0]:g} m per axis"
