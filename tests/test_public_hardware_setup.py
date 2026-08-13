@@ -309,3 +309,36 @@ def test_package_rejects_missing_confirmations_and_existing_output(tmp_path: Pat
     before = existing.read_bytes()
     assert main(_package_argv(t0, calibration, output)) == 2
     assert existing.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("failure_at", "error"),
+    ((1, KeyboardInterrupt()), (2, SystemExit(17)), (3, KeyboardInterrupt()), (2, OSError("windows publish failure"))),
+)
+def test_package_publish_baseexception_never_leaves_created_final_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_at: int, error: BaseException
+) -> None:
+    """Interrupting any publish boundary must roll back only this transaction's links."""
+    import kinova_teleop.public_hardware_setup as setup
+
+    output = tmp_path / "local-config"
+    output.mkdir()
+    t0, calibration = output / "t0.json", output / "operator-axes.json"
+    t0.write_text(json.dumps(_t0_payload()), encoding="utf-8")
+    calibration.write_text(json.dumps(_calibration_payload()), encoding="utf-8")
+    monkeypatch.setattr(setup, "_current_clean_code_revision", lambda: "a" * 40)
+    monkeypatch.setattr(setup, "_now_utc", lambda: datetime(2026, 8, 13, tzinfo=timezone.utc))
+    real_link = setup.os.link
+    calls = 0
+
+    def interrupt_after_link(source, destination, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        real_link(source, destination, *args, **kwargs)
+        if calls == failure_at:
+            raise error
+
+    monkeypatch.setattr(setup.os, "link", interrupt_after_link)
+    with pytest.raises(type(error)):
+        setup._run_package(setup.build_parser().parse_args(_package_argv(t0, calibration, output)))
+    assert sorted(path.name for path in output.iterdir()) == ["operator-axes.json", "t0.json"]

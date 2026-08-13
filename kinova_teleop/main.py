@@ -750,6 +750,12 @@ def _validate_kortex_args(
                 ),
                 expected_code_revision=expected_code_revision,
                 expected_calibration_sha256=operator_calibration_sha256,
+                expected_transport_identity={
+                    "kind": "tcp",
+                    "host": args.robot_ip,
+                    "port": 10000,
+                    "robot_user": args.robot_user,
+                },
             )
         except (OSError, ValueError) as error:
             return f"invalid preflight report: {error}"

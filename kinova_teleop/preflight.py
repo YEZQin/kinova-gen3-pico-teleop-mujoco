@@ -674,6 +674,7 @@ def load_passing_preflight_report(
     expected_safety_limits: Mapping[str, object] | None = None,
     expected_code_revision: str | None = None,
     expected_calibration_sha256: str | None = None,
+    expected_transport_identity: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     """Read-only strict admission gate for a supervisor-confirmed report.
 
@@ -728,6 +729,9 @@ def load_passing_preflight_report(
             raise ValueError(f"preflight report {field} contains placeholder evidence")
         if _unknown(value):
             raise ValueError(f"preflight report {field} is incomplete")
+    if expected_transport_identity is not None:
+        if payload["transport"] != expected_transport_identity:
+            raise ValueError("preflight report transport identity mismatch")
     calibration = payload["calibration"]
     if not isinstance(calibration, list) or not calibration:
         raise ValueError("preflight report calibration is incomplete")

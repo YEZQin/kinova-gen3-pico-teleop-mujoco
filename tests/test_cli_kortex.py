@@ -1488,6 +1488,53 @@ def test_validate_motion_package_never_reads_password_or_touches_hardware(
     assert "offline motion package validation passed" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("field", ("host", "robot_user"))
+def test_transport_identity_mismatch_rejects_before_secret_or_hardware(
+    monkeypatch,
+    capsys,
+    field: str,
+) -> None:
+    """Ignoring T0 transport identity would let a profile redirect a reviewed package."""
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    captured: dict[str, object] = {}
+
+    def reject_transport(*_args, **kwargs) -> object:
+        captured.update(kwargs)
+        raise ValueError(f"preflight report transport identity mismatch: {field}")
+
+    monkeypatch.setattr(main_module, "load_passing_preflight_report", reject_transport)
+    monkeypatch.setattr(main_module.os, "getenv", lambda _name: (_ for _ in ()).throw(AssertionError("password read")))
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: (_ for _ in ()).throw(AssertionError("runtime checked")))
+    monkeypatch.setattr(main_module, "create_input", lambda _args: (_ for _ in ()).throw(AssertionError("input constructed")))
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(AssertionError("MOVE prompted")))
+
+    assert main(_valid_motion_argv()) == 2
+    assert calls == []
+    assert captured["expected_transport_identity"] == {
+        "kind": "tcp", "host": "192.168.1.10", "port": 10000, "robot_user": "admin",
+    }
+    assert "transport identity mismatch" in capsys.readouterr().err
+
+
+def test_matching_transport_identity_reaches_offline_runtime_gate(monkeypatch, capsys) -> None:
+    """A matching reviewed T0 transport must retain the existing offline package path."""
+    _install_valid_motion_gate_files(monkeypatch)
+    monkeypatch.setattr(main_module, "_current_clean_code_revision", lambda: "a" * 40)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr(
+        main_module, "load_passing_preflight_report", lambda *_args, **kwargs: captured.update(kwargs) or object()
+    )
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: object())
+    monkeypatch.setattr(main_module.os, "getenv", lambda _name: (_ for _ in ()).throw(AssertionError("password read")))
+
+    assert main(_valid_motion_argv() + ["--validate-motion-package"]) == 0
+    assert captured["expected_transport_identity"]["host"] == "192.168.1.10"
+    assert captured["expected_transport_identity"]["robot_user"] == "admin"
+    assert "offline motion package validation passed" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("mismatched_field", ("workspace_max_m", "max_linear_speed_m_s"))
 def test_motion_contract_mismatch_rejects_before_password_or_hardware_side_effects(
     monkeypatch,

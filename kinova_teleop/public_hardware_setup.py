@@ -292,9 +292,16 @@ def _run_package(args: argparse.Namespace) -> int:
         if os.path.lexists(candidate):
             raise ValueError(f"refusing to overwrite output artifact: {candidate.name}")
     transaction = Path(tempfile.mkdtemp(prefix=".gen3-package-", dir=output))
-    created: list[Path] = []
+    staged_pairs = tuple(
+        zip(
+            (transaction / lease_path.name, transaction / report_path.name, transaction / profile_path.name),
+            (lease_path, report_path, profile_path),
+            strict=True,
+        )
+    )
+    completed = False
     try:
-        staged_lease, staged_report, staged_profile = (transaction / path.name for path in (lease_path, report_path, profile_path))
+        (staged_lease, _), (staged_report, _), (staged_profile, _) = staged_pairs
         _write_new_json(staged_lease, lease.to_mapping())
         _write_new_json(staged_report, report.to_mapping())
         _write_new_json(staged_profile, profile)
@@ -302,17 +309,20 @@ def _run_package(args: argparse.Namespace) -> int:
         load_passing_preflight_report(staged_report, expected_safety_limits=contract, expected_code_revision=revision, expected_calibration_sha256=calibration.source_sha256)
         if _strict_json(staged_profile) != profile:
             raise ValueError("generated profile self-validation failed")
-        for staged, target in ((staged_lease, lease_path), (staged_report, report_path), (staged_profile, profile_path)):
+        for staged, target in staged_pairs:
             os.link(staged, target)
-            created.append(target)
-    except Exception:
-        for target in reversed(created):
-            try:
-                target.unlink()
-            except FileNotFoundError:
-                pass
-        raise
+        completed = True
     finally:
+        if not completed:
+            # A link can complete immediately before an interrupt reaches us.
+            # Remove only a target that still has the staged file identity; an
+            # independently-created user file is never unlinked.
+            for staged, target in reversed(staged_pairs):
+                try:
+                    if target.exists() and os.path.samefile(staged, target):
+                        target.unlink()
+                except OSError:
+                    pass
         shutil.rmtree(transaction, ignore_errors=True)
     print(f"generated guarded Gen3 package in {output}")
     return 0
