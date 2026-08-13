@@ -171,6 +171,43 @@ def test_mapping_config_rejects_inversion_with_translation_rotation() -> None:
 
 
 @pytest.mark.parametrize(
+    "mutable_rotation",
+    [
+        pytest.param(
+            [list(row) for row in CALIBRATED_TRANSLATION_ROTATION],
+            id="nested-list",
+        ),
+        pytest.param(np.array(CALIBRATED_TRANSLATION_ROTATION), id="ndarray"),
+    ],
+)
+def test_mapping_config_snapshots_mutable_translation_rotation(
+    mutable_rotation,
+) -> None:
+    mapper = RelativePoseMapper(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=mutable_rotation,
+        )
+    )
+    mutable_rotation[0][0] = 0.0
+    ee = identity_pose()
+
+    target = move_after_anchor(
+        mapper.config,
+        [0.881303368425, -0.042008923554, -0.470679958298],
+        ee,
+    )
+
+    assert isinstance(mapper.config.translation_rotation, tuple)
+    assert all(isinstance(row, tuple) for row in mapper.config.translation_rotation)
+    np.testing.assert_allclose(
+        target.position - ee.position,
+        [0.0, -1.0, 0.0],
+        atol=1e-9,
+    )
+
+
+@pytest.mark.parametrize(
     ("thresholds", "expected_press", "expected_release"),
     [
         pytest.param({}, 0.9, 0.8, id="defaults"),

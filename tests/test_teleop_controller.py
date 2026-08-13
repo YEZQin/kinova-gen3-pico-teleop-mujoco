@@ -444,6 +444,30 @@ def test_controller_passes_translation_rotation_to_mapper() -> None:
         controller.close()
 
 
+def test_controller_config_snapshots_mutable_translation_rotation() -> None:
+    rotation = np.array(
+        (
+            (0.0, -1.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+        )
+    )
+    config = TeleopConfig(realtime=False, translation_rotation=rotation)
+    rotation[0, 0] = 0.5
+
+    controller = TeleopController(config, ScriptedInput([]), RecordingBackend())
+
+    try:
+        assert config.translation_rotation == (
+            (0.0, -1.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+        )
+        assert controller.mapper.config.translation_rotation == config.translation_rotation
+    finally:
+        controller.close()
+
+
 def test_run_reports_only_meaningful_state_and_reason_transitions() -> None:
     class RejectingBackend(RecordingBackend):
         def command_pose(self, target):

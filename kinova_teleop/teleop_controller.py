@@ -15,6 +15,7 @@ from .pose_mapping import (
     MappingConfig,
     Pose,
     RelativePoseMapper,
+    normalize_translation_rotation,
 )
 from .xr_input import XrInputSource
 
@@ -31,6 +32,13 @@ class TeleopConfig:
     recover_stale_input: bool = False
     recovery_release_samples: int = 1
     translation_rotation: tuple[tuple[float, float, float], ...] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "translation_rotation",
+            normalize_translation_rotation(self.translation_rotation),
+        )
 
 
 class TeleopSafetyError(RuntimeError):

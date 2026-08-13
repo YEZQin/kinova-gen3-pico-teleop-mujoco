@@ -24,6 +24,26 @@ class Pose:
     quaternion: np.ndarray
 
 
+def normalize_translation_rotation(
+    translation_rotation: tuple[tuple[float, float, float], ...] | None,
+) -> tuple[tuple[float, float, float], ...] | None:
+    """Validate and copy an optional proper translation rotation."""
+
+    if translation_rotation is None:
+        return None
+    try:
+        rotation = np.asarray(translation_rotation, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError("translation_rotation must be a finite 3x3 rotation") from error
+    if rotation.shape != (3, 3) or not np.isfinite(rotation).all():
+        raise ValueError("translation_rotation must be a finite 3x3 rotation")
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-9, rtol=0.0):
+        raise ValueError("translation_rotation must be orthogonal")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-9, rtol=0.0):
+        raise ValueError("translation_rotation must have determinant +1")
+    return tuple(tuple(float(value) for value in row) for row in rotation)
+
+
 class ClutchState(str, Enum):
     WAITING_FOR_RELEASE = "waiting_for_release"
     READY = "ready"
@@ -70,17 +90,11 @@ class MappingConfig:
             or self.release_stability_samples <= 0
         ):
             raise ValueError("release_stability_samples must be a positive integer")
-        if self.translation_rotation is not None:
-            try:
-                rotation = np.asarray(self.translation_rotation, dtype=np.float64)
-            except (TypeError, ValueError) as error:
-                raise ValueError("translation_rotation must be a finite 3x3 rotation") from error
-            if rotation.shape != (3, 3) or not np.isfinite(rotation).all():
-                raise ValueError("translation_rotation must be a finite 3x3 rotation")
-            if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-9, rtol=0.0):
-                raise ValueError("translation_rotation must be orthogonal")
-            if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-9, rtol=0.0):
-                raise ValueError("translation_rotation must have determinant +1")
+        translation_rotation = normalize_translation_rotation(
+            self.translation_rotation
+        )
+        object.__setattr__(self, "translation_rotation", translation_rotation)
+        if translation_rotation is not None:
             if self.invert_translation:
                 raise ValueError(
                     "invert_translation cannot be combined with translation_rotation"
