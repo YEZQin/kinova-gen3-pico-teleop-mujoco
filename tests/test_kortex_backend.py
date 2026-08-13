@@ -240,13 +240,18 @@ def test_workspace_rejection_stops_before_feedback_or_twist():
         connection,
         workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
     )
-    backend.begin_control()
+    _begin_pose_control(backend)
+    feedback_count = len(connection.base_cyclic.options)
     result = backend.command_pose(_target(position=(1.0, 0.0, 0.3)))
+
     assert result.accepted is False
-    assert connection.base_cyclic.options == []
+    assert result.reanchor_required is True
+    assert result.reason == "target outside workspace"
+    assert len(connection.base_cyclic.options) == feedback_count
     assert connection.base.sent == []
     assert connection.base.stop_count == 1
-    assert backend.fault_reason == "target outside workspace"
+    assert backend.stop_confirmed is True
+    assert backend.fault_reason is None
 
 
 def test_workspace_rejection_reports_unconfirmed_stop_failure():
@@ -255,16 +260,16 @@ def test_workspace_rejection_reports_unconfirmed_stop_failure():
         connection,
         workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
     )
-    backend.begin_control()
+    _begin_pose_control(backend)
 
     def failed_stop(*, options=None):
         raise RuntimeError("stop timeout")
 
     connection.base.Stop = failed_stop
-    result = backend.command_pose(_target(position=(1.0, 0.0, 0.3)))
+    with pytest.raises(KortexSafetyError, match="Stop attempted but unconfirmed"):
+        backend.command_pose(_target(position=(1.0, 0.0, 0.3)))
 
-    assert result.accepted is False
-    assert result.reason == "Stop attempted but unconfirmed"
+    assert connection.base.sent == []
     assert backend.fault_reason == "Stop attempted but unconfirmed"
     assert backend.stop_confirmed is False
 
@@ -330,25 +335,22 @@ def test_command_without_rearm_anchor_faults_before_feedback_or_twist():
     assert connection.base.stop_count == 1
 
 
-def test_anchor_translation_rejection_latches_fault_and_stops_before_feedback():
+def test_anchor_translation_rejection_stops_recoverably_before_feedback():
     connection = _Connection(_feedback((0.1, -0.2, 0.3)))
     backend = _backend(connection, anchor_envelope=FIRST_TRIAL_ANCHOR_ENVELOPE)
     _begin_pose_control(backend)
     feedback_count = len(connection.base_cyclic.options)
 
-    with pytest.raises(
-        KortexSafetyError,
-        match="target outside anchor translation envelope",
-    ):
-        backend.command_pose(_target(position=(0.120001, -0.2, 0.3)))
+    result = backend.command_pose(_target(position=(0.120001, -0.2, 0.3)))
 
+    assert result.accepted is False
+    assert result.reanchor_required is True
+    assert result.reason == "target outside anchor translation envelope"
     assert len(connection.base_cyclic.options) == feedback_count
     assert connection.base.sent == []
     assert connection.base.stop_count == 1
-    assert backend.stop_requested is True
-    assert backend._fault_reason == "target outside anchor translation envelope"
-    with pytest.raises(KortexSafetyError, match="latched"):
-        backend.begin_control()
+    assert backend.stop_confirmed is True
+    assert backend.fault_reason is None
 
 
 def test_anchor_rejection_raises_unconfirmed_stop_failure():
@@ -441,9 +443,11 @@ def test_anchor_rotation_rejection_stops_before_feedback_or_twist():
     )
     feedback_count = len(connection.base_cyclic.options)
 
-    with pytest.raises(KortexSafetyError, match="anchor rotation envelope"):
-        backend.command_pose(_target(quaternion=outside))
+    result = backend.command_pose(_target(quaternion=outside))
 
+    assert result.accepted is False
+    assert result.reanchor_required is True
+    assert result.reason == "target outside anchor rotation envelope"
     assert len(connection.base_cyclic.options) == feedback_count
     assert connection.base.sent == []
     assert connection.base.stop_count == 1
@@ -456,9 +460,9 @@ def test_control_anchor_is_an_immutable_copy_of_rearm_feedback():
     returned.position[0] = 0.020001
     returned.quaternion[:] = [0.0, 0.0, 0.0, 1.0]
 
-    with pytest.raises(KortexSafetyError, match="anchor translation envelope"):
-        backend.command_pose(_target(position=(0.020001, 0.0, 0.0)))
+    result = backend.command_pose(_target(position=(0.020001, 0.0, 0.0)))
 
+    assert result.reanchor_required is True
     assert connection.base.sent == []
     assert connection.base.stop_count == 1
 
@@ -471,9 +475,9 @@ def test_ordinary_feedback_does_not_refresh_control_anchor():
     backend.current_pose()
     feedback_count = len(connection.base_cyclic.options)
 
-    with pytest.raises(KortexSafetyError, match="anchor translation envelope"):
-        backend.command_pose(_target(position=(0.1, 0.0, 0.0)))
+    result = backend.command_pose(_target(position=(0.1, 0.0, 0.0)))
 
+    assert result.reanchor_required is True
     assert len(connection.base_cyclic.options) == feedback_count
     assert connection.base.sent == []
     assert connection.base.stop_count == 1

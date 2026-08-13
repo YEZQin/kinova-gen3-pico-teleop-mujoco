@@ -19,6 +19,7 @@ class BackendResult:
     position_error: float
     rotation_error: float
     reason: str
+    reanchor_required: bool = False
 
 
 class EndEffectorTargetBackend(Protocol):

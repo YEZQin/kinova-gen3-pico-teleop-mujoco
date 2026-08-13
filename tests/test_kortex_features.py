@@ -307,6 +307,9 @@ def test_running_fault_is_not_cleared_automatically():
 
     assert connection.base.clear_faults_count == 0
     assert connection.base.stop_count == 1
+    assert backend.fault_reason == "robot is in fault"
+    with pytest.raises(KortexSafetyError, match="Kortex safety fault is latched"):
+        backend.command_pose(_target(position=(0.01, 0.0, 0.0)))
 
 
 def test_confirm_stationary_requires_fresh_low_velocity_feedback():

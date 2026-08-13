@@ -453,18 +453,11 @@ class KortexBackend:
         if self.workspace_limits is not None:
             decision = validate_target_pose(target, self.workspace_limits)
             if not decision.accepted:
-                latched_reason = self._latch_fault_and_stop(
+                return self._reject_boundary_and_stop(
                     decision.reason,
                     generation=generation,
+                    event_kind="workspace_rejected",
                 )
-                if latched_reason is None:
-                    return _inactive_result()
-                self._emit(
-                    "workspace_rejected",
-                    "STOPPING",
-                    {"reason": decision.reason},
-                )
-                return BackendResult(False, False, 0.0, 0.0, latched_reason)
 
         if anchor is None:
             reason = "control anchor is unavailable"
@@ -478,13 +471,11 @@ class KortexBackend:
 
         decision = self.anchor_envelope.evaluate(anchor, target)
         if not decision.accepted:
-            latched_reason = self._latch_fault_and_stop(
+            return self._reject_boundary_and_stop(
                 decision.reason,
                 generation=generation,
+                event_kind="anchor_rejected",
             )
-            if latched_reason is None:
-                return _inactive_result()
-            raise KortexSafetyError(latched_reason)
 
         try:
             target_position = np.asarray(target.position, dtype=np.float64)
@@ -596,6 +587,24 @@ class KortexBackend:
         if nonzero:
             self._emit("moving", "MOVING", {})
         return result
+
+    def _reject_boundary_and_stop(
+        self,
+        reason: str,
+        *,
+        generation: int,
+        event_kind: str,
+    ) -> BackendResult:
+        """Stop a current boundary rejection without latching a safety fault."""
+
+        with self._state_lock:
+            if not self._state_allows_command_locked(generation):
+                return _inactive_result()
+            token = self._request_stop_locked(force=True)
+        self._emit("host_stop_requested", "STOPPING", {})
+        self._emit(event_kind, "STOPPING", {"reason": reason})
+        self._attempt_stop(token=token, raise_on_failure=True)
+        return BackendResult(False, False, 0.0, 0.0, reason, reanchor_required=True)
 
     def _latch_fault_and_stop(
         self,
