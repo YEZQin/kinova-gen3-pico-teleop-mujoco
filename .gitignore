@@ -19,6 +19,10 @@ setting.ini
 logs/
 /artifacts/
 *.apk
+/downloads/
+/local-config/
+.venv-kortex/
+*.whl
 pico_unity_bridge/Library/
 /pico_unity_bridge/Builds/
 /pico_unity_bridge/MemoryCaptures/
