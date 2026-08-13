@@ -89,7 +89,10 @@ function Test-AllowedReleaseRedirect([Uri]$Uri) {
     return $allowedHosts -contains $Uri.Host.ToLowerInvariant()
 }
 
-function Resolve-ReleaseAssetDownloadUri([string]$Value) {
+function Resolve-ReleaseAssetDownloadUri(
+    [string]$Value,
+    [ScriptBlock]$RequestFactory
+) {
     $currentUri = New-Object Uri($Value)
     if (-not (Test-AllowedReleaseRedirect $currentUri) -or
         $currentUri.Host -cne 'github.com' -or
@@ -98,7 +101,11 @@ function Resolve-ReleaseAssetDownloadUri([string]$Value) {
     }
     $maximumRedirects = 5
     for ($redirectCount = 0; $redirectCount -le $maximumRedirects; $redirectCount++) {
-        $request = [Net.HttpWebRequest]::Create($currentUri)
+        if ($null -eq $RequestFactory) {
+            $request = [Net.HttpWebRequest]::Create($currentUri)
+        } else {
+            $request = & $RequestFactory $currentUri
+        }
         $request.Method = 'HEAD'
         $request.AllowAutoRedirect = $false
         $request.Timeout = 30000
@@ -159,8 +166,20 @@ if ([string]::IsNullOrWhiteSpace($VenvDirectory)) {
 
 $pythonCandidate = $PythonExe
 if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
-    $pythonCandidate = (Get-Command python -CommandType Application -ErrorAction Stop |
-        Select-Object -First 1).Source
+    $pyLauncher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $pyLauncher) {
+        $launcherCandidate = (& $pyLauncher.Source -3.11 -c 'import sys; print(sys.executable)' |
+            Select-Object -Last 1).ToString().Trim()
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($launcherCandidate) -and
+            (Test-Path -LiteralPath $launcherCandidate -PathType Leaf)) {
+            $pythonCandidate = $launcherCandidate
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
+        $pythonCandidate = (Get-Command python -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1).Source
+    }
 }
 $resolvedPython = Resolve-RequiredFile $pythonCandidate 'PythonExe'
 $pythonVersion = (& $resolvedPython --version 2>&1 | Select-Object -Last 1).ToString().Trim()
@@ -294,17 +313,13 @@ if ($InstallApk) {
             }
         }
     )
-    if ([string]::IsNullOrWhiteSpace($DeviceSerial)) {
-        if ($deviceSerials.Count -ne 1) {
-            throw 'APK installation requires exactly one authorized ADB device.'
-        }
-        $installedDeviceSerial = $deviceSerials[0]
-    } else {
-        $authorizedDevices = @($deviceSerials | Where-Object { $_ -ceq $DeviceSerial })
-        if ($authorizedDevices.Count -ne 1) {
-            throw 'The requested DeviceSerial is not the exactly one authorized ADB device.'
-        }
-        $installedDeviceSerial = $authorizedDevices[0]
+    if ($deviceSerials.Count -ne 1) {
+        throw 'APK installation requires exactly one authorized ADB device.'
+    }
+    $installedDeviceSerial = $deviceSerials[0]
+    if (-not [string]::IsNullOrWhiteSpace($DeviceSerial) -and
+        $installedDeviceSerial -cne $DeviceSerial) {
+        throw 'The requested DeviceSerial is not the exactly one authorized ADB device.'
     }
     # The sole device mutation is: adb -s SERIAL install -r APK.
     $adbInstallArguments = @('-s', $installedDeviceSerial, 'install', '-r', $resolvedApk)
