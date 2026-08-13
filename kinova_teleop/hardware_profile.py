@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import importlib.metadata
 import ipaddress
+import math
 import sys
 
 import numpy as np
@@ -42,6 +43,8 @@ FIRST_HARDWARE_PROFILE = HardwareProfile(
     anchor_translation_axis_m=(0.02, 0.02, 0.02),
     anchor_rotation_deg=5.0,
 )
+
+EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M = (0.05, 0.05, 0.05)
 
 MAX_TRANSLATION_ONLY_SCALE = 0.5
 
@@ -90,11 +93,21 @@ def validate_private_robot_ipv4(host: str) -> None:
 
 def validate_workspace_span(
     limits: WorkspaceLimits,
-    profile: HardwareProfile = FIRST_HARDWARE_PROFILE,
+    maximum_translation_axis_m: tuple[float, float, float] = (
+        FIRST_HARDWARE_PROFILE.anchor_translation_axis_m
+    ),
 ) -> None:
-    """Require absolute motion bounds to fit within the first-hardware span."""
+    """Require absolute motion bounds to fit within the supplied span."""
 
+    if len(maximum_translation_axis_m) != 3 or not all(
+        math.isfinite(value) and value > 0.0
+        for value in maximum_translation_axis_m
+    ):
+        raise ValueError("maximum translation axis must contain three positive finite values")
     span = np.asarray(limits.maximum_xyz) - np.asarray(limits.minimum_xyz)
-    maximum = 2.0 * np.asarray(profile.anchor_translation_axis_m)
+    maximum = 2.0 * np.asarray(maximum_translation_axis_m)
     if np.any(span > maximum):
-        raise ValueError("first-hardware workspace span must not exceed 0.04 m per axis")
+        raise ValueError(
+            "workspace span must not exceed "
+            f"{maximum[0]:g} m per axis"
+        )

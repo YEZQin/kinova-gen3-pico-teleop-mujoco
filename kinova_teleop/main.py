@@ -16,6 +16,7 @@ from .pico_udp_input import PicoUdpInput
 from .evidence_log import EvidenceLogger, logger_event_sink
 from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
 from .hardware_profile import (
+    EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
     FIRST_HARDWARE_PROFILE,
     MAX_TRANSLATION_ONLY_SCALE,
     validate_kortex_runtime,
@@ -123,6 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--translation-only",
         action="store_true",
         help="map controller translation while holding the anchored tool orientation",
+    )
+    parser.add_argument(
+        "--expanded-translation-envelope",
+        action="store_true",
+        help=(
+            "permit a 50 mm per-axis Grip anchor envelope only for explicit "
+            "Kortex translation-only hardware teleoperation"
+        ),
     )
     parser.add_argument(
         "--control-hz",
@@ -273,6 +282,14 @@ def resolve_translation_scale(args: argparse.Namespace) -> float:
     if args.backend == "kortex":
         return FIRST_HARDWARE_PROFILE.translation_scale
     return DEFAULT_MUJOCO_TRANSLATION_SCALE
+
+
+def resolve_anchor_translation_axis(
+    args: argparse.Namespace,
+) -> tuple[float, float, float]:
+    if args.expanded_translation_envelope:
+        return EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M
+    return FIRST_HARDWARE_PROFILE.anchor_translation_axis_m
 
 
 def _resolve_stale_timeout(args: argparse.Namespace) -> float:

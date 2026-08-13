@@ -1,13 +1,19 @@
 import pytest
 
 from kinova_teleop.hardware_profile import (
+    EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
     FIRST_HARDWARE_PROFILE,
     MAX_TRANSLATION_ONLY_SCALE,
     validate_kortex_runtime,
     validate_private_robot_ipv4,
     validate_workspace_span,
 )
-from kinova_teleop.main import build_parser, resolve_control_hz, resolve_translation_scale
+from kinova_teleop.main import (
+    build_parser,
+    resolve_anchor_translation_axis,
+    resolve_control_hz,
+    resolve_translation_scale,
+)
 from kinova_teleop.workspace import WorkspaceLimits
 
 
@@ -89,4 +95,29 @@ def test_first_hardware_workspace_cannot_exceed_four_centimetres_per_axis() -> N
         (0.140001, -0.16, 0.34),
     )
     with pytest.raises(ValueError, match="span must not exceed 0.04 m"):
-        validate_workspace_span(limits, FIRST_HARDWARE_PROFILE)
+        validate_workspace_span(limits)
+
+
+def test_expanded_translation_envelope_is_explicit_and_defaults_stay_small() -> None:
+    parser = build_parser()
+    default = parser.parse_args(["--backend", "kortex"])
+    expanded = parser.parse_args(
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--expanded-translation-envelope",
+        ]
+    )
+    assert EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M == (0.05, 0.05, 0.05)
+    assert resolve_anchor_translation_axis(default) == (0.02, 0.02, 0.02)
+    assert resolve_anchor_translation_axis(expanded) == (0.05, 0.05, 0.05)
+
+
+def test_expanded_workspace_accepts_exact_ten_centimetres_only() -> None:
+    exact = WorkspaceLimits((0.0, 0.0, 0.0), (0.10, 0.10, 0.10))
+    validate_workspace_span(exact, EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M)
+    over = WorkspaceLimits((0.0, 0.0, 0.0), (0.100001, 0.10, 0.10))
+    with pytest.raises(ValueError, match="span must not exceed 0.1 m"):
+        validate_workspace_span(over, EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M)
