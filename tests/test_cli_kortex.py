@@ -1076,6 +1076,175 @@ def test_responsive_reversed_expanded_translation_wires_approved_values(monkeypa
     assert controller_config.recovery_release_samples == 3
 
 
+def test_responsive_calibrated_expanded_translation_wires_loaded_rotation_once(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Changing the selected calibration must change controller-axis mapping."""
+
+    created: dict[str, object] = {}
+    _install_valid_kortex_fakes(monkeypatch, created)
+    monkeypatch.setattr("kinova_teleop.main.SdkXrInput", _FakeSource)
+    artifact = tmp_path / "operator-axis.json"
+    expected_rotation = (
+        (0.0, -1.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    loaded_paths: list[object] = []
+    monkeypatch.setattr(
+        main_module,
+        "load_operator_axis_calibration",
+        lambda path: loaded_paths.append(path) or SimpleNamespace(
+            translation_rotation=expected_rotation,
+        ),
+    )
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--operator-calibration", str(artifact),
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.01",
+        ]
+    )
+
+    assert main(argv) == 0
+    controller_config = created["controller_config"]
+    assert controller_config.translation_scale == 0.8
+    assert controller_config.orientation_enabled is False
+    assert controller_config.recover_stale_input is True
+    assert controller_config.invert_translation is False
+    assert controller_config.translation_rotation == expected_rotation
+    assert loaded_paths == [artifact]
+
+
+def _forbid_hardware_setup_after_calibration_rejection(monkeypatch) -> list[object]:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setattr(
+        main_module,
+        "os",
+        SimpleNamespace(
+            getenv=lambda _name: (_ for _ in ()).throw(
+                AssertionError("password read"),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("SDK validated")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "create_input",
+        lambda _args: (_ for _ in ()).throw(AssertionError("input created")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_backend",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("backend created"),
+        ),
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("MOVE prompted")),
+    )
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_error"),
+    [
+        (
+            ["--operator-calibration", "scope.json"],
+            "responsive translation profile requires",
+        ),
+        (
+            [
+                "--backend", "kortex",
+                "--enable-hardware",
+                "--translation-only",
+                "--expanded-translation-envelope",
+                "--responsive-translation-profile",
+                "--operator-calibration", "scope.json",
+                "--recover-stale-input",
+                "--invert-translation",
+            ],
+            "exactly one of --invert-translation or --operator-calibration",
+        ),
+        (
+            [
+                "--backend", "kortex",
+                "--enable-hardware",
+                "--translation-only",
+                "--expanded-translation-envelope",
+                "--responsive-translation-profile",
+                "--recover-stale-input",
+            ],
+            "exactly one of --invert-translation or --operator-calibration",
+        ),
+    ],
+)
+def test_invalid_responsive_calibration_scope_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    arguments: list[str],
+    expected_error: str,
+) -> None:
+    """Invalid responsive mode must not inspect credentials or hardware."""
+
+    calls = _forbid_hardware_setup_after_calibration_rejection(monkeypatch)
+
+    assert main(_expanded_motion_gate_args(arguments)) == 2
+    assert calls == []
+    assert expected_error in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "artifact_contents"),
+    [
+        ("missing.json", None),
+        ("malformed.json", "not JSON"),
+    ],
+)
+def test_unreadable_responsive_calibration_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    tmp_path,
+    artifact_name: str,
+    artifact_contents: str | None,
+) -> None:
+    """An unusable calibration artifact cannot fall through to hardware setup."""
+
+    artifact = tmp_path / artifact_name
+    if artifact_contents is not None:
+        artifact.write_text(artifact_contents, encoding="utf-8")
+    _install_valid_motion_gate_files(monkeypatch)
+    calls = _forbid_hardware_setup_after_calibration_rejection(monkeypatch)
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--operator-calibration", str(artifact),
+            "--recover-stale-input",
+        ]
+    )
+
+    assert main(argv) == 2
+    assert calls == []
+    assert "error: operator calibration" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

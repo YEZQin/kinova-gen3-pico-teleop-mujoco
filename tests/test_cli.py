@@ -39,6 +39,14 @@ def test_only_left_controller_is_accepted() -> None:
     assert parser.parse_args(["--controller", "left"]).controller == "left"
 
 
+def test_operator_calibration_parser_preserves_artifact_path() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(
+        ["--operator-calibration", "operator-axis.json"]
+    ).operator_calibration == Path("operator-axis.json")
+
+
 def test_source_closes_if_controller_initialization_fails(monkeypatch) -> None:
     class FakeSource:
         closed = False

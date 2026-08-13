@@ -31,6 +31,7 @@ from .hardware_admission import (
     wait_for_fresh_released_input,
 )
 from .motion_lease import validate_motion_lease
+from .operator_calibration import load_operator_axis_calibration
 from .preflight import (
     PreflightContext,
     load_passing_preflight_report,
@@ -147,6 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--invert-translation",
         action="store_true",
         help="reverse all three relative translation axes in the responsive profile",
+    )
+    parser.add_argument(
+        "--operator-calibration",
+        type=Path,
+        help="validated PICO right/up/forward calibration for responsive translation",
     )
     parser.add_argument(
         "--recover-stale-input",
@@ -444,18 +450,27 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         args.responsive_translation_profile,
         args.invert_translation,
         args.recover_stale_input,
+        args.operator_calibration is not None,
     )
     responsive_mode_valid = (
         expanded_mode_valid
         and args.expanded_translation_envelope
-        and all(responsive_flags)
+        and args.responsive_translation_profile
+        and args.recover_stale_input
     )
     if any(responsive_flags) and not responsive_mode_valid:
         return (
-            "responsive translation profile requires all of "
-            "--responsive-translation-profile, --invert-translation, and "
-            "--recover-stale-input in expanded Kortex translation-only "
+            "responsive translation profile requires "
+            "--responsive-translation-profile and --recover-stale-input "
+            "in expanded Kortex translation-only "
             "hardware teleoperation"
+        )
+    if responsive_mode_valid and (
+        args.invert_translation == (args.operator_calibration is not None)
+    ):
+        return (
+            "responsive translation profile requires exactly one of "
+            "--invert-translation or --operator-calibration"
         )
     if args.control_hz is not None and (
         not math.isfinite(args.control_hz) or args.control_hz <= 0.0
@@ -769,12 +784,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     password: str | None = None
+    calibration = None
     if args.backend == "kortex":
         # Fail closed on non-secret gates before even looking up the password.
         error = _validate_kortex_args(args, None, check_password=False)
         if error is not None:
             print(f"error: {error}", file=sys.stderr)
             return 2
+        if args.operator_calibration is not None:
+            try:
+                calibration = load_operator_axis_calibration(
+                    args.operator_calibration,
+                )
+            except (OSError, ValueError) as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
         password = os.getenv("KINOVA_PASSWORD")
         error = _validate_kortex_args(args, password)
         if error is not None:
@@ -887,6 +911,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     stale_timeout=_resolve_stale_timeout(args),
                     fatal_input_faults=args.backend == "kortex",
                     invert_translation=args.invert_translation,
+                    translation_rotation=(
+                        calibration.translation_rotation
+                        if calibration is not None
+                        else None
+                    ),
                     recover_stale_input=args.recover_stale_input,
                     recovery_release_samples=(
                         3 if args.recover_stale_input else 1
