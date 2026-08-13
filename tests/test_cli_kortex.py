@@ -10,7 +10,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from kinova_teleop.main import _approve_fixed_segment, _cleanup_resources, main
+from kinova_teleop.main import (
+    _approve_fixed_segment,
+    _cleanup_resources,
+    _validate_args,
+    _validate_kortex_args,
+    build_parser,
+    main,
+)
 from kinova_teleop.xr_input import ControllerSample
 
 
@@ -1061,12 +1068,12 @@ def test_responsive_reversed_expanded_translation_wires_approved_values(monkeypa
             "--invert-translation",
             "--recover-stale-input",
             "--scale", "0.8",
-            "--max-linear-speed", "0.01",
+            "--max-linear-speed", "0.02",
         ]
     )
 
     assert main(argv) == 0
-    assert created["backend"].kwargs["max_linear_speed"] == 0.01
+    assert created["backend"].kwargs["max_linear_speed"] == 0.02
     assert created["backend"].kwargs["anchor_envelope"].maximum_translation_axis_m == (0.05, 0.05, 0.05)
     controller_config = created["controller_config"]
     assert controller_config.translation_scale == 0.8
@@ -1076,7 +1083,7 @@ def test_responsive_reversed_expanded_translation_wires_approved_values(monkeypa
     assert controller_config.recovery_release_samples == 3
 
 
-def test_responsive_translation_accepts_twenty_centimetre_absolute_workspace(
+def test_responsive_calibrated_translation_accepts_exact_asymmetric_absolute_workspace(
     monkeypatch,
 ) -> None:
     """Responsive motion may use a wider absolute box without widening Grip."""
@@ -1084,6 +1091,17 @@ def test_responsive_translation_accepts_twenty_centimetre_absolute_workspace(
     created: dict[str, object] = {}
     _install_valid_kortex_fakes(monkeypatch, created)
     monkeypatch.setattr("kinova_teleop.main.SdkXrInput", _FakeSource)
+    monkeypatch.setattr(
+        main_module,
+        "load_operator_axis_calibration",
+        lambda _path: SimpleNamespace(
+            translation_rotation=(
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            ),
+        ),
+    )
     argv = _expanded_motion_gate_args(
         [
             "--backend", "kortex",
@@ -1092,36 +1110,36 @@ def test_responsive_translation_accepts_twenty_centimetre_absolute_workspace(
             "--translation-only",
             "--expanded-translation-envelope",
             "--responsive-translation-profile",
-            "--invert-translation",
+            "--operator-calibration", "operator-axis.json",
             "--recover-stale-input",
             "--scale", "0.8",
-            "--max-linear-speed", "0.01",
+            "--max-linear-speed", "0.02",
         ]
     )
     workspace_min_index = argv.index("--workspace-min")
     argv[workspace_min_index + 1 : workspace_min_index + 4] = [
-        "0.646914864",
-        "-0.182188472",
-        "-0.035961582",
+        "-0.6",
+        "-0.6",
+        "-0.32",
     ]
     workspace_max_index = argv.index("--workspace-max")
     argv[workspace_max_index + 1 : workspace_max_index + 4] = [
-        "0.846914864",
-        "0.017811528",
-        "0.164038418",
+        "0.6",
+        "0.6",
+        "0.32",
     ]
 
     assert main(argv) == 0
     backend = created["backend"]
     assert backend.kwargs["workspace_limits"].minimum_xyz == (
-        0.646914864,
-        -0.182188472,
-        -0.035961582,
+        -0.6,
+        -0.6,
+        -0.32,
     )
     assert backend.kwargs["workspace_limits"].maximum_xyz == (
-        0.846914864,
-        0.017811528,
-        0.164038418,
+        0.6,
+        0.6,
+        0.32,
     )
     assert backend.kwargs["anchor_envelope"].maximum_translation_axis_m == (
         0.05,
@@ -1130,11 +1148,18 @@ def test_responsive_translation_accepts_twenty_centimetre_absolute_workspace(
     )
 
 
+@pytest.mark.parametrize(
+    ("axis", "maximum", "expected_limit"),
+    ((0, "1.200001", "1.2"), (1, "1.200001", "1.2"), (2, "0.640001", "1.2")),
+)
 def test_responsive_workspace_overrun_rejects_before_hardware_side_effects(
     monkeypatch,
     capsys,
+    axis: int,
+    maximum: str,
+    expected_limit: str,
 ) -> None:
-    """A responsive absolute span over 200 mm must fail before credentials."""
+    """An asymmetric responsive overrun must fail before credentials or motion."""
 
     calls = _install_unreachable_connection_factory(monkeypatch)
     prompts: list[str] = []
@@ -1158,18 +1183,63 @@ def test_responsive_workspace_overrun_rejects_before_hardware_side_effects(
             "--invert-translation",
             "--recover-stale-input",
             "--scale", "0.8",
-            "--max-linear-speed", "0.01",
+            "--max-linear-speed", "0.02",
         ]
     )
     workspace_max_index = argv.index("--workspace-max")
-    argv[workspace_max_index + 1] = "0.200001"
-    argv[workspace_max_index + 2] = "0.20"
-    argv[workspace_max_index + 3] = "0.20"
+    argv[workspace_max_index + 1 : workspace_max_index + 4] = ["1.2", "1.2", "0.64"]
+    argv[workspace_max_index + 1 + axis] = maximum
 
     assert main(argv) == 2
     assert calls == []
     assert prompts == []
-    assert "workspace span must not exceed 0.2 m per axis" in capsys.readouterr().err
+    assert f"workspace span must not exceed {expected_limit} m per axis" in capsys.readouterr().err
+
+
+def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_validation(
+    monkeypatch,
+) -> None:
+    """The exact large envelope requires the calibrated responsive motion scope."""
+
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr(main_module, "load_passing_preflight_report", lambda *_args: object())
+    args = build_parser().parse_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--operator-calibration", "operator-axis.json",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.02",
+            "--workspace-min", "-0.6", "-0.6", "-0.32",
+            "--workspace-max", "0.6", "0.6", "0.32",
+            "--motion-lease", "fixture-motion.lock",
+            "--preflight-report", "fixture-preflight.json",
+        ]
+    )
+
+    assert _validate_args(args) is None
+    assert _validate_kortex_args(args, None, check_password=False) is None
+
+
+def test_nonresponsive_translation_only_retains_the_default_linear_speed_cap() -> None:
+    args = build_parser().parse_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--max-linear-speed", "0.0051",
+        ]
+    )
+
+    assert (
+        _validate_kortex_args(args, None, check_password=False)
+        == "--max-linear-speed must be in (0, 0.005]"
+    )
 
 
 def test_responsive_calibrated_expanded_translation_wires_loaded_rotation_once(
