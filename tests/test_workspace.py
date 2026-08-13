@@ -48,6 +48,17 @@ def test_anchor_envelope_accepts_boundary_and_rejects_translation_overrun() -> N
     assert rejected.reason == "target outside anchor translation envelope"
 
 
+def test_expanded_anchor_envelope_accepts_fifty_millimetres_and_rejects_overrun() -> None:
+    envelope = AnchorEnvelope((0.05, 0.05, 0.05), math.radians(5.0))
+    anchor = pose_at(0.10, -0.20, 0.30)
+
+    assert envelope.evaluate(anchor, pose_at(0.15, -0.20, 0.30)).accepted
+    rejected = envelope.evaluate(anchor, pose_at(0.150001, -0.20, 0.30))
+
+    assert not rejected.accepted
+    assert rejected.reason == "target outside anchor translation envelope"
+
+
 def test_anchor_envelope_uses_shortest_arc_orientation() -> None:
     envelope = AnchorEnvelope((0.02, 0.02, 0.02), math.radians(5.0))
     anchor = Pose(

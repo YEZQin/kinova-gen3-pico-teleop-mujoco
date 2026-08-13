@@ -395,6 +395,18 @@ def _validate_args(args: argparse.Namespace) -> str | None:
     # gripper flag, regardless of backend or any other malformed option.
     if args.gripper:
         return "--gripper is disabled for the first-hardware profile"
+    expanded_mode_valid = (
+        args.backend == "kortex"
+        and args.enable_hardware
+        and args.translation_only
+        and not args.check_kortex
+        and args.fixed_trajectory is None
+    )
+    if args.expanded_translation_envelope and not expanded_mode_valid:
+        return (
+            "--expanded-translation-envelope requires Kortex "
+            "translation-only hardware teleoperation"
+        )
     if args.control_hz is not None and (
         not math.isfinite(args.control_hz) or args.control_hz <= 0.0
     ):
@@ -501,7 +513,7 @@ def _validate_kortex_args(
         if limits is None:
             return "--workspace-min and --workspace-max are required for Kortex motion"
         try:
-            validate_workspace_span(limits)
+            validate_workspace_span(limits, resolve_anchor_translation_axis(args))
         except ValueError as error:
             return str(error)
         if args.motion_lease is None:
@@ -782,7 +794,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_angular_speed_deg=_resolve_max_angular_speed_deg(args),
                 workspace_limits=workspace_limits,
                 anchor_envelope=AnchorEnvelope(
-                    FIRST_HARDWARE_PROFILE.anchor_translation_axis_m,
+                    resolve_anchor_translation_axis(args),
                     math.radians(FIRST_HARDWARE_PROFILE.anchor_rotation_deg),
                 ),
                 event_sink=event_sink,

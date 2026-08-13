@@ -26,6 +26,15 @@ def _motion_gate_args(arguments: list[str]) -> list[str]:
     ]
 
 
+def _expanded_motion_gate_args(arguments: list[str]) -> list[str]:
+    return arguments + [
+        "--workspace-min", "0", "0", "0",
+        "--workspace-max", "0.10", "0.10", "0.10",
+        "--motion-lease", "fixture-motion.lock",
+        "--preflight-report", "fixture-preflight.json",
+    ]
+
+
 def _valid_motion_argv() -> list[str]:
     return _motion_gate_args(["--backend", "kortex", "--enable-hardware"])
 
@@ -365,6 +374,80 @@ def _install_unreachable_connection_factory(monkeypatch):
         raising=False,
     )
     return calls
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--expanded-translation-envelope"],
+        ["--backend", "kortex", "--enable-hardware", "--expanded-translation-envelope"],
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--check-kortex",
+            "--expanded-translation-envelope",
+        ],
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--input",
+            "none",
+            "--fixed-trajectory",
+            "fixture-trajectory.json",
+            "--expanded-translation-envelope",
+        ],
+    ],
+)
+def test_expanded_envelope_invalid_modes_reject_before_connection(
+    monkeypatch, capsys, arguments: list[str]
+) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+
+    assert main(_motion_gate_args(arguments)) == 2
+    assert calls == []
+    assert "--expanded-translation-envelope requires" in capsys.readouterr().err
+
+
+def test_expanded_envelope_workspace_overrun_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+) -> None:
+    """A representable span overrun must fail before any hardware setup."""
+
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        "kinova_teleop.main.validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--input",
+            "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+        ]
+    )
+    workspace_max_index = argv.index("--workspace-max")
+    argv[workspace_max_index + 1] = "0.100001"
+
+    assert main(argv) == 2
+    assert calls == []
+    assert prompts == []
+    assert "workspace span must not exceed 0.1 m per axis" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -843,6 +926,35 @@ def test_translation_only_kortex_disables_orientation_mapping(monkeypatch) -> No
     ])) == 0
 
     assert created["controller_config"].orientation_enabled is False
+    assert (
+        created["backend"].kwargs["anchor_envelope"].maximum_translation_axis_m
+        == (0.02, 0.02, 0.02)
+    )
+
+
+def test_expanded_translation_only_wires_five_centimetre_anchor(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    _install_valid_kortex_fakes(monkeypatch, created)
+    monkeypatch.setattr("kinova_teleop.main.SdkXrInput", _FakeSource)
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--input",
+            "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--scale",
+            "0.5",
+        ]
+    )
+
+    assert main(argv) == 0
+    envelope = created["backend"].kwargs["anchor_envelope"]
+    assert envelope.maximum_translation_axis_m == (0.05, 0.05, 0.05)
+    assert created["controller_config"].orientation_enabled is False
+    assert created["controller_config"].translation_scale == 0.5
 
 
 def test_translation_only_kortex_accepts_explicit_scale_half(monkeypatch) -> None:
