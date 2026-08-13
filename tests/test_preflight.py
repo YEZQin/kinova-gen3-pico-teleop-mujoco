@@ -120,6 +120,35 @@ def preflight_context() -> PreflightContext:
     )
 
 
+def motion_contract() -> dict[str, object]:
+    return {
+        "workspace_min_m": [0.143218601, -0.670251882, 0.017065614],
+        "workspace_max_m": [1.343218601, 0.529748118, 0.657065614],
+        "max_linear_speed_m_s": 0.02,
+        "translation_scale": 0.8,
+        "translation_only": True,
+        "expanded_translation_envelope": True,
+        "responsive_translation_profile": True,
+        "operator_axis_calibration": True,
+        "recover_stale_input": True,
+        "stale_timeout_s": 0.2,
+        "control_hz": 40.0,
+        "max_angular_speed_deg_s": 2.0,
+        "anchor_translation_axis_m": 0.05,
+        "anchor_rotation_deg": 5.0,
+    }
+
+
+def passing_motion_report_payload() -> dict[str, object]:
+    payload = run_kortex_readonly_preflight(
+        RecordingConnection(),
+        preflight_context(),
+    ).to_mapping()
+    payload["passed"] = True
+    payload["safety_limits"] = motion_contract()
+    return payload
+
+
 def test_readonly_preflight_reads_current_state_without_clear_or_servo_mode():
     connection = RecordingConnection()
     report = run_kortex_readonly_preflight(connection, preflight_context())
@@ -206,6 +235,58 @@ def test_passing_preflight_report_is_strict_and_read_only(tmp_path):
 
     with pytest.raises(ValueError, match="not passed"):
         load_passing_preflight_report(report_path)
+
+
+def test_passing_preflight_report_binds_exact_motion_contract(tmp_path) -> None:
+    path = tmp_path / "matching-motion-report.json"
+    path.write_text(json.dumps(passing_motion_report_payload()), encoding="utf-8")
+
+    assert load_passing_preflight_report(
+        path,
+        expected_safety_limits=motion_contract(),
+    )["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("workspace_max_m", [1.343219601, 0.529748118, 0.657065614]),
+        ("max_linear_speed_m_s", 0.01),
+    ),
+)
+def test_passing_preflight_report_rejects_motion_contract_mismatch(
+    tmp_path,
+    field: str,
+    value: object,
+) -> None:
+    payload = passing_motion_report_payload()
+    payload["safety_limits"][field] = value
+    path = tmp_path / "mismatched-motion-report.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"safety limit mismatch: {field}"):
+        load_passing_preflight_report(
+            path,
+            expected_safety_limits=motion_contract(),
+        )
+
+
+def test_passing_preflight_report_rejects_missing_required_motion_limit(
+    tmp_path,
+) -> None:
+    payload = passing_motion_report_payload()
+    payload["safety_limits"].pop("translation_scale")
+    path = tmp_path / "incomplete-motion-report.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="missing required motion field: translation_scale",
+    ):
+        load_passing_preflight_report(
+            path,
+            expected_safety_limits=motion_contract(),
+        )
 
 
 def test_passing_preflight_report_rejects_windows_reparse_file(

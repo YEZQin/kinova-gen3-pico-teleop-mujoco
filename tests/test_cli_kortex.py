@@ -65,7 +65,7 @@ def _install_valid_motion_gate_files(monkeypatch) -> None:
     monkeypatch.setattr(
         main_module,
         "load_passing_preflight_report",
-        lambda *_args: object(),
+        lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setenv("KINOVA_PASSWORD", "test-password")
 
@@ -475,7 +475,7 @@ def test_expanded_envelope_disabled_input_rejects_before_hardware_side_effects(
     monkeypatch.setattr(
         main_module,
         "load_passing_preflight_report",
-        lambda *_args: object(),
+        lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
         "kinova_teleop.main.os.getenv",
@@ -969,7 +969,7 @@ def _install_valid_kortex_fakes(monkeypatch, created: dict) -> None:
     )
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
-    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args, **_kwargs: object())
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
     _install_passing_motion_admission(monkeypatch)
@@ -1217,7 +1217,12 @@ def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_valid
     """The exact large envelope requires the calibrated responsive motion scope."""
 
     monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
-    monkeypatch.setattr(main_module, "load_passing_preflight_report", lambda *_args: object())
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        main_module,
+        "load_passing_preflight_report",
+        lambda *_args, **kwargs: captured.update(kwargs) or object(),
+    )
     args = build_parser().parse_args(
         [
             "--backend", "kortex",
@@ -1239,6 +1244,84 @@ def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_valid
 
     assert _validate_args(args) is None
     assert _validate_kortex_args(args, None, check_password=False) is None
+    assert captured["expected_safety_limits"] == {
+        "workspace_min_m": [0.143218601, -0.670251882, 0.017065614],
+        "workspace_max_m": [1.343218601, 0.529748118, 0.657065614],
+        "max_linear_speed_m_s": 0.02,
+        "translation_scale": 0.8,
+        "translation_only": True,
+        "expanded_translation_envelope": True,
+        "responsive_translation_profile": True,
+        "operator_axis_calibration": True,
+        "recover_stale_input": True,
+        "stale_timeout_s": 0.2,
+        "control_hz": 40.0,
+        "max_angular_speed_deg_s": 2.0,
+        "anchor_translation_axis_m": [0.05, 0.05, 0.05],
+        "anchor_rotation_deg": 5.0,
+    }
+
+
+@pytest.mark.parametrize("mismatched_field", ("workspace_max_m", "max_linear_speed_m_s"))
+def test_motion_contract_mismatch_rejects_before_password_or_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    mismatched_field: str,
+) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    captured: dict[str, object] = {}
+
+    def reject_mismatch(*_args, **kwargs) -> object:
+        captured.update(kwargs)
+        raise ValueError(f"preflight report safety limit mismatch: {mismatched_field}")
+
+    monkeypatch.setattr(main_module, "load_passing_preflight_report", reject_mismatch)
+    monkeypatch.setattr(
+        main_module.os,
+        "getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "create_input",
+        lambda _args: (_ for _ in ()).throw(AssertionError("input constructed")),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--operator-calibration", "operator-axis.json",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.02",
+        ]
+    )
+    workspace_min_index = argv.index("--workspace-min")
+    argv[workspace_min_index + 1 : workspace_min_index + 4] = [
+        "0.143218601", "-0.670251882", "0.017065614"
+    ]
+    workspace_max_index = argv.index("--workspace-max")
+    argv[workspace_max_index + 1 : workspace_max_index + 4] = [
+        "1.343218601", "0.529748118", "0.657065614"
+    ]
+
+    assert main(argv) == 2
+    assert calls == []
+    assert prompts == []
+    assert captured["expected_safety_limits"][mismatched_field]
+    assert f"safety limit mismatch: {mismatched_field}" in capsys.readouterr().err
 
 
 def test_nonresponsive_translation_only_retains_the_default_linear_speed_cap() -> None:
@@ -1769,7 +1852,7 @@ def test_backend_construction_fallback_reports_false_connection_cleanup(
     )
     monkeypatch.setenv("KINOVA_PASSWORD", "top-secret")
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
-    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
     _install_passing_motion_admission(monkeypatch)
 
@@ -1842,7 +1925,7 @@ def test_kortex_errors_close_controller_and_backend(
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
-    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
     _install_passing_motion_admission(monkeypatch)
 
@@ -1904,7 +1987,7 @@ def test_kortex_cleanup_failure_blocks_success_and_closes_remaining_resources(
     monkeypatch.setattr("kinova_teleop.main.TeleopController", FakeController)
     monkeypatch.setenv("KINOVA_PASSWORD", "secret")
     monkeypatch.setattr("kinova_teleop.main.validate_motion_lease", lambda *_args: object())
-    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args: object())
+    monkeypatch.setattr("kinova_teleop.main.load_passing_preflight_report", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("builtins.input", lambda _prompt: "MOVE")
     _install_passing_motion_admission(monkeypatch)
 

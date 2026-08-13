@@ -540,6 +540,30 @@ def _workspace_from_args(args: argparse.Namespace) -> WorkspaceLimits | None:
     return WorkspaceLimits(tuple(args.workspace_min), tuple(args.workspace_max))
 
 
+def _preflight_motion_contract(
+    args: argparse.Namespace,
+    limits: WorkspaceLimits,
+) -> dict[str, object]:
+    """Produce the exact reviewed limits required for this motion launch."""
+
+    return {
+        "workspace_min_m": list(limits.minimum_xyz),
+        "workspace_max_m": list(limits.maximum_xyz),
+        "max_linear_speed_m_s": _resolve_max_linear_speed(args),
+        "translation_scale": resolve_translation_scale(args),
+        "translation_only": args.translation_only,
+        "expanded_translation_envelope": args.expanded_translation_envelope,
+        "responsive_translation_profile": args.responsive_translation_profile,
+        "operator_axis_calibration": args.operator_calibration is not None,
+        "recover_stale_input": args.recover_stale_input,
+        "stale_timeout_s": _resolve_stale_timeout(args),
+        "control_hz": resolve_control_hz(args),
+        "max_angular_speed_deg_s": _resolve_max_angular_speed_deg(args),
+        "anchor_translation_axis_m": list(resolve_anchor_translation_axis(args)),
+        "anchor_rotation_deg": FIRST_HARDWARE_PROFILE.anchor_rotation_deg,
+    }
+
+
 def _validate_kortex_args(
     args: argparse.Namespace,
     password: str | None,
@@ -618,7 +642,10 @@ def _validate_kortex_args(
         if args.preflight_report is None:
             return "--preflight-report is required for Kortex motion"
         try:
-            load_passing_preflight_report(args.preflight_report)
+            load_passing_preflight_report(
+                args.preflight_report,
+                expected_safety_limits=_preflight_motion_contract(args, limits),
+            )
         except (OSError, ValueError) as error:
             return f"invalid preflight report: {error}"
         if args.fixed_trajectory is not None:

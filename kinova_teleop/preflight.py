@@ -527,10 +527,65 @@ def _strict_report_json(path: Path) -> Mapping[str, object]:
     return payload
 
 
+def _matches_motion_limit(
+    field: str,
+    actual: object,
+    expected: object,
+) -> bool:
+    """Compare a report limit to an effective launch limit without coercion."""
+
+    if isinstance(expected, bool):
+        return actual is expected
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return (
+            isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+            and math.isfinite(float(actual))
+            and float(actual) == float(expected)
+        )
+    if isinstance(expected, (tuple, list)):
+        if (
+            field == "anchor_translation_axis_m"
+            and isinstance(actual, (int, float))
+            and not isinstance(actual, bool)
+        ):
+            return all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and float(actual) == float(value)
+                for value in expected
+            )
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(expected)
+            and all(
+                _matches_motion_limit(field, observed, required)
+                for observed, required in zip(actual, expected, strict=True)
+            )
+        )
+    return actual == expected
+
+
+def _validate_expected_safety_limits(
+    limits: Mapping[str, object],
+    expected_safety_limits: Mapping[str, object],
+) -> None:
+    for field, expected in expected_safety_limits.items():
+        if field not in limits:
+            raise ValueError(
+                "preflight report safety_limits missing required motion field: "
+                f"{field}"
+            )
+        if not _matches_motion_limit(field, limits[field], expected):
+            raise ValueError(f"preflight report safety limit mismatch: {field}")
+
+
 def load_passing_preflight_report(
     path: str | Path,
     *,
     expected_device: Literal["gen3"] = "gen3",
+    expected_safety_limits: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     """Read-only strict admission gate for a supervisor-confirmed report.
 
@@ -597,6 +652,8 @@ def load_passing_preflight_report(
         raise ValueError("preflight report workspace limits are missing")
     if not any("speed" in str(key).lower() for key in limits):
         raise ValueError("preflight report speed limits are missing")
+    if expected_safety_limits is not None:
+        _validate_expected_safety_limits(limits, expected_safety_limits)
 
     checks = payload["checks"]
     if not isinstance(checks, list) or not checks:
