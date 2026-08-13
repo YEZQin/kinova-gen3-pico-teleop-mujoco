@@ -207,6 +207,87 @@ def test_stale_recovery_reanchors_before_any_new_motion_command() -> None:
     assert moved.active
 
 
+def test_confirmed_boundary_stop_reclutches_before_reanchoring() -> None:
+    from kinova_teleop.backend import BackendResult
+
+    class BoundaryBackend(RecordingBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.current_pose_calls = 0
+
+        def current_pose(self):
+            self.current_pose_calls += 1
+            return super().current_pose()
+
+        def command_pose(self, target):
+            self.commands.append(target)
+            if len(self.commands) == 1:
+                return BackendResult(
+                    False,
+                    False,
+                    0.0,
+                    0.0,
+                    "workspace boundary reached",
+                    reanchor_required=True,
+                )
+            return BackendResult(True, True, 0.0, 0.0, "")
+
+    backend = BoundaryBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False, recovery_release_samples=3),
+        ScriptedInput(
+            [
+                sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+                sample([0.0, 0.0, 0.0], 0.0, 2, 1.01),
+                sample([0.0, 0.0, 0.0], 0.0, 3, 1.02),
+                sample([0.0, 0.0, 0.0], 1.0, 4, 1.03),
+                sample([0.01, 0.0, 0.0], 1.0, 5, 1.04),
+                sample([0.02, 0.0, 0.0], 1.0, 6, 1.05),
+                sample([1.0, 1.0, 1.0], 0.0, 7, 1.06),
+                sample([1.0, 1.0, 1.0], 0.0, 8, 1.07),
+                sample([1.0, 1.0, 1.0], 0.0, 9, 1.08),
+                sample([1.0, 1.0, 1.0], 1.0, 10, 1.09),
+                sample([1.01, 1.0, 1.0], 1.0, 11, 1.10),
+            ]
+        ),
+        backend,
+    )
+
+    for _ in range(4):
+        controller.step_once()
+    rejected = controller.step_once()
+    pressed = controller.step_once()
+    for _ in range(3):
+        controller.step_once()
+    backend.pose = Pose(
+        np.array([0.4, -0.2, 0.7]),
+        np.array([1.0, 0.0, 0.0, 0.0]),
+    )
+    activation = controller.step_once()
+    assert len(backend.commands) == 1
+    moved = controller.step_once()
+
+    assert not rejected.active
+    assert rejected.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert rejected.reason == "workspace boundary reached"
+    assert not pressed.active
+    assert len(backend.commands) == 2
+    assert backend.holds == 0
+    assert backend.begin_calls == 2
+    assert backend.current_pose_calls == 3
+    assert activation.active
+    assert moved.active
+    np.testing.assert_allclose(
+        backend.commands[-1].position[[0, 2]],
+        backend.pose.position[[0, 2]],
+    )
+    assert (
+        backend.pose.position[1] - 0.005
+        < backend.commands[-1].position[1]
+        < backend.pose.position[1]
+    )
+
+
 def test_normal_release_remains_recoverable_in_hardware_policy() -> None:
     backend = RecordingBackend()
     source = ScriptedInput(

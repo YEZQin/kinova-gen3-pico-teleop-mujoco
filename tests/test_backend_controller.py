@@ -122,6 +122,36 @@ def test_controller_orchestrates_backend_clutch_lifecycle() -> None:
     assert source.close_calls == 1
 
 
+def test_unconfirmed_boundary_stop_error_remains_terminal() -> None:
+    from kinova_teleop.kortex_backend import KortexSafetyError
+
+    class StopFailureBackend(RecordingBackend):
+        def command_pose(self, target: Pose) -> BackendResult:
+            self.events.append("command_pose")
+            self.targets.append(target)
+            raise KortexSafetyError("Stop attempted but unconfirmed")
+
+    backend = StopFailureBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False),
+        ScriptedInput(
+            [
+                sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+                sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+                sample([0.01, 0.0, 0.0], 1.0, 3, 1.02),
+            ]
+        ),
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    with pytest.raises(KortexSafetyError, match="Stop attempted but unconfirmed"):
+        controller.step_once()
+
+    assert backend.events == ["step", "begin_control", "step", "command_pose"]
+
+
 def test_controller_close_orders_backend_before_source_and_is_idempotent() -> None:
     """Closing XR before the motion backend must break this test."""
 

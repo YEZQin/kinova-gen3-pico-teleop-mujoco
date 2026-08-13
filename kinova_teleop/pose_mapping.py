@@ -333,6 +333,17 @@ class RelativePoseMapper:
             input_fault=input_fault,
         )
 
+    def require_release(self) -> MappingOutput:
+        """Revoke the current clutch and require fresh released samples.
+
+        A backend calls for this only after it has confirmed its own Stop
+        request.  The mapper retains its last finite target but drops all
+        input and end-effector references, so the next activation is a fresh
+        anchor-only cycle after release stability is re-established.
+        """
+
+        return self._deactivate(stale=False, input_fault=InputFault.NONE)
+
     def update(
         self,
         sample: Any,

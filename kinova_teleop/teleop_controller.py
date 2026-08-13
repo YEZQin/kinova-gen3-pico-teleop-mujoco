@@ -162,6 +162,11 @@ class TeleopController:
             result = BackendResult(False, False, 0.0, 0.0, "")
         elif mapping.active:
             result = self.backend.command_pose(mapping.target)
+            if result.reanchor_required:
+                # Kortex has already confirmed Stop for this rejection.  Do
+                # not send a second Stop; require a fresh release sequence
+                # and let the next Grip activation read a new feedback pose.
+                mapping = self.mapper.require_release()
         else:
             if mapping.deactivated:
                 self._emit("input_release", "STOPPING", {})

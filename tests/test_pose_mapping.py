@@ -518,6 +518,71 @@ def test_waiting_for_release_requires_configured_distinct_released_samples() -> 
     assert ready.clutch_state is ClutchState.READY
 
 
+def test_confirmed_boundary_stop_requires_release_before_reanchoring() -> None:
+    mapper = RelativePoseMapper(unfiltered_config(release_stability_samples=3))
+    original_anchor = identity_pose((0.1, -0.2, 0.3))
+    mapper.reset(original_anchor)
+
+    for timestamp in (1, 2, 3):
+        mapper.update(
+            sample([0, 0, 0], grip=0.0, stamp=timestamp, received=float(timestamp)),
+            original_anchor,
+            now=float(timestamp),
+        )
+    mapper.update(
+        sample([0, 0, 0], grip=1.0, stamp=4, received=4.0),
+        original_anchor,
+        now=4.0,
+    )
+
+    output = mapper.require_release()
+
+    assert output.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert output.active is False
+    assert output.deactivated is True
+
+    pressed = mapper.update(
+        sample([9, 9, 9], grip=1.0, stamp=5, received=5.0),
+        original_anchor,
+        now=5.0,
+    )
+    assert pressed.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert not pressed.active
+
+    for timestamp in (6, 7):
+        waiting = mapper.update(
+            sample([9, 9, 9], grip=0.0, stamp=timestamp, received=float(timestamp)),
+            original_anchor,
+            now=float(timestamp),
+        )
+        assert waiting.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    ready = mapper.update(
+        sample([9, 9, 9], grip=0.0, stamp=8, received=8.0),
+        original_anchor,
+        now=8.0,
+    )
+    assert ready.clutch_state is ClutchState.READY
+
+    reanchored_pose = identity_pose((0.4, 0.5, 0.6))
+    activation = mapper.update(
+        sample([5, 5, 5], grip=1.0, stamp=9, received=9.0),
+        reanchored_pose,
+        now=9.0,
+    )
+    moved = mapper.update(
+        sample([5.01, 5, 5], grip=1.0, stamp=10, received=10.0),
+        reanchored_pose,
+        now=10.0,
+    )
+
+    assert activation.activated
+    np.testing.assert_allclose(activation.target.position, reanchored_pose.position)
+    np.testing.assert_allclose(
+        moved.target.position,
+        reanchored_pose.position + np.array([0.0, -0.01, 0.0]),
+    )
+
+
 def test_release_holds_last_target() -> None:
     mapper = RelativePoseMapper(unfiltered_config())
     ee = identity_pose()
