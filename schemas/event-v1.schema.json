@@ -28,6 +28,7 @@
         "input_stale",
         "command_rejected",
         "workspace_rejected",
+        "anchor_rejected",
         "host_stop_requested",
         "stop_rpc_returned",
         "controller_cancel_confirmed",

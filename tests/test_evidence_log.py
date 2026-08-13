@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
+from jsonschema import Draft202012Validator
 import pytest
 
 from kinova_teleop.evidence_log import EvidenceLogger
@@ -43,6 +45,12 @@ def test_evidence_logger_writes_anchor_rejection_reason(tmp_path):
         "reason": "target outside anchor translation envelope"
     }
     assert json.loads(path.read_text(encoding="utf-8")) == record
+    schema = json.loads(
+        (Path(__file__).parents[1] / "schemas" / "event-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    Draft202012Validator(schema).validate(record)
 
 
 def test_evidence_logger_monotonic_order_is_strict(tmp_path):
