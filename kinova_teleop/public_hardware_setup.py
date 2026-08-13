@@ -10,9 +10,12 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import secrets
+import shutil
 import stat
 import sys
+import tempfile
 import uuid
 from typing import Any
 
@@ -24,12 +27,14 @@ from .hardware_profile import (
 )
 from .main import _current_clean_code_revision
 from .motion_lease import create_motion_lease
+from .motion_lease import validate_motion_lease
 from .operator_calibration import load_operator_axis_calibration
 from .preflight import (
     _GEN3_PHYSICAL_KEYS,
     PreflightContext,
     build_reviewed_gen3_preflight_report,
     load_passing_preflight_report,
+    decode_firmware_version,
     run_kortex_readonly_preflight,
 )
 from .workspace import WorkspaceLimits
@@ -42,10 +47,24 @@ _T0_FIELDS = frozenset({
 })
 _REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 _MAX_T0_AGE = timedelta(hours=24)
+_T0_SOFTWARE_CHECKS = {
+    "code_revision": "present", "dirty_worktree": "clean worktree",
+    "runtime": "present", "driver": "present", "firmware": "present",
+    "transport": "present", "calibration": "calibration hashes present",
+    "safety_limits": "workspace and speed limits present",
+    "product_model": "MODEL_ID_L53", "degree_of_freedom": "7 DoF",
+    "firmware_version": "2.8.0-5", "operating_mode": "RUN_MODE",
+    "servoing_mode": "SINGLE_LEVEL_SERVOING", "feedback_pose": "finite tool pose",
+}
+_USER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return _now_utc().isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _strict_json(path: Path) -> dict[str, Any]:
@@ -84,11 +103,34 @@ def _finite_vector(value: object, name: str) -> tuple[float, float, float]:
     return tuple(float(item) for item in value)
 
 
-def _validate_t0(payload: Mapping[str, object], expected_revision: str) -> tuple[str, tuple[float, float, float]]:
+def _t0_observation_digest(payload: Mapping[str, object]) -> str:
+    fields = (
+        "device", "timestamp_utc", "code_revision", "dirty_worktree", "runtime",
+        "driver", "firmware", "transport", "safety_limits", "checks",
+        "physical_checks", "passed", "reference_pose_m",
+    )
+    encoded = json.dumps(
+        {field: payload[field] for field in fields},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_t0(
+    payload: Mapping[str, object],
+    expected_revision: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[str, str, tuple[float, float, float]]:
     if set(payload) != _T0_FIELDS or payload.get("schema_version") != "1.0" or payload.get("device") != "gen3":
         raise ValueError("T0 schema or device is invalid")
     if payload.get("dirty_worktree") is not False or payload.get("code_revision") != expected_revision:
         raise ValueError("T0 is not from the current clean code revision")
+    if payload.get("passed") is not False:
+        raise ValueError("T0 must remain a read-only non-passing observation")
+    physical = payload.get("physical_checks")
+    if not isinstance(physical, Mapping) or set(physical) != set(_GEN3_PHYSICAL_KEYS) or any(value is not False for value in physical.values()):
+        raise ValueError("T0 physical checks must all remain explicitly false")
     timestamp = payload.get("timestamp_utc")
     if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
         raise ValueError("T0 timestamp is invalid")
@@ -96,31 +138,56 @@ def _validate_t0(payload: Mapping[str, object], expected_revision: str) -> tuple
         observed = datetime.fromisoformat(timestamp[:-1] + "+00:00")
     except ValueError as error:
         raise ValueError("T0 timestamp is invalid") from error
-    age = datetime.now(timezone.utc) - observed
+    age = (now or _now_utc()) - observed
     if age > _MAX_T0_AGE or age < timedelta(minutes=-5):
         raise ValueError("T0 is stale or has a future timestamp")
     transport = payload.get("transport")
-    if not isinstance(transport, Mapping) or transport.get("kind") != "tcp" or transport.get("port") != 10000:
+    if not isinstance(transport, Mapping) or set(transport) != {"kind", "host", "port", "robot_user"} or transport.get("kind") != "tcp" or transport.get("port") != 10000:
         raise ValueError("T0 transport is invalid")
     robot_ip = transport.get("host")
     if not isinstance(robot_ip, str):
         raise ValueError("T0 robot IP is invalid")
     validate_private_robot_ipv4(robot_ip)
+    robot_user = transport.get("robot_user")
+    if not isinstance(robot_user, str) or _USER.fullmatch(robot_user) is None:
+        raise ValueError("T0 robot user is invalid")
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, Mapping) or set(runtime) != {"python", "kortex_api", "protobuf"} or not isinstance(runtime.get("python"), str) or not runtime["python"].startswith("3.11.") or runtime.get("kortex_api") != "2.8.0.post5" or runtime.get("protobuf") != "3.20.0":
+        raise ValueError("T0 runtime evidence is invalid")
+    driver = payload.get("driver")
+    if not isinstance(driver, Mapping) or dict(driver) != {"name": "kortex-api", "version": "2.8.0.post5"}:
+        raise ValueError("T0 driver evidence is invalid")
+    if payload.get("firmware") != {"version": "2.8.0-5"}:
+        raise ValueError("T0 firmware evidence is invalid")
+    if payload.get("safety_limits") != {"workspace": "read-only-t0", "max_linear_speed": 0.02}:
+        raise ValueError("T0 safety evidence is invalid")
+    calibration = payload.get("calibration")
+    if not isinstance(calibration, list) or len(calibration) != 1 or not isinstance(calibration[0], Mapping) or set(calibration[0]) != {"name", "sha256"} or calibration[0].get("name") != "t0-observation" or not isinstance(calibration[0].get("sha256"), str) or calibration[0].get("sha256") != _t0_observation_digest(payload):
+        raise ValueError("T0 observation hash is invalid or copied")
     reference = _finite_vector(payload.get("reference_pose_m"), "T0 feedback pose")
     checks = payload.get("checks")
     if not isinstance(checks, list):
         raise ValueError("T0 checks are invalid")
-    passed = {item.get("name"): item for item in checks if isinstance(item, Mapping) and item.get("status") == "pass"}
-    expected = {
-        "arm_state": "SERVOING_READY", "product_model": "MODEL_ID_L53",
-        "degree_of_freedom": "7 DoF", "firmware_version": "2.8.0-5",
-        "operating_mode": "RUN_MODE", "servoing_mode": "SINGLE_LEVEL_SERVOING",
-        "feedback_pose": "finite tool pose",
-    }
-    for name, detail in expected.items():
-        if not isinstance(passed.get(name), Mapping) or passed[name].get("detail") != detail:
+    expected_names = set(_T0_SOFTWARE_CHECKS) | {"arm_state"} | {f"physical.{name}" for name in _GEN3_PHYSICAL_KEYS}
+    if len(checks) != len(expected_names):
+        raise ValueError("T0 checks have missing or extra evidence")
+    by_name: dict[str, Mapping[str, object]] = {}
+    for item in checks:
+        if not isinstance(item, Mapping) or set(item) != {"name", "status", "detail"} or not isinstance(item.get("name"), str) or item["name"] in by_name:
+            raise ValueError("T0 checks are invalid")
+        by_name[item["name"]] = item
+    if set(by_name) != expected_names:
+        raise ValueError("T0 checks have missing or extra evidence")
+    for name, detail in _T0_SOFTWARE_CHECKS.items():
+        if by_name[name].get("status") != "pass" or by_name[name].get("detail") != detail:
             raise ValueError(f"T0 is missing required {name} evidence")
-    return robot_ip, reference
+    if by_name["arm_state"].get("status") != "pass" or by_name["arm_state"].get("detail") not in {"SERVOING_READY", "SERVOING_MANUALLY_CONTROLLED"}:
+        raise ValueError("T0 arm state is not observed manual-control-ready")
+    for name in _GEN3_PHYSICAL_KEYS:
+        item = by_name[f"physical.{name}"]
+        if item.get("status") != "fail" or item.get("detail") != "not confirmed":
+            raise ValueError("T0 physical check evidence is invalid")
+    return robot_ip, robot_user, reference
 
 
 def _validate_output_directory(path: Path) -> Path:
@@ -193,7 +260,7 @@ def _run_package(args: argparse.Namespace) -> int:
     output = _validate_output_directory(args.output_dir)
     t0 = _strict_json(args.t0)
     revision = _current_clean_code_revision()
-    robot_ip, reference = _validate_t0(t0, revision)
+    robot_ip, robot_user, reference = _validate_t0(t0, revision, now=_now_utc())
     if Path(args.calibration).parent.resolve() != output:
         raise ValueError("calibration must be a regular file directly under output local-config")
     calibration = load_operator_axis_calibration(args.calibration)
@@ -212,7 +279,7 @@ def _run_package(args: argparse.Namespace) -> int:
     midpoint = [float((low + high) / 2.0) for low, high in zip(minimum, maximum, strict=True)]
     profile = {
         "schema_version": "1.0", "device": "gen3", "robot_ip": robot_ip,
-        "robot_user": "admin", "motion_lease": "motion-lease.json",
+        "robot_user": robot_user, "motion_lease": "motion-lease.json",
         "preflight_report": "reviewed-preflight.json", "calibration": Path(args.calibration).name,
         "workspace_min_m": list(minimum), "workspace_max_m": list(maximum),
         "max_linear_speed_m_s": args.linear_speed, "run_id": run_id, "lease_owner": args.owner,
@@ -224,14 +291,29 @@ def _run_package(args: argparse.Namespace) -> int:
     for candidate in (lease_path, report_path, profile_path):
         if os.path.lexists(candidate):
             raise ValueError(f"refusing to overwrite output artifact: {candidate.name}")
-    _write_new_json(lease_path, lease.to_mapping())
+    transaction = Path(tempfile.mkdtemp(prefix=".gen3-package-", dir=output))
+    created: list[Path] = []
     try:
-        _write_new_json(report_path, report.to_mapping())
-        load_passing_preflight_report(report_path, expected_safety_limits=contract, expected_code_revision=revision, expected_calibration_sha256=calibration.source_sha256)
-        _write_new_json(profile_path, profile)
+        staged_lease, staged_report, staged_profile = (transaction / path.name for path in (lease_path, report_path, profile_path))
+        _write_new_json(staged_lease, lease.to_mapping())
+        _write_new_json(staged_report, report.to_mapping())
+        _write_new_json(staged_profile, profile)
+        validate_motion_lease(staged_lease, run_id, args.owner)
+        load_passing_preflight_report(staged_report, expected_safety_limits=contract, expected_code_revision=revision, expected_calibration_sha256=calibration.source_sha256)
+        if _strict_json(staged_profile) != profile:
+            raise ValueError("generated profile self-validation failed")
+        for staged, target in ((staged_lease, lease_path), (staged_report, report_path), (staged_profile, profile_path)):
+            os.link(staged, target)
+            created.append(target)
     except Exception:
-        # Generated artifacts are intentionally never overwritten or removed.
+        for target in reversed(created):
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
         raise
+    finally:
+        shutil.rmtree(transaction, ignore_errors=True)
     print(f"generated guarded Gen3 package in {output}")
     return 0
 
@@ -240,6 +322,8 @@ def _run_t0(args: argparse.Namespace) -> int:
     """Execute only the existing read-only Kortex inspection boundary."""
 
     validate_private_robot_ipv4(args.robot_ip)
+    if _USER.fullmatch(args.robot_user) is None:
+        raise ValueError("robot user must be a non-empty path-safe identifier")
     output = Path(args.output)
     _validate_output_directory(output.parent)
     if os.path.lexists(output):
@@ -257,15 +341,18 @@ def _run_t0(args: argparse.Namespace) -> int:
         context = PreflightContext(
             code_revision=_current_clean_code_revision(),
             dirty_worktree=False,
-            runtime={"python": versions.python},
+            runtime={"python": versions.python, "kortex_api": versions.kortex_api, "protobuf": versions.protobuf},
             driver={"name": "kortex-api", "version": versions.kortex_api},
-            firmware={"expected": "2.8.0-5"},
-            transport={"kind": "tcp", "host": args.robot_ip, "port": 10000},
-            calibration=({"name": "unbound-at-t0", "sha256": _driver_sha256()},),
-            safety_limits={"workspace": "t0-read-only", "max_linear_speed": 0.02},
+            firmware={"version": "2.8.0-5"},
+            transport={"kind": "tcp", "host": args.robot_ip, "port": 10000, "robot_user": args.robot_user},
+            calibration=({"name": "t0-observation", "sha256": "0" * 64},),
+            safety_limits={"workspace": "read-only-t0", "max_linear_speed": 0.02},
             physical_checks={name: False for name in _GEN3_PHYSICAL_KEYS},
         )
         report = run_kortex_readonly_preflight(connection, context)
+        firmware = connection.device_config.GetFirmwareVersion(options=connection.readonly_rpc_options())
+        raw_firmware = getattr(firmware, "firmware_version", None)
+        observed_firmware = decode_firmware_version(raw_firmware) if isinstance(raw_firmware, int) else "not-observed"
         feedback = connection.base_cyclic.RefreshFeedback(options=connection.readonly_rpc_options())
         base = getattr(feedback, "base", feedback)
         reference = [float(base.tool_pose_x), float(base.tool_pose_y), float(base.tool_pose_z)]
@@ -276,7 +363,13 @@ def _run_t0(args: argparse.Namespace) -> int:
     payload = report.to_mapping()
     payload["code_revision"] = _current_clean_code_revision()
     payload["dirty_worktree"] = False
+    payload["runtime"] = {"python": versions.python, "kortex_api": versions.kortex_api, "protobuf": versions.protobuf}
+    payload["driver"] = {"name": "kortex-api", "version": versions.kortex_api}
+    payload["firmware"] = {"version": observed_firmware}
+    payload["transport"] = {"kind": "tcp", "host": args.robot_ip, "port": 10000, "robot_user": args.robot_user}
+    payload["safety_limits"] = {"workspace": "read-only-t0", "max_linear_speed": 0.02}
     payload["reference_pose_m"] = reference
+    payload["calibration"] = [{"name": "t0-observation", "sha256": _t0_observation_digest(payload)}]
     _write_new_json(output, payload)
     print(f"read-only T0 saved: {output}")
     return 0

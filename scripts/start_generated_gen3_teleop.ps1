@@ -28,7 +28,7 @@ $profilePath = Resolve-RequiredFile $Profile 'Profile'
 $profileRoot = Split-Path -Parent $profilePath
 try { $configuration = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json } catch { throw 'Profile must be strict JSON' }
 $expected = @('schema_version','device','robot_ip','robot_user','motion_lease','preflight_report','calibration','workspace_min_m','workspace_max_m','max_linear_speed_m_s','run_id','lease_owner','code_revision','calibration_sha256','driver_sha256','reference_pose_m','workspace_midpoint_m')
-if (@($configuration.PSObject.Properties.Name | Sort-Object) -join ',' -cne @($expected | Sort-Object) -join ',' -or $configuration.schema_version -cne '1.0' -or $configuration.device -cne 'gen3') { throw 'Profile schema is invalid' }
+if (@($configuration.PSObject.Properties.Name | Sort-Object) -join ',' -cne @($expected | Sort-Object) -join ',' -or $configuration.schema_version -cne '1.0' -or $configuration.device -cne 'gen3' -or $configuration.robot_user -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw 'Profile schema is invalid' }
 $lease = Resolve-ProfileFile $profileRoot $configuration.motion_lease 'MotionLease'
 $reviewed = Resolve-ProfileFile $profileRoot $configuration.preflight_report 'PreflightReport'
 $calibration = Resolve-ProfileFile $profileRoot $configuration.calibration 'Calibration'
@@ -50,13 +50,14 @@ if ($LASTEXITCODE -ne 0) { throw "Offline motion package validation failed with 
 if ($LASTEXITCODE -ne 0) { throw "PICO input gate failed with exit code $LASTEXITCODE" }
 if ((Read-Host -Prompt 'Type HARDWARE-READY to continue') -cne 'HARDWARE-READY') { throw 'Current physical checklist confirmation was not accepted' }
 $evidence = Join-Path $profileRoot ("evidence-" + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [Guid]::NewGuid().ToString('N') + '.jsonl')
+if (Test-Path -LiteralPath $evidence) { throw 'Evidence path must be absent before motion' }
 $securePassword = Read-Host -AsSecureString -Prompt 'Kinova password for this child process only'
 $passwordBstr = [IntPtr]::Zero
 try {
     $passwordBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
     $env:KINOVA_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordBstr)
     & $python @($motionArgs + @('--evidence-jsonl',$evidence))
-    exit $LASTEXITCODE
+    if ($LASTEXITCODE -ne 0) { throw "Generated hardware motion child failed with exit code $LASTEXITCODE" }
 } finally {
     Remove-Item Env:KINOVA_PASSWORD -ErrorAction SilentlyContinue
     if ($passwordBstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordBstr) }

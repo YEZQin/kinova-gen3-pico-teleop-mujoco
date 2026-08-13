@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -54,7 +56,18 @@ def _calibration_payload() -> dict[str, object]:
     }
 
 
-def _t0_payload() -> dict[str, object]:
+def _t0_observation_digest(payload: dict[str, object]) -> str:
+    fields = (
+        "device", "timestamp_utc", "code_revision", "dirty_worktree", "runtime",
+        "driver", "firmware", "transport", "safety_limits", "checks",
+        "physical_checks", "passed", "reference_pose_m",
+    )
+    evidence = {field: payload[field] for field in fields}
+    encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _t0_payload(*, arm_detail: str = "SERVOING_READY", robot_user: str = "operator") -> dict[str, object]:
     checks = [
         {"name": name, "status": "pass", "detail": detail}
         for name, detail in (
@@ -66,7 +79,7 @@ def _t0_payload() -> dict[str, object]:
             ("transport", "present"),
             ("calibration", "calibration hashes present"),
             ("safety_limits", "workspace and speed limits present"),
-            ("arm_state", "SERVOING_READY"),
+            ("arm_state", arm_detail),
             ("feedback_pose", "finite tool pose"),
             ("product_model", "MODEL_ID_L53"),
             ("degree_of_freedom", "7 DoF"),
@@ -75,23 +88,29 @@ def _t0_payload() -> dict[str, object]:
             ("servoing_mode", "SINGLE_LEVEL_SERVOING"),
         )
     ]
-    return {
+    checks.extend(
+        {"name": f"physical.{name}", "status": "fail", "detail": "not confirmed"}
+        for name in PHYSICAL_FLAGS
+    )
+    payload: dict[str, object] = {
         "schema_version": "1.0",
         "device": "gen3",
         "timestamp_utc": "2026-08-13T00:00:00Z",
         "code_revision": "a" * 40,
         "dirty_worktree": False,
-        "runtime": {"python": "3.11.9"},
+        "runtime": {"python": "3.11.9", "kortex_api": "2.8.0.post5", "protobuf": "3.20.0"},
         "driver": {"name": "kortex-api", "version": "2.8.0.post5"},
         "firmware": {"version": "2.8.0-5"},
-        "transport": {"kind": "tcp", "host": "192.168.1.10", "port": 10000},
-        "calibration": [{"name": "t0-only", "sha256": "b" * 64}],
-        "safety_limits": {"workspace": "T0 only", "max_linear_speed": 0.02},
+        "transport": {"kind": "tcp", "host": "192.168.1.10", "port": 10000, "robot_user": robot_user},
+        "calibration": [{"name": "t0-observation", "sha256": ""}],
+        "safety_limits": {"workspace": "read-only-t0", "max_linear_speed": 0.02},
         "checks": checks,
         "physical_checks": {name: False for name in PHYSICAL_FLAGS},
         "passed": False,
         "reference_pose_m": [0.4, -0.1, 0.3],
     }
+    payload["calibration"] = [{"name": "t0-observation", "sha256": _t0_observation_digest(payload)}]
+    return payload
 
 
 def _package_argv(t0: Path, calibration: Path, output_dir: Path) -> list[str]:
@@ -127,6 +146,7 @@ def test_package_writes_bound_self_validating_artifacts_without_external_access(
     t0.write_text(json.dumps(_t0_payload()), encoding="utf-8")
     calibration.write_text(json.dumps(_calibration_payload()), encoding="utf-8")
     monkeypatch.setattr(setup, "_current_clean_code_revision", lambda: "a" * 40)
+    monkeypatch.setattr(setup, "_now_utc", lambda: datetime(2026, 8, 13, tzinfo=timezone.utc))
     monkeypatch.setattr(setup.secrets, "token_hex", lambda _size: "c" * 32)
     monkeypatch.setattr(setup.uuid, "uuid4", lambda: type("Id", (), {"hex": "d" * 32})())
 
@@ -136,6 +156,7 @@ def test_package_writes_bound_self_validating_artifacts_without_external_access(
     report = json.loads((output / "reviewed-preflight.json").read_text(encoding="utf-8"))
     assert profile["workspace_midpoint_m"] == [0.5, 0.0, 0.325]
     assert profile["reference_pose_m"] == [0.4, -0.1, 0.3]
+    assert profile["robot_user"] == "operator"
     assert profile["calibration_sha256"] != "b" * 64
     assert report["passed"] is True
     assert set(profile) == {
@@ -167,6 +188,7 @@ def test_package_rejects_untrusted_t0_before_writing(tmp_path: Path, monkeypatch
     calibration = output / "operator-axes.json"
     calibration.write_text(json.dumps(_calibration_payload()), encoding="utf-8")
     monkeypatch.setattr(setup, "_current_clean_code_revision", lambda: "a" * 40)
+    monkeypatch.setattr(setup, "_now_utc", lambda: datetime(2026, 8, 13, tzinfo=timezone.utc))
 
     assert main(_package_argv(t0, calibration, output)) == 2
     assert not (output / "teleop-profile.json").exists()
@@ -187,6 +209,7 @@ def test_package_rejects_unsafe_bounds_or_speed(tmp_path: Path, monkeypatch: pyt
     t0.write_text(json.dumps(_t0_payload()), encoding="utf-8")
     calibration.write_text(json.dumps(_calibration_payload()), encoding="utf-8")
     monkeypatch.setattr(setup, "_current_clean_code_revision", lambda: "a" * 40)
+    monkeypatch.setattr(setup, "_now_utc", lambda: datetime(2026, 8, 13, tzinfo=timezone.utc))
     args = _package_argv(t0, calibration, output)
     start = args.index("--workspace-min") + 1
     args[start:start + 3] = [str(value) for value in minimum]
@@ -195,3 +218,94 @@ def test_package_rejects_unsafe_bounds_or_speed(tmp_path: Path, monkeypatch: pyt
     args[args.index("--linear-speed") + 1] = str(speed)
 
     assert main(args) == 2
+
+
+@pytest.mark.parametrize("arm_detail", ("SERVOING_READY", "SERVOING_MANUALLY_CONTROLLED"))
+def test_t0_accepts_only_observed_manual_control_or_ready_state(arm_detail: str) -> None:
+    """Changing the admitted state set would allow an unobserved servoing mode."""
+    import kinova_teleop.public_hardware_setup as setup
+
+    robot_ip, robot_user, reference = setup._validate_t0(
+        _t0_payload(arm_detail=arm_detail),
+        "a" * 40,
+        now=datetime(2026, 8, 13, tzinfo=timezone.utc),
+    )
+
+    assert (robot_ip, robot_user, reference) == ("192.168.1.10", "operator", (0.4, -0.1, 0.3))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        (("passed",), True),
+        (("physical_checks", "workspace_clear"), True),
+        (("runtime", "protobuf"), "unknown"),
+        (("firmware", "version"), "expected-2.8.0-5"),
+        (("transport", "robot_user"), ""),
+        (("calibration",), [{"name": "t0-observation", "sha256": "a" * 64}]),
+        (("checks", 8, "detail"), "ARMSTATE_SERVOING_AUTONOMOUS"),
+        (("checks", 8, "status"), "unknown"),
+    ],
+)
+def test_t0_rejects_non_observational_or_copied_evidence(mutation, value) -> None:
+    """Relaxing exact T0 evidence would turn a read-only observation into authorization."""
+    import kinova_teleop.public_hardware_setup as setup
+
+    payload = _t0_payload()
+    target: object = payload
+    for key in mutation[:-1]:
+        target = target[key]  # type: ignore[index]
+    target[mutation[-1]] = value  # type: ignore[index]
+    if mutation[0] not in {"calibration", "checks"}:
+        payload["calibration"] = [{"name": "t0-observation", "sha256": _t0_observation_digest(payload)}]
+
+    with pytest.raises(ValueError):
+        setup._validate_t0(payload, "a" * 40, now=datetime(2026, 8, 13, tzinfo=timezone.utc))
+
+
+def test_package_publish_failure_leaves_no_final_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Publishing one artifact before another must not leave a partially valid package."""
+    import kinova_teleop.public_hardware_setup as setup
+
+    output = tmp_path / "local-config"
+    output.mkdir()
+    t0, calibration = output / "t0.json", output / "operator-axes.json"
+    t0.write_text(json.dumps(_t0_payload()), encoding="utf-8")
+    calibration.write_text(json.dumps(_calibration_payload()), encoding="utf-8")
+    monkeypatch.setattr(setup, "_current_clean_code_revision", lambda: "a" * 40)
+    monkeypatch.setattr(setup, "_now_utc", lambda: datetime(2026, 8, 13, tzinfo=timezone.utc))
+    real_link = setup.os.link
+    calls = 0
+
+    def fail_second_publish(source, destination, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated publish failure")
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(setup.os, "link", fail_second_publish)
+
+    assert main(_package_argv(t0, calibration, output)) == 2
+    assert [path.name for path in output.iterdir()] == ["operator-axes.json", "t0.json"]
+
+
+def test_package_rejects_missing_confirmations_and_existing_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removing either gate would overwrite a reviewed artifact or bypass onsite checks."""
+    import kinova_teleop.public_hardware_setup as setup
+
+    output = tmp_path / "local-config"
+    output.mkdir()
+    t0, calibration = output / "t0.json", output / "operator-axes.json"
+    t0.write_text(json.dumps(_t0_payload()), encoding="utf-8")
+    calibration.write_text(json.dumps(_calibration_payload()), encoding="utf-8")
+    monkeypatch.setattr(setup, "_current_clean_code_revision", lambda: "a" * 40)
+    monkeypatch.setattr(setup, "_now_utc", lambda: datetime(2026, 8, 13, tzinfo=timezone.utc))
+    missing = _package_argv(t0, calibration, output)
+    missing.remove("--load-tcp-checked")
+    assert main(missing) == 2
+    existing = output / "teleop-profile.json"
+    existing.write_text('{"user":"artifact"}\n', encoding="utf-8")
+    before = existing.read_bytes()
+    assert main(_package_argv(t0, calibration, output)) == 2
+    assert existing.read_bytes() == before

@@ -291,8 +291,11 @@ def run_kortex_readonly_preflight(
         state_response = connection.base.GetArmState(options=options)
         active_state = getattr(state_response, "active_state", None)
         ready_state = getattr(connection.base_pb2, "ARMSTATE_SERVOING_READY", None)
+        manual_state = getattr(connection.base_pb2, "ARMSTATE_SERVOING_MANUALLY_CONTROLLED", None)
         if active_state == ready_state or active_state == "ARMSTATE_SERVOING_READY":
             checks.append(PreflightCheck("arm_state", "pass", "SERVOING_READY"))
+        elif active_state == manual_state or active_state == "ARMSTATE_SERVOING_MANUALLY_CONTROLLED":
+            checks.append(PreflightCheck("arm_state", "pass", "SERVOING_MANUALLY_CONTROLLED"))
         elif ready_state is None:
             checks.append(PreflightCheck("arm_state", "unknown", "ready state constant is missing"))
         else:
