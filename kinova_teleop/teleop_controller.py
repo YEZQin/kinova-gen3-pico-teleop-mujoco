@@ -27,6 +27,9 @@ class TeleopConfig:
     stale_timeout: float = 0.2
     fatal_input_faults: bool = False
     orientation_enabled: bool = True
+    invert_translation: bool = False
+    recover_stale_input: bool = False
+    recovery_release_samples: int = 1
 
 
 class TeleopSafetyError(RuntimeError):
@@ -57,6 +60,12 @@ class TeleopController:
             raise ValueError("control_hz must be positive and finite")
         if not math.isfinite(config.translation_scale) or config.translation_scale <= 0:
             raise ValueError("translation_scale must be positive and finite")
+        if (
+            isinstance(config.recovery_release_samples, bool)
+            or not isinstance(config.recovery_release_samples, int)
+            or config.recovery_release_samples <= 0
+        ):
+            raise ValueError("recovery_release_samples must be a positive integer")
         self.config = config
         self.source = source
         self.backend = backend
@@ -65,6 +74,8 @@ class TeleopController:
             MappingConfig(
                 translation_scale=config.translation_scale,
                 orientation_enabled=config.orientation_enabled,
+                invert_translation=config.invert_translation,
+                release_stability_samples=config.recovery_release_samples,
                 stale_timeout=config.stale_timeout,
             ),
         )
@@ -100,7 +111,23 @@ class TeleopController:
         )
         mapping = self.mapper.update(sample, self._begin_anchor_transaction, now)
 
-        if (
+        recoverable_stale = (
+            mapping.input_fault is InputFault.STALE
+            and self.config.recover_stale_input
+        )
+        if recoverable_stale:
+            if mapping.deactivated:
+                try:
+                    self.backend.hold()
+                except BaseException as error:
+                    raise TeleopSafetyError("Stop attempted but unconfirmed") from error
+                self._emit(
+                    "input_stale",
+                    "STOPPING",
+                    {"reason": InputFault.STALE.value},
+                )
+            result = BackendResult(False, False, 0.0, 0.0, "")
+        elif (
             mapping.input_fault is not InputFault.NONE
             and self.config.fatal_input_faults
         ):
@@ -117,7 +144,7 @@ class TeleopController:
                 f"fatal input fault: {mapping.input_fault.value}"
             )
 
-        if mapping.activated:
+        elif mapping.activated:
             # Grip activation is deliberately an anchor-only cycle. Hardware
             # feedback may change immediately after the anchor read; deferring
             # command_pose until a later input sample prevents that feedback
@@ -131,7 +158,7 @@ class TeleopController:
                 self.backend.hold()
             result = BackendResult(False, False, 0.0, 0.0, "")
 
-        if mapping.stale:
+        if mapping.stale and not recoverable_stale:
             self._emit("input_stale", "STOPPING", {})
 
         self.backend.step()

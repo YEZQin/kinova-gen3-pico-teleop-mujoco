@@ -38,6 +38,7 @@ class PicoUdpInput:
         host: str = "0.0.0.0",
         port: int = 15031,
         stale_after: float = 0.2,
+        allow_stale_source_handoff: bool = True,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not math.isfinite(stale_after) or stale_after <= 0.0:
@@ -48,6 +49,7 @@ class PicoUdpInput:
             else PicoUdpReceiver(host, port, monotonic=monotonic)
         )
         self._stale_after = float(stale_after)
+        self._allow_stale_source_handoff = bool(allow_stale_source_handoff)
         self._clock = monotonic
         self._active_source: tuple[str, int] | None = None
         self._last_sequence: int | None = None
@@ -141,6 +143,10 @@ class PicoUdpInput:
     ) -> bool:
         session_boundary = False
         if self._active_source is not None and frame.source != self._active_source:
+            if not self._allow_stale_source_handoff:
+                self._foreign += 1
+                self._last_error = "source changed"
+                return False
             same_device = frame.source[0] == self._active_source[0]
             if (
                 not recovering_from_stale

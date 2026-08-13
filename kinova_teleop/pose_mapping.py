@@ -49,6 +49,8 @@ class MappingConfig:
     max_position_step: float = 0.02
     max_rotation_step: float = 0.15
     orientation_enabled: bool = True
+    invert_translation: bool = False
+    release_stability_samples: int = 1
 
     def __post_init__(self) -> None:
         thresholds = np.asarray(
@@ -61,6 +63,12 @@ class MappingConfig:
             raise ValueError("Grip thresholds must be finite values in [0, 1]")
         if self.grip_release_threshold >= self.grip_press_threshold:
             raise ValueError("Grip release threshold must be lower than press threshold")
+        if (
+            isinstance(self.release_stability_samples, bool)
+            or not isinstance(self.release_stability_samples, int)
+            or self.release_stability_samples <= 0
+        ):
+            raise ValueError("release_stability_samples must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -262,6 +270,7 @@ class RelativePoseMapper:
         self._last_timestamp: int | None = None
         self._last_fresh_time: float | None = None
         self._last_update_time: float | None = None
+        self._release_streak = 0
 
     def reset(self, ee_pose: Pose) -> None:
         self.clutch_state = ClutchState.WAITING_FOR_RELEASE
@@ -271,6 +280,7 @@ class RelativePoseMapper:
         self._last_timestamp = None
         self._last_fresh_time = None
         self._last_update_time = None
+        self._release_streak = 0
 
     def _deactivate(self, stale: bool, input_fault: InputFault) -> MappingOutput:
         was_active = self.clutch_state is ClutchState.ACTIVE
@@ -280,6 +290,7 @@ class RelativePoseMapper:
         self._last_timestamp = None
         self._last_fresh_time = None
         self._last_update_time = None
+        self._release_streak = 0
         if self._last_target is None:
             raise RuntimeError("Pose mapper has no target")
         return MappingOutput(
@@ -337,7 +348,10 @@ class RelativePoseMapper:
                 input_fault = InputFault.SOURCE_CHANGED
             else:
                 input_fault = InputFault.INVALID
-            return self._deactivate(stale=stale, input_fault=input_fault)
+            return self._deactivate(
+                stale=stale or input_fault is InputFault.STALE,
+                input_fault=input_fault,
+            )
         if stale:
             return self._deactivate(stale=True, input_fault=InputFault.STALE)
 
@@ -351,7 +365,12 @@ class RelativePoseMapper:
         grip = float(sample.grip)
         if self.clutch_state is ClutchState.WAITING_FOR_RELEASE:
             if grip < self.config.grip_release_threshold:
-                self.clutch_state = ClutchState.READY
+                if new_timestamp:
+                    self._release_streak += 1
+                if self._release_streak >= self.config.release_stability_samples:
+                    self.clutch_state = ClutchState.READY
+            else:
+                self._release_streak = 0
             return MappingOutput(
                 target=_copy_pose(self._last_target),
                 active=False,
@@ -414,8 +433,11 @@ class RelativePoseMapper:
         if self._controller_reference is None or self._ee_reference is None:
             raise RuntimeError("Active mapper is missing reference poses")
 
-        desired_position = self._ee_reference.position + self.config.translation_scale * (
-            controller_pose.position - self._controller_reference.position
+        translation_sign = -1.0 if self.config.invert_translation else 1.0
+        desired_position = self._ee_reference.position + (
+            translation_sign
+            * self.config.translation_scale
+            * (controller_pose.position - self._controller_reference.position)
         )
         if self.config.orientation_enabled:
             controller_delta = quat_multiply(

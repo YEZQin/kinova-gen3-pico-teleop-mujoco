@@ -118,6 +118,95 @@ def test_hardware_stale_input_stops_and_escapes_loop() -> None:
     assert backend.holds == 1
 
 
+def test_recoverable_stale_stops_once_and_requires_fresh_release_streak() -> None:
+    backend = RecordingBackend()
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 0.0, 2, 1.01),
+            sample([0.0, 0.0, 0.0], 0.0, 3, 1.02),
+            sample([0.0, 0.0, 0.0], 1.0, 4, 1.03),
+            sample([0.1, 0.0, 0.0], 1.0, 5, 1.04),
+            sample([0.0, 0.0, 0.0], 0.0, 0, 1.05, valid=False, invalid_reason="stream is stale"),
+            sample([0.0, 0.0, 0.0], 0.0, 0, 1.06, valid=False, invalid_reason="stream is stale"),
+            sample([0.0, 0.0, 0.0], 0.0, 10, 1.07),
+            sample([0.0, 0.0, 0.0], 0.0, 10, 1.08),
+            sample([0.0, 0.0, 0.0], 0.0, 11, 1.09),
+            sample([0.0, 0.0, 0.0], 1.0, 12, 1.10),
+            sample([0.0, 0.0, 0.0], 0.0, 13, 1.11),
+            sample([0.0, 0.0, 0.0], 0.0, 14, 1.12),
+            sample([0.0, 0.0, 0.0], 0.0, 15, 1.13),
+        ]
+    )
+    controller = TeleopController(
+        TeleopConfig(
+            realtime=False,
+            fatal_input_faults=True,
+            recover_stale_input=True,
+            recovery_release_samples=3,
+        ),
+        source,
+        backend,
+    )
+
+    diagnostics = [controller.step_once() for _ in range(14)]
+
+    assert backend.holds == 1
+    assert diagnostics[5].stale is True
+    assert diagnostics[6].clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert diagnostics[9].clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert diagnostics[10].clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert diagnostics[12].clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert diagnostics[13].clutch_state is ClutchState.READY
+
+
+def test_stale_recovery_reanchors_before_any_new_motion_command() -> None:
+    backend = RecordingBackend()
+    source = ScriptedInput(
+        [
+            sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+            sample([0.0, 0.0, 0.0], 0.0, 2, 1.01),
+            sample([0.0, 0.0, 0.0], 0.0, 3, 1.02),
+            sample([0.0, 0.0, 0.0], 1.0, 4, 1.03),
+            sample([0.1, 0.0, 0.0], 1.0, 5, 1.04),
+            sample([0.0, 0.0, 0.0], 0.0, 0, 1.05, valid=False, invalid_reason="stream is stale"),
+            sample([5.0, 5.0, 5.0], 0.0, 10, 1.06),
+            sample([5.0, 5.0, 5.0], 0.0, 11, 1.07),
+            sample([5.0, 5.0, 5.0], 0.0, 12, 1.08),
+            sample([5.0, 5.0, 5.0], 1.0, 13, 1.09),
+            sample([5.01, 5.0, 5.0], 1.0, 14, 1.10),
+        ]
+    )
+    controller = TeleopController(
+        TeleopConfig(
+            realtime=False,
+            fatal_input_faults=True,
+            recover_stale_input=True,
+            recovery_release_samples=3,
+        ),
+        source,
+        backend,
+    )
+
+    for _ in range(9):
+        controller.step_once()
+    backend.pose = Pose(
+        np.array([0.2, -0.1, 0.6]),
+        np.array([1.0, 0.0, 0.0, 0.0]),
+    )
+    activation = controller.step_once()
+    moved = controller.step_once()
+
+    assert activation.clutch_state is ClutchState.ACTIVE
+    assert backend.begin_calls == 2
+    assert len(backend.commands) == 2
+    reanchored_target = backend.commands[-1].position
+    assert reanchored_target[0] == pytest.approx(backend.pose.position[0])
+    assert reanchored_target[2] == pytest.approx(backend.pose.position[2])
+    assert backend.pose.position[1] - 0.005 < reanchored_target[1] < backend.pose.position[1]
+    assert moved.active
+
+
 def test_normal_release_remains_recoverable_in_hardware_policy() -> None:
     backend = RecordingBackend()
     source = ScriptedInput(
@@ -143,14 +232,23 @@ def test_normal_release_remains_recoverable_in_hardware_policy() -> None:
     assert controller.step_once().active is True
 
 
-def test_source_change_is_fatal_but_mujoco_default_keeps_existing_behavior() -> None:
+@pytest.mark.parametrize(
+    "invalid_reason",
+    (
+        pytest.param("source changed", id="source-changed"),
+        pytest.param("controller is untracked", id="untracked"),
+    ),
+)
+def test_nonstale_input_fault_is_fatal_during_stale_recovery(
+    invalid_reason: str,
+) -> None:
     invalid = sample(
         [0.0, 0.0, 0.0],
         0.0,
         0,
         1.0,
         valid=False,
-        invalid_reason="source changed",
+        invalid_reason=invalid_reason,
     )
     recoverable = TeleopController(
         TeleopConfig(realtime=False),
@@ -162,11 +260,16 @@ def test_source_change_is_fatal_but_mujoco_default_keeps_existing_behavior() -> 
 
     fatal_backend = RecordingBackend()
     fatal = TeleopController(
-        TeleopConfig(realtime=False, fatal_input_faults=True),
+        TeleopConfig(
+            realtime=False,
+            fatal_input_faults=True,
+            recover_stale_input=True,
+        ),
         ScriptedInput([invalid]),
         fatal_backend,
     )
-    with pytest.raises(TeleopSafetyError, match="source_changed"):
+    expected_reason = "source_changed" if invalid_reason == "source changed" else "invalid"
+    with pytest.raises(TeleopSafetyError, match=expected_reason):
         fatal.step_once()
     assert fatal_backend.holds == 1
 
@@ -187,11 +290,23 @@ def test_fatal_input_reports_unconfirmed_stop_failure() -> None:
     )
     backend = FailingHoldBackend()
     controller = TeleopController(
-        TeleopConfig(realtime=False, fatal_input_faults=True),
-        ScriptedInput([invalid]),
+        TeleopConfig(
+            realtime=False,
+            fatal_input_faults=True,
+            recover_stale_input=True,
+        ),
+        ScriptedInput(
+            [
+                sample([0.0, 0.0, 0.0], 0.0, 1, 0.98),
+                sample([0.0, 0.0, 0.0], 1.0, 2, 0.99),
+                invalid,
+            ]
+        ),
         backend,
     )
 
+    controller.step_once()
+    controller.step_once()
     with pytest.raises(
         TeleopSafetyError,
         match="Stop attempted but unconfirmed",

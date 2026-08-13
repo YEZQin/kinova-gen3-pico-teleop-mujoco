@@ -142,6 +142,32 @@ def test_stale_handoff_uses_current_read_time_not_datagram_time() -> None:
     assert source.health().active_source == ("10.0.0.3", 4000)
 
 
+def test_locked_recovery_rejects_stale_handoff_and_keeps_original_endpoint() -> None:
+    original = ("10.0.0.2", 3000)
+    foreign = ("10.0.0.3", 4000)
+    receiver = FakeReceiver([
+        make_frame(sequence=1, received_at=5.0, source=original),
+    ])
+    now = [5.0]
+    source = PicoUdpInput(
+        receiver=receiver,
+        monotonic=lambda: now[0],
+        allow_stale_source_handoff=False,
+    )
+    assert source.read().valid
+
+    now[0] = 5.21
+    receiver.items.append(
+        make_frame(sequence=1, received_at=5.21, source=foreign)
+    )
+    boundary = source.read()
+
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
+    assert source.health().active_source == original
+    assert source.health().foreign == 1
+
+
 def test_untracked_or_stale_stream_returns_invalid_sample() -> None:
     now = [5.0]
     receiver = FakeReceiver([make_frame(sequence=1, received_at=5.0)])

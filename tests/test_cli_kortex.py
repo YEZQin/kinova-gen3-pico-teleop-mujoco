@@ -1046,6 +1046,88 @@ def test_expanded_translation_only_wires_five_centimetre_anchor(monkeypatch) -> 
     assert created["controller_config"].translation_scale == 0.5
 
 
+def test_responsive_reversed_expanded_translation_wires_approved_values(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    _install_valid_kortex_fakes(monkeypatch, created)
+    monkeypatch.setattr("kinova_teleop.main.SdkXrInput", _FakeSource)
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--invert-translation",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.01",
+        ]
+    )
+
+    assert main(argv) == 0
+    assert created["backend"].kwargs["max_linear_speed"] == 0.01
+    assert created["backend"].kwargs["anchor_envelope"].maximum_translation_axis_m == (0.05, 0.05, 0.05)
+    controller_config = created["controller_config"]
+    assert controller_config.translation_scale == 0.8
+    assert controller_config.orientation_enabled is False
+    assert controller_config.invert_translation is True
+    assert controller_config.recover_stale_input is True
+    assert controller_config.recovery_release_samples == 3
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--responsive-translation-profile", "--invert-translation", "--recover-stale-input"],
+        ["--backend", "kortex", "--enable-hardware", "--responsive-translation-profile", "--invert-translation", "--recover-stale-input"],
+        ["--backend", "kortex", "--enable-hardware", "--translation-only", "--responsive-translation-profile", "--invert-translation", "--recover-stale-input"],
+    ],
+)
+def test_responsive_profile_rejects_invalid_scope_before_hardware_side_effects(
+    monkeypatch, capsys, arguments,
+) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setattr(
+        "kinova_teleop.main.os.getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+
+    assert main(arguments) == 2
+    assert calls == []
+    assert "responsive translation profile requires" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "limit_arguments",
+    (
+        ["--scale", "0.800001"],
+        ["--max-linear-speed", "0.010001"],
+    ),
+)
+def test_responsive_profile_rejects_over_limit_before_connection(
+    monkeypatch, limit_arguments,
+) -> None:
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    monkeypatch.setenv("KINOVA_PASSWORD", "secret")
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--input", "xrobotoolkit",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--invert-translation",
+            "--recover-stale-input",
+            *limit_arguments,
+        ]
+    )
+
+    assert main(argv) == 2
+    assert calls == []
+
+
 def test_translation_only_kortex_accepts_explicit_scale_half(monkeypatch) -> None:
     created: dict[str, object] = {}
     _install_valid_kortex_fakes(monkeypatch, created)
@@ -1095,6 +1177,44 @@ def test_kortex_default_input_is_continuously_buffered_pico_udp(monkeypatch) -> 
         "port": 15031,
         "stale_after": 0.2,
     }
+
+
+def test_responsive_recovery_locks_pico_to_the_admitted_endpoint(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    pico_kwargs: dict[str, object] = {}
+    _install_valid_kortex_fakes(monkeypatch, created)
+
+    class FakePicoInput(_FakeSource):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__()
+            pico_kwargs.update(kwargs)
+
+        def read(self) -> ControllerSample:
+            return ControllerSample(
+                position=np.zeros(3, dtype=float),
+                quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+                grip=0.0,
+                timestamp_ns=1,
+                received_monotonic=1.0,
+            )
+
+    monkeypatch.setattr("kinova_teleop.main.PicoUdpInput", FakePicoInput)
+    argv = _expanded_motion_gate_args(
+        [
+            "--backend", "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--expanded-translation-envelope",
+            "--responsive-translation-profile",
+            "--invert-translation",
+            "--recover-stale-input",
+            "--scale", "0.8",
+            "--max-linear-speed", "0.01",
+        ]
+    )
+
+    assert main(argv) == 0
+    assert pico_kwargs["allow_stale_source_handoff"] is False
 
 
 def test_kortex_pico_input_keeps_receiving_during_blocking_startup(

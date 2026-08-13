@@ -19,6 +19,8 @@ from .hardware_profile import (
     EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
     FIRST_HARDWARE_PROFILE,
     MAX_TRANSLATION_ONLY_SCALE,
+    RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS,
+    RESPONSIVE_TRANSLATION_MAX_SCALE,
     validate_kortex_runtime,
     validate_private_robot_ipv4,
     validate_workspace_span,
@@ -131,6 +133,27 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "permit a 50 mm per-axis Grip anchor envelope only for explicit "
             "Kortex translation-only hardware teleoperation"
+        ),
+    )
+    parser.add_argument(
+        "--responsive-translation-profile",
+        action="store_true",
+        help=(
+            "permit scale 0.8 and 0.01 m/s only for the explicit expanded "
+            "Kortex translation-only hardware profile"
+        ),
+    )
+    parser.add_argument(
+        "--invert-translation",
+        action="store_true",
+        help="reverse all three relative translation axes in the responsive profile",
+    )
+    parser.add_argument(
+        "--recover-stale-input",
+        action="store_true",
+        help=(
+            "Stop on stale PICO input, then require stable released input and "
+            "a new Grip anchor instead of exiting"
         ),
     )
     parser.add_argument(
@@ -320,11 +343,18 @@ def create_input(args: argparse.Namespace) -> XrInputSource:
     if args.dry_run:
         return DryRunXrInput(control_hz=control_hz)
     if args.input == "pico-udp":
+        pico_kwargs: dict[str, object] = {}
+        if args.recover_stale_input:
+            # A recoverable stale boundary must not turn the old adapter's
+            # post-stale endpoint handoff into motion authority without a new
+            # MOVE admission. Keep the endpoint selected before motion locked.
+            pico_kwargs["allow_stale_source_handoff"] = False
         return ContinuousInputBuffer(
             PicoUdpInput(
                 host=args.pico_host,
                 port=args.pico_port,
                 stale_after=_resolve_stale_timeout(args),
+                **pico_kwargs,
             ),
         )
     return SdkXrInput()
@@ -410,6 +440,23 @@ def _validate_args(args: argparse.Namespace) -> str | None:
             "--expanded-translation-envelope requires Kortex "
             "translation-only hardware teleoperation"
         )
+    responsive_flags = (
+        args.responsive_translation_profile,
+        args.invert_translation,
+        args.recover_stale_input,
+    )
+    responsive_mode_valid = (
+        expanded_mode_valid
+        and args.expanded_translation_envelope
+        and all(responsive_flags)
+    )
+    if any(responsive_flags) and not responsive_mode_valid:
+        return (
+            "responsive translation profile requires all of "
+            "--responsive-translation-profile, --invert-translation, and "
+            "--recover-stale-input in expanded Kortex translation-only "
+            "hardware teleoperation"
+        )
     if args.control_hz is not None and (
         not math.isfinite(args.control_hz) or args.control_hz <= 0.0
     ):
@@ -483,11 +530,12 @@ def _validate_kortex_args(
         validate_private_robot_ipv4(args.robot_ip)
     except ValueError as error:
         return str(error)
-    maximum_scale = (
-        MAX_TRANSLATION_ONLY_SCALE
-        if args.translation_only
-        else FIRST_HARDWARE_PROFILE.translation_scale
-    )
+    if args.responsive_translation_profile:
+        maximum_scale = RESPONSIVE_TRANSLATION_MAX_SCALE
+    elif args.translation_only:
+        maximum_scale = MAX_TRANSLATION_ONLY_SCALE
+    else:
+        maximum_scale = FIRST_HARDWARE_PROFILE.translation_scale
     if resolve_translation_scale(args) > maximum_scale:
         return f"--scale must not exceed {maximum_scale:g} for --backend kortex"
     if resolve_control_hz(args) > FIRST_HARDWARE_PROFILE.control_hz:
@@ -496,10 +544,15 @@ def _validate_kortex_args(
             "for --backend kortex"
         )
     max_linear_speed = _resolve_max_linear_speed(args)
+    maximum_linear_speed = (
+        RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
+        if args.responsive_translation_profile
+        else FIRST_HARDWARE_PROFILE.max_linear_speed_mps
+    )
     if not math.isfinite(max_linear_speed) or not (
-        0.0 < max_linear_speed <= FIRST_HARDWARE_PROFILE.max_linear_speed_mps
+        0.0 < max_linear_speed <= maximum_linear_speed
     ):
-        return "--max-linear-speed must be in (0, 0.005]"
+        return f"--max-linear-speed must be in (0, {maximum_linear_speed:g}]"
     max_angular_speed_deg = _resolve_max_angular_speed_deg(args)
     if not math.isfinite(max_angular_speed_deg) or not (
         0.0 < max_angular_speed_deg <= FIRST_HARDWARE_PROFILE.max_angular_speed_deg_s
@@ -833,6 +886,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     orientation_enabled=not args.translation_only,
                     stale_timeout=_resolve_stale_timeout(args),
                     fatal_input_faults=args.backend == "kortex",
+                    invert_translation=args.invert_translation,
+                    recover_stale_input=args.recover_stale_input,
+                    recovery_release_samples=(
+                        3 if args.recover_stale_input else 1
+                    ),
                 ),
                 source,
                 backend,

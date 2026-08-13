@@ -327,6 +327,68 @@ def test_translation_only_mapping_keeps_anchor_orientation() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "controller_delta",
+    (
+        pytest.param([0.1, 0.0, 0.0], id="pico-x"),
+        pytest.param([0.0, 0.1, 0.0], id="pico-y"),
+        pytest.param([0.0, 0.0, 0.1], id="pico-z"),
+    ),
+)
+def test_inverted_translation_negates_every_mapped_axis_and_keeps_anchor_orientation(
+    controller_delta,
+) -> None:
+    mapper = RelativePoseMapper(
+        unfiltered_config(
+            translation_scale=0.8,
+            orientation_enabled=False,
+            invert_translation=True,
+        )
+    )
+    ee = Pose(
+        np.array([0.4, -0.2, 0.3], dtype=np.float64),
+        quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), 0.4),
+    )
+    release_then_press(mapper, ee)
+
+    output = mapper.update(
+        sample(controller_delta, grip=1.0, stamp=3, received=1.02),
+        ee,
+        now=1.02,
+    )
+
+    expected_position = ee.position - 0.8 * (
+        PICO_TO_WORLD @ np.asarray(controller_delta, dtype=np.float64)
+    )
+    np.testing.assert_allclose(output.target.position, expected_position)
+    np.testing.assert_allclose(
+        quat_to_matrix(output.target.quaternion),
+        quat_to_matrix(ee.quaternion),
+        atol=1e-8,
+    )
+
+
+def test_waiting_for_release_requires_configured_distinct_released_samples() -> None:
+    mapper = RelativePoseMapper(unfiltered_config(release_stability_samples=3))
+    ee = identity_pose()
+    mapper.reset(ee)
+
+    first = mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), ee, now=0.00)
+    duplicate = mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), ee, now=0.01)
+    second = mapper.update(sample([0, 0, 0], grip=0.0, stamp=2), ee, now=0.02)
+    pressed = mapper.update(sample([0, 0, 0], grip=1.0, stamp=3), ee, now=0.03)
+    restarted = mapper.update(sample([0, 0, 0], grip=0.0, stamp=4), ee, now=0.04)
+    mapper.update(sample([0, 0, 0], grip=0.0, stamp=5), ee, now=0.05)
+    ready = mapper.update(sample([0, 0, 0], grip=0.0, stamp=6), ee, now=0.06)
+
+    assert first.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert duplicate.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert second.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert pressed.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert restarted.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert ready.clutch_state is ClutchState.READY
+
+
 def test_release_holds_last_target() -> None:
     mapper = RelativePoseMapper(unfiltered_config())
     ee = identity_pose()
