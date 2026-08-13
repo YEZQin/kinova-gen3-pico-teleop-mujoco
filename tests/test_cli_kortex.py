@@ -543,7 +543,10 @@ def test_expanded_envelope_workspace_overrun_rejects_before_hardware_side_effect
     assert main(argv) == 2
     assert calls == []
     assert prompts == []
-    assert "workspace span must not exceed 0.1 m per axis" in capsys.readouterr().err
+    assert (
+        "workspace span must not exceed per-axis maxima [0.1, 0.1, 0.1] m"
+        in capsys.readouterr().err
+    )
 
 
 @pytest.mark.parametrize(
@@ -1149,15 +1152,14 @@ def test_responsive_calibrated_translation_accepts_exact_asymmetric_absolute_wor
 
 
 @pytest.mark.parametrize(
-    ("axis", "maximum", "expected_limit"),
-    ((0, "1.200001", "1.2"), (1, "1.200001", "1.2"), (2, "0.640001", "1.2")),
+    ("axis", "maximum"),
+    ((0, "1.200001"), (1, "1.200001"), (2, "0.640001")),
 )
 def test_responsive_workspace_overrun_rejects_before_hardware_side_effects(
     monkeypatch,
     capsys,
     axis: int,
     maximum: str,
-    expected_limit: str,
 ) -> None:
     """An asymmetric responsive overrun must fail before credentials or motion."""
 
@@ -1193,7 +1195,10 @@ def test_responsive_workspace_overrun_rejects_before_hardware_side_effects(
     assert main(argv) == 2
     assert calls == []
     assert prompts == []
-    assert f"workspace span must not exceed {expected_limit} m per axis" in capsys.readouterr().err
+    assert (
+        "workspace span must not exceed per-axis maxima [1.2, 1.2, 0.64] m"
+        in capsys.readouterr().err
+    )
 
 
 def test_asymmetric_responsive_calibrated_arguments_pass_non_secret_kortex_validation(

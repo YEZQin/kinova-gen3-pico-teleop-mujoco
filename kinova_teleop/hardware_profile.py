@@ -111,7 +111,8 @@ def validate_workspace_span(
     maximum = 2.0 * np.asarray(maximum_translation_axis_m)
     tolerance = 4.0 * np.spacing(np.maximum(np.abs(span), maximum))
     if np.any(span > maximum + tolerance):
+        formatted_maximum = ", ".join(f"{value:g}" for value in maximum)
         raise ValueError(
-            "workspace span must not exceed "
-            f"{maximum[0]:g} m per axis"
+            "workspace span must not exceed per-axis maxima "
+            f"[{formatted_maximum}] m"
         )

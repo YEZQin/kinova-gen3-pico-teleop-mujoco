@@ -100,7 +100,10 @@ def test_first_hardware_workspace_cannot_exceed_four_centimetres_per_axis() -> N
         (0.10, -0.20, 0.30),
         (0.140001, -0.16, 0.34),
     )
-    with pytest.raises(ValueError, match="span must not exceed 0.04 m"):
+    with pytest.raises(
+        ValueError,
+        match=r"span must not exceed per-axis maxima \[0.04, 0.04, 0.04\] m",
+    ):
         validate_workspace_span(limits)
 
 
@@ -125,7 +128,10 @@ def test_expanded_workspace_accepts_exact_ten_centimetres_only() -> None:
     exact = WorkspaceLimits((0.0, 0.0, 0.0), (0.10, 0.10, 0.10))
     validate_workspace_span(exact, EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M)
     over = WorkspaceLimits((0.0, 0.0, 0.0), (0.100001, 0.10, 0.10))
-    with pytest.raises(ValueError, match="span must not exceed 0.1 m"):
+    with pytest.raises(
+        ValueError,
+        match=r"span must not exceed per-axis maxima \[0.1, 0.1, 0.1\] m",
+    ):
         validate_workspace_span(over, EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M)
 
 
@@ -137,7 +143,10 @@ def test_responsive_workspace_accepts_exact_asymmetric_spans_only() -> None:
     )
 
     for maximum_xyz in ((1.200001, 1.2, 0.64), (1.2, 1.200001, 0.64), (1.2, 1.2, 0.640001)):
-        with pytest.raises(ValueError, match="workspace span must not exceed 1.2 m"):
+        with pytest.raises(
+            ValueError,
+            match=r"workspace span must not exceed per-axis maxima \[1.2, 1.2, 0.64\] m",
+        ):
             validate_workspace_span(
                 WorkspaceLimits((0.0, 0.0, 0.0), maximum_xyz),
                 RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
