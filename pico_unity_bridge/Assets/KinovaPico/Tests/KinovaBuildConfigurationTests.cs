@@ -23,6 +23,15 @@ namespace Yezqin.KinovaPico.Tests
         }
 
         [Test]
+        public void BuildSpecUsesReproducibleReleaseOptions()
+        {
+            var options = Editor.KinovaPicoBuildSpec.Approved.BuildOptions;
+
+            Assert.IsFalse((options & BuildOptions.Development) != 0);
+            Assert.IsTrue((options & BuildOptions.NoUniqueIdentifier) != 0);
+        }
+
+        [Test]
         public void BuildSpecEnablesOnlyThePico4UltraControllerProfile()
         {
             var profiles = Editor.KinovaPicoBuildSpec.Approved.ControllerProfileTypes;

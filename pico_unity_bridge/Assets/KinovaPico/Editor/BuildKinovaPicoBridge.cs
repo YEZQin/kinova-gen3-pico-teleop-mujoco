@@ -31,6 +31,7 @@ namespace Yezqin.KinovaPico.Editor
             AndroidSdkVersions.AndroidApiLevel29,
             "Assets/KinovaPico/KinovaPicoBridge.unity",
             "Builds/KinovaPicoBridge-development.apk",
+            BuildOptions.NoUniqueIdentifier,
             new[] { typeof(PICO4UltraControllerProfile) });
 
         readonly Type[] _controllerProfileTypes;
@@ -43,6 +44,7 @@ namespace Yezqin.KinovaPico.Editor
             AndroidSdkVersions minimumSdkVersion,
             string scenePath,
             string buildPath,
+            BuildOptions buildOptions,
             Type[] controllerProfileTypes)
         {
             PackageId = packageId;
@@ -52,6 +54,7 @@ namespace Yezqin.KinovaPico.Editor
             MinimumSdkVersion = minimumSdkVersion;
             ScenePath = scenePath;
             BuildPath = buildPath;
+            BuildOptions = buildOptions;
             _controllerProfileTypes = controllerProfileTypes;
         }
 
@@ -63,6 +66,7 @@ namespace Yezqin.KinovaPico.Editor
         public AndroidSdkVersions MinimumSdkVersion { get; }
         public string ScenePath { get; }
         public string BuildPath { get; }
+        public BuildOptions BuildOptions { get; }
         public Type[] ControllerProfileTypes => (Type[])_controllerProfileTypes.Clone();
     }
 
@@ -254,7 +258,7 @@ namespace Yezqin.KinovaPico.Editor
                 locationPathName = spec.BuildPath,
                 target = BuildTarget.Android,
                 targetGroup = BuildTargetGroup.Android,
-                options = BuildOptions.Development,
+                options = spec.BuildOptions,
             };
 
             var report = BuildPipeline.BuildPlayer(options);
