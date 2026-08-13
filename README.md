@@ -16,7 +16,7 @@ Grip is a clutch: release below `0.8`, then press above `0.9` to create a new an
 
 Use native Windows 10/11 PowerShell 5.1+ (not WSL), Git, CPython **3.11.x**, and Android platform tools/ADB for USB installation. For an APK build alternative, install Unity `2022.3.62f3c1` with Android Build Support, SDK/NDK, and OpenJDK. The bridge source pins PICO OpenXR SDK `3aa3e62bff41df618529eeb60ff02c29a515dafe`.
 
-The APK and Kortex wheel are intended to be hash-checked `v0.2.0-rc.1` release assets, not repository blobs. Until the release exists, do not substitute a file or bypass its checksum. Their expected names, URLs, hashes, and sizes are tracked in [release/public-release-assets.json](release/public-release-assets.json); the currently committed APK declaration is a publication fixture and is not an installable binary.
+The APK and Kortex wheel are intended to be hash-checked `v0.2.0-rc.1` release assets, not repository blobs. **`v0.2.0-rc.1 is not yet published`; do not run until published.** Their expected names, URLs, hashes, and sizes are tracked in [release/public-release-assets.json](release/public-release-assets.json); the currently committed APK declaration is a publication fixture and is not an installable binary. Task 6 replaces this fixture with real assets, after which this warning must be removed and bootstrap becomes runnable.
 
 Put the headset and PC on the same trusted LAN/VLAN. Do not set fixed PICO addresses. Permit only inbound UDP `15031` for Python on that trusted profile if Windows Firewall asks; do not add broad rules, expose the port to public networks, use `adb tcpip`, `adb connect`, or ADB reverse. The scripts never create a firewall rule.
 
@@ -34,6 +34,7 @@ If you cannot use Git, download the ZIP from that same publication branch and ex
 
 ```powershell
 # LIFECYCLE: bootstrap
+# POST-RELEASE ONLY: run after v0.2.0-rc.1 is published with real verified assets.
 .\scripts\bootstrap_public_teleop.ps1
 ```
 
@@ -104,38 +105,41 @@ $profileRoot = Split-Path -Parent (Resolve-Path local-config\teleop-profile.json
 
 This command validates the package offline: it reads no password and makes no PICO or Kortex connection. Do not proceed to the next section unless it succeeds.
 
+## Evidence matrix
+
+| Evidence level | Public claim | Boundary |
+| --- | --- | --- |
+| Source/code-level | Source review, unit/integration contracts, manifest validation, and guarded admission logic are automated evidence. | They do not prove a headset, robot connection, physical stopping distance, or workspace is safe. |
+| Simulator | The deterministic 2000-step MuJoCo finite check is simulator evidence. | It does not prove Kortex compatibility or physical arm behavior. |
+| Hardware observed | A fresh local PICO gate, read-only T0, and recorded onsite trial are hardware observed only for that installation/session. | They do not generalize to another robot, code revision, or future unattended run. |
+| Release final profile | The final expanded/asymmetric profile is offline verified and not hardware-validated in this release. | It requires new onsite evidence before any hardware claim. |
+
 ## Onsite first motion: nine checks, launch, clutch, Stop
 
 Before the launcher may proceed, physically verify all nine conditions represented by the package command: clear workspace; E-stop reachable; teach-pendant/Web Stop reachable; second observer; cable slack; device/fixture; speed level; inspected bounds; load/TCP. Recheck them after T0 and after any interruption. Position the arm safely, keep Grip released, and test only one translation axis at a time at millimetre scale.
 
-```powershell
-# LIFECYCLE: physical-checklist
-Read-Host 'Confirm all nine onsite checks, then press Enter'
-```
+<!-- LIFECYCLE: physical-checklist -->
+
+### Operator checklist before launching
+
+<!-- LAUNCHER-OPERATOR-SEQUENCE: grip-release -> HARDWARE-READY -> masked-password -> MOVE -> grip-clutch -> stop -->
+
+1. Confirm all nine onsite checks above and keep the physical E-stop/Web Stop reachable.
+2. Keep PICO Grip fully released (`< 0.8`) while the launcher validates the package and PICO input.
+3. In the launcher, type `HARDWARE-READY` only after those checks still hold; enter the masked password when prompted.
+4. In the Python process, type exactly `MOVE`; only then press Grip (`> 0.9`) once to clutch and anchor.
+5. Stop by releasing Grip. For unexpected motion, use `Ctrl+C`, Web Stop, or the physical E-stop; do not relaunch a latched fault.
 
 ```powershell
 # LIFECYCLE: hardware-launcher
 .\scripts\start_generated_gen3_teleop.ps1 -Profile local-config\teleop-profile.json -PythonPath .\.venv-kortex\Scripts\python.exe
 ```
 
-```powershell
-# LIFECYCLE: grip-release
-Write-Host 'Keep PICO Grip fully released (< 0.8) until the input gate succeeds.'
-```
+<!-- LIFECYCLE: grip-release -->
+<!-- LIFECYCLE: move -->
+<!-- LIFECYCLE: stop-troubleshooting -->
 
-The guarded launcher validates first, asks you to type `HARDWARE-READY`, and then prompts for the password without echoing or persisting it. Its child process alone presents the exact motion confirmation.
-
-```powershell
-# LIFECYCLE: move
-Write-Host 'Inside the guarded program, type exactly: MOVE'
-```
-
-Press Grip above `0.9` once to anchor; that first press must not jump. Move one axis a few millimetres, observe direction and speed, then release Grip. Gripper writes and vision control are intentionally unavailable in this first-run path.
-
-```powershell
-# LIFECYCLE: stop-troubleshooting
-Write-Host 'Release Grip; for any unexpected motion use physical E-stop/Web Stop, then Ctrl+C.'
-```
+The launcher sequence above is the operational instruction, not a shell command to simulate. Press Grip above `0.9` once to anchor; that first press must not jump. Move one axis a few millimetres, observe direction and speed, then release Grip. Gripper writes and vision control are intentionally unavailable in this first-run path.
 
 For a stale-input, UDP, source-change, workspace, watchdog, or Stop failure: keep hands clear, use physical Stop when indicated, do not relaunch after a latched fault, inspect cables/network/fixture, and repeat from the applicable gate. For PICO failure check headset app foreground state, left-controller tracking, trusted LAN/VLAN, VPN/AP isolation, and the narrow UDP 15031 rule. For Kortex failure, do not change firmware or SDK ad hoc: confirm the required wheel/firmware pair and repeat a fresh read-only T0.
 

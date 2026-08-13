@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import json
 from pathlib import Path
 
 
@@ -22,9 +23,11 @@ def _powershell_blocks(document: str) -> list[str]:
 
 
 def _lifecycle_markers(document: str) -> tuple[str, ...]:
-    return tuple(
-        re.findall(r"^\s*#\s*LIFECYCLE:\s*([a-z0-9-]+)\s*$", "\n".join(_powershell_blocks(document)), flags=re.MULTILINE)
+    markers = re.findall(
+        r"(?m)^\s*#\s*LIFECYCLE:\s*([a-z0-9-]+)\s*$|<!--\s*LIFECYCLE:\s*([a-z0-9-]+)\s*-->",
+        document,
     )
+    return tuple(code or comment for code, comment in markers)
 
 
 def _lifecycle_commands(document: str) -> tuple[str, ...]:
@@ -49,6 +52,44 @@ def test_readmes_have_matching_ordered_lifecycle_commands() -> None:
     assert manifests[1] == LIFECYCLE
     assert manifests[0] == manifests[1]
     assert _lifecycle_commands(documents[0]) == _lifecycle_commands(documents[1])
+
+
+def test_readmes_embed_equivalent_evidence_matrices() -> None:
+    required_rows = ("source/code-level", "simulator", "hardware observed", "release final profile")
+    for path in README_PATHS:
+        tables = re.findall(r"(?ms)^\|[^\n]+\|\s*\n\|(?:\s*:?-{3,}:?\s*\|)+\s*\n(?:\|[^\n]+\|\s*\n)+", path.read_text(encoding="utf-8"))
+        rows = "\n".join(tables).lower()
+        for label in required_rows:
+            assert label in rows, f"{path.name} is missing evidence row {label}"
+        assert "offline verified" in rows and "not hardware-validated" in rows
+
+
+def test_hardware_lifecycle_is_an_operator_sequence_not_inert_commands() -> None:
+    expected_sequence = "grip-release -> HARDWARE-READY -> masked-password -> MOVE -> grip-clutch -> stop"
+    for path in README_PATHS:
+        document = path.read_text(encoding="utf-8")
+        launcher = document.index("# LIFECYCLE: hardware-launcher")
+        sequence = document.index(f"<!-- LAUNCHER-OPERATOR-SEQUENCE: {expected_sequence} -->")
+        assert sequence < launcher, f"{path.name} must explain the launcher sequence before launch"
+        lifecycle_blocks = [block for block in _powershell_blocks(document) if "LIFECYCLE:" in block]
+        assert all("Write-Host" not in block for block in lifecycle_blocks)
+
+
+def test_bootstrap_is_gated_by_the_release_asset_state() -> None:
+    manifest = json.loads((ROOT / "release" / "public-release-assets.json").read_text(encoding="utf-8"))
+    apk = next(asset for asset in manifest["assets"] if asset["name"] == "kinova-pico-udp-bridge.apk")
+    fixture = apk["sha256"] == "a" * 64 and apk["size_bytes"] == 3
+    for path in README_PATHS:
+        document = path.read_text(encoding="utf-8").lower()
+        bootstrap = next(block.lower() for block in _powershell_blocks(document) if "lifecycle: bootstrap" in block)
+        if fixture:
+            assert "v0.2.0-rc.1 is not yet published" in document
+            assert "do not run until published" in document
+            assert "post-release only" in bootstrap
+        else:
+            assert "v0.2.0-rc.1 is not yet published" not in document
+            assert "do not run until published" not in document
+            assert "post-release only" not in bootstrap
 
 
 def test_public_commands_reference_tracked_scripts_or_release_assets() -> None:

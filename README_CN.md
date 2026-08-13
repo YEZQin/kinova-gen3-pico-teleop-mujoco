@@ -16,7 +16,7 @@ Grip 是离合器：先释放到低于 `0.8`，再按到高于 `0.9` 才会建�
 
 请使用原生 Windows 10/11 PowerShell 5.1+（不使用 WSL）、Git、CPython **3.11.x**，以及用于 USB 安装的 Android platform tools/ADB。若选择从源码构建 APK，请通过 Unity Hub 安装 Unity `2022.3.62f3c1`，并勾选 Android Build Support、SDK/NDK 和 OpenJDK。桥接源码固定 PICO OpenXR SDK `3aa3e62bff41df618529eeb60ff02c29a515dafe`。
 
-APK 和 Kortex wheel 是带 SHA-256 校验的 `v0.2.0-rc.1` 发布资产，不是仓库二进制文件。发布存在前，不得替换文件或绕过校验。[release/public-release-assets.json](release/public-release-assets.json) 跟踪其预期名称、URL、哈希和大小；当前仓库的 APK 声明是发布占位，不能安装。
+APK 和 Kortex wheel 是带 SHA-256 校验的 `v0.2.0-rc.1` 发布资产，不是仓库二进制文件。**`v0.2.0-rc.1 is not yet published`; do not run until published.** [release/public-release-assets.json](release/public-release-assets.json) 跟踪其预期名称、URL、哈希和大小；当前仓库的 APK 声明是发布占位，不能安装。Task 6 将以真实资产替换该占位；届时必须删除本警告，bootstrap 才可执行。
 
 将头显和 PC 放入同一受信任 LAN/VLAN；不要设置固定 PICO 地址。如果 Windows Firewall 提示，仅在受信任网络配置文件中允许 Python 入站 UDP `15031`。不要创建宽泛规则、把端口暴露给公用网络、使用 `adb tcpip`、`adb connect` 或 ADB reverse；脚本不会创建防火墙规则。
 
@@ -34,6 +34,7 @@ Set-Location .\kinova-gen3-pico-teleop
 
 ```powershell
 # LIFECYCLE: bootstrap
+# POST-RELEASE ONLY: run after v0.2.0-rc.1 is published with real verified assets.
 .\scripts\bootstrap_public_teleop.ps1
 ```
 
@@ -104,38 +105,41 @@ $profileRoot = Split-Path -Parent (Resolve-Path local-config\teleop-profile.json
 
 该命令纯离线验证包：不读取密码，不建立 PICO 或 Kortex 连接。只有成功后才可进入下一节。
 
+## 证据矩阵
+
+| Evidence level / 证据等级 | 本发布可作的说明 | 边界 |
+| --- | --- | --- |
+| Source/code-level / 源码与代码级 | 源码审查、单元/集成契约、清单校验和受控准入逻辑属于自动化证据。 | 不能证明头显、机器人连接、实体停止距离或工作区安全。 |
+| Simulator / 仿真器 | 确定性 MuJoCo 2000-step finite 检查属于仿真证据。 | 不能证明 Kortex 兼容性或实体机械臂行为。 |
+| Hardware observed / 硬件现场观察 | 新鲜本地 PICO gate、只读 T0 和记录的现场试验仅对该安装/会话构成硬件观察。 | 不能推广到另一台机器人、另一代码版本或未来无人值守运行。 |
+| Release final profile / 本发布最终配置 | 最终扩展/非对称配置在本发布中为 offline verified and not hardware-validated。 | 任何硬件宣称前仍须取得新的现场证据。 |
+
 ## 现场首动：九项检查、启动、离合、Stop
 
 启动器继续前，必须实体确认包命令所表示的九项条件：工作区净空；急停可达；示教器/Web Stop 可达；第二观察员；线缆余量；设备/夹具；速度等级；已检查的边界；负载/TCP。T0 后及每次中断后均要复核。将机械臂置于安全姿态，保持 Grip 释放，按毫米尺度每次只测试一个平移轴。
 
-```powershell
-# LIFECYCLE: physical-checklist
-Read-Host 'Confirm all nine onsite checks, then press Enter'
-```
+<!-- LIFECYCLE: physical-checklist -->
+
+### 启动前操作者检查清单
+
+<!-- LAUNCHER-OPERATOR-SEQUENCE: grip-release -> HARDWARE-READY -> masked-password -> MOVE -> grip-clutch -> stop -->
+
+1. 确认以上九项现场检查全部通过，并保持物理急停/Web Stop 可触及。
+2. 启动器验证包和 PICO 输入期间，持续让 Grip 完全松开（`< 0.8`）。
+3. 只有在上述条件仍满足时，才在启动器中输入 `HARDWARE-READY`；随后按提示输入不回显的掩码密码。
+4. 进入 Python 进程后，精确输入 `MOVE`；然后才将 Grip 按到 `> 0.9` 一次以离合并建立锚点。
+5. 松开 Grip 即停止。意外运动时使用 `Ctrl+C`、Web Stop 或物理急停；锁存故障不得重新启动。
 
 ```powershell
 # LIFECYCLE: hardware-launcher
 .\scripts\start_generated_gen3_teleop.ps1 -Profile local-config\teleop-profile.json -PythonPath .\.venv-kortex\Scripts\python.exe
 ```
 
-```powershell
-# LIFECYCLE: grip-release
-Write-Host 'Keep PICO Grip fully released (< 0.8) until the input gate succeeds.'
-```
+<!-- LIFECYCLE: grip-release -->
+<!-- LIFECYCLE: move -->
+<!-- LIFECYCLE: stop-troubleshooting -->
 
-受控启动器先验证，再要求输入 `HARDWARE-READY`，然后以不回显、不持久化的方式提示密码。仅其子进程提供精确的运动确认。
-
-```powershell
-# LIFECYCLE: move
-Write-Host 'Inside the guarded program, type exactly: MOVE'
-```
-
-将 Grip 按过 `0.9` 一次以锚定；第一次按下不得跳变。每次仅移动一个轴几毫米，观察方向和速度，然后松开 Grip。首跑路径刻意禁用夹爪写入和视觉控制。
-
-```powershell
-# LIFECYCLE: stop-troubleshooting
-Write-Host 'Release Grip; for any unexpected motion use physical E-stop/Web Stop, then Ctrl+C.'
-```
+上面的启动器顺序是实际操作说明，不是用 shell 命令模拟的流程。将 Grip 按过 `0.9` 一次以锚定；第一次按下不得跳变。每次仅移动一个轴几毫米，观察方向和速度，然后松开 Grip。首跑路径刻意禁用夹爪写入和视觉控制。
 
 若发生陈旧输入、UDP、换源、工作区、watchdog 或 Stop 故障：保持人员远离，按需要使用实体 Stop，不要在锁存故障后重新启动，检查线缆/网络/夹具，再从适当门禁重做。PICO 故障检查头显应用是否在前台、左手柄 tracking、受信任 LAN/VLAN、VPN/AP 隔离和窄范围 UDP 15031 规则。Kortex 故障时不得随意更换固件或 SDK；确认必需 wheel/固件组合并重新执行只读 T0。
 
