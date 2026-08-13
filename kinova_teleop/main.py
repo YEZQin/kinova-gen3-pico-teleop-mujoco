@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from importlib.machinery import PathFinder
 import json
 import math
 import os
@@ -67,6 +68,7 @@ DEFAULT_MUJOCO_STALE_TIMEOUT = 0.2
 DEFAULT_MOTION_RUN_ID = "gen3-first-hardware"
 DEFAULT_MOTION_OWNER = "kinova-teleop"
 _FULL_GIT_REVISION = re.compile(r"[0-9a-f]{40}")
+_PYTHON_STARTUP_HOOKS = ("sitecustomize", "usercustomize")
 
 
 class _BackendDefaultsParser(argparse.ArgumentParser):
@@ -598,6 +600,28 @@ def _current_clean_code_revision() -> str:
             text=True,
             timeout=5.0,
         )
+        startup_hook_paths = []
+        for module_name in _PYTHON_STARTUP_HOOKS:
+            spec = PathFinder.find_spec(module_name, [str(project)])
+            if spec is not None and spec.origin not in (None, "built-in", "frozen"):
+                startup_hook_paths.append(
+                    Path(spec.origin).relative_to(project).as_posix()
+                )
+        tracked_paths: set[str] = set()
+        if startup_hook_paths:
+            tracked_startup_hooks = subprocess.run(
+                ["git", "ls-files", "--cached", "-z", "--", *startup_hook_paths],
+                cwd=project,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+            tracked_paths = {
+                path.replace("\\", "/").casefold()
+                for path in tracked_startup_hooks.stdout.split("\0")
+                if path
+            }
         revision_result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=project,
@@ -610,6 +634,13 @@ def _current_clean_code_revision() -> str:
         raise ValueError("cannot establish the running code revision") from error
     if status.stdout.strip():
         raise ValueError("tracked worktree must be clean for Kortex motion")
+    untracked_hooks = [
+        path for path in startup_hook_paths if path.casefold() not in tracked_paths
+    ]
+    if untracked_hooks:
+        raise ValueError(
+            f"untracked Python startup hook: {untracked_hooks[0]}"
+        )
     revision = revision_result.stdout.strip().lower()
     if _FULL_GIT_REVISION.fullmatch(revision) is None:
         raise ValueError("running code revision is invalid")

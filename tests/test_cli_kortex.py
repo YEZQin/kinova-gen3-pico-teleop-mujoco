@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import subprocess
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,6 +15,7 @@ import pytest
 from kinova_teleop.main import (
     _approve_fixed_segment,
     _cleanup_resources,
+    _current_clean_code_revision,
     _validate_args,
     _validate_kortex_args,
     build_parser,
@@ -27,6 +30,98 @@ main_module = importlib.import_module("kinova_teleop.main")
 @pytest.fixture(autouse=True)
 def _stable_test_code_revision(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "_current_clean_code_revision", lambda: "b" * 40)
+
+
+def _initialize_git_fixture(project: Path) -> str:
+    (project / "kinova_teleop").mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet"], cwd=project, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Kinova Test",
+            "-c",
+            "user.email=kinova-test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+        cwd=project,
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("hook_name", ("sitecustomize.py", "usercustomize.py"))
+def test_untracked_root_python_startup_hook_rejects_before_hardware_side_effects(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+    hook_name: str,
+) -> None:
+    project = tmp_path / "repo"
+    _initialize_git_fixture(project)
+    (project / hook_name).write_text("raise AssertionError('imported')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "__file__",
+        str(project / "kinova_teleop" / "main.py"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_current_clean_code_revision",
+        _current_clean_code_revision,
+    )
+    calls = _install_unreachable_connection_factory(monkeypatch)
+    prompts: list[str] = []
+    monkeypatch.setattr(
+        main_module.os,
+        "getenv",
+        lambda _name: (_ for _ in ()).throw(AssertionError("password read")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "validate_kortex_runtime",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime checked")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "create_input",
+        lambda _args: (_ for _ in ()).throw(AssertionError("input constructed")),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "MOVE")
+
+    assert main(_valid_motion_argv()) == 2
+    assert calls == []
+    assert prompts == []
+    assert f"untracked Python startup hook: {hook_name}" in capsys.readouterr().err
+
+
+def test_untracked_non_hook_artifacts_do_not_block_clean_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "repo"
+    revision = _initialize_git_fixture(project)
+    (project / "results").mkdir()
+    (project / "results" / "trial.json").write_text("{}\n", encoding="utf-8")
+    (project / ".pytest-local").mkdir()
+    (project / ".pytest-local" / "state").write_text("ok\n", encoding="utf-8")
+    monkeypatch.setattr(
+        main_module,
+        "__file__",
+        str(project / "kinova_teleop" / "main.py"),
+    )
+
+    assert _current_clean_code_revision() == revision
 
 
 def _motion_gate_args(arguments: list[str]) -> list[str]:
