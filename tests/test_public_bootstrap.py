@@ -301,6 +301,29 @@ def test_public_bootstrap_offline_fixture_uses_fake_python_and_never_invokes_adb
     assert not any(project.rglob("*.apk"))
 
 
+def test_public_bootstrap_local_wheel_override_never_requires_release_download(
+    tmp_path: Path,
+) -> None:
+    project, fake_python, environment = _prepare_offline_project(tmp_path)
+    local_wheel = tmp_path / "kortex_api-2.8.0.post5-py3-none-any.whl"
+    local_wheel.write_bytes(b"wheel")
+    (project / "downloads" / local_wheel.name).unlink()
+
+    result = _run_bootstrap(
+        project,
+        fake_python,
+        environment,
+        "-SkipOfflineTests",
+        "-KortexWheel",
+        str(local_wheel),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (project / "downloads" / local_wheel.name).exists()
+    receipt = json.loads((project / "local-config" / "install-receipt.json").read_text())
+    assert receipt["asset_sha256"]["kortex_wheel"] == hashlib.sha256(b"wheel").hexdigest()
+
+
 def test_public_bootstrap_has_no_apk_install_parameter_or_adb_side_effect(
     tmp_path: Path,
 ) -> None:

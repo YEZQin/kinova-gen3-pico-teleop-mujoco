@@ -211,10 +211,21 @@ $manifest = Get-Content -LiteralPath $resolvedManifest -Raw | ConvertFrom-Json
 $assets = @($manifest.assets)
 $kortexAsset = Get-ManifestAsset $assets '.whl' 'Kortex wheel'
 $resolvedDownloadDirectory = Resolve-OrCreateDirectory $DownloadDirectory 'DownloadDirectory'
+$resolvedKortexOverride = if ([string]::IsNullOrWhiteSpace($KortexWheel)) {
+    $null
+} else {
+    Resolve-OptionalAsset $KortexWheel $kortexAsset `
+        (Join-Path $resolvedDownloadDirectory $kortexAsset.name) 'KortexWheel'
+}
 
 $downloadedPaths = @()
 foreach ($asset in $assets) {
-    $destination = Join-Path $resolvedDownloadDirectory $asset.name
+    $destination = if ($null -ne $resolvedKortexOverride -and
+        $asset.name -ceq $kortexAsset.name) {
+        $resolvedKortexOverride
+    } else {
+        Join-Path $resolvedDownloadDirectory $asset.name
+    }
     if (-not (Test-Path -LiteralPath $destination)) {
         $approvedDownloadUri = Resolve-ReleaseAssetDownloadUri $asset.download_url
         # The resolver follows only the documented, bounded GitHub release asset host allow-list.
@@ -244,8 +255,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "Downloaded release asset verification failed with exit code $LASTEXITCODE"
 }
 
-$resolvedKortexWheel = Resolve-OptionalAsset $KortexWheel $kortexAsset `
-    (Join-Path $resolvedDownloadDirectory $kortexAsset.name) 'KortexWheel'
+$resolvedKortexWheel = if ($null -ne $resolvedKortexOverride) {
+    $resolvedKortexOverride
+} else {
+    Join-Path $resolvedDownloadDirectory $kortexAsset.name
+}
 $selectedAssetPaths = @($resolvedKortexWheel)
 $selectedAssetVerificationArguments = @('-c', $assetVerificationScript, $resolvedManifest) + $selectedAssetPaths
 & $resolvedPython @selectedAssetVerificationArguments
