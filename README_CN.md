@@ -14,11 +14,11 @@ Grip 是离合器：先释放到低于 `0.8`，再按到高于 `0.9` 才会建�
 
 ## 开始前
 
-请使用原生 Windows 10/11 PowerShell 5.1+（不使用 WSL）、Git、CPython **3.11.x**，以及用于 USB 安装的 Android platform tools/ADB。若选择从源码构建 APK，请通过 Unity Hub 安装 Unity `2022.3.62f3c1`，并勾选 Android Build Support、SDK/NDK 和 OpenJDK。桥接源码固定 PICO OpenXR SDK `3aa3e62bff41df618529eeb60ff02c29a515dafe`。
+请使用原生 Windows 10/11 PowerShell 5.1+（不使用 WSL）、Git、CPython **3.11.x**，以及用于 USB 安装的 Android platform tools/ADB。要在本地构建所需 APK，请通过 Unity Hub 安装 Unity `2022.3.62f3c1`，并勾选 Android Build Support、SDK/NDK 和 OpenJDK。桥接工程从[官方源码](https://github.com/Pico-Developer/PICO-Unity-OpenXR-SDK/tree/3aa3e62bff41df618529eeb60ff02c29a515dafe)获取 PICO OpenXR SDK commit `3aa3e62bff41df618529eeb60ff02c29a515dafe`；使用前请阅读该提交的[官方许可证](https://github.com/Pico-Developer/PICO-Unity-OpenXR-SDK/blob/3aa3e62bff41df618529eeb60ff02c29a515dafe/LICENSE.md)。
 
 <!-- RELEASE-ASSET-STATE: published -->
 
-APK 和 Kortex wheel 是带 SHA-256 校验的 `v0.2.0-rc.1` 发布资产，不是仓库二进制文件。[release/public-release-assets.json](release/public-release-assets.json) 跟踪其精确名称、URL、哈希和大小；bootstrap 会在使用前验证每个本地或下载资产。
+Kortex wheel 是 [release/public-release-assets.json](release/public-release-assets.json) 声明的唯一二进制；bootstrap 会在使用前校验该 `v0.2.0-rc.1` 资产。**APK intentionally not redistributed due to PICO SDK terms; build locally（因 PICO SDK 条款，有意不再分发 APK；请在本地构建）。** APK 和 PICO SDK 二进制均不是 GitHub release 资产；PICO 条款属于专有条款，并非 OSI 批准的许可证。
 
 将头显和 PC 放入同一受信任 LAN/VLAN；不要设置固定 PICO 地址。如果 Windows Firewall 提示，仅在受信任网络配置文件中允许 Python 入站 UDP `15031`。不要创建宽泛规则、把端口暴露给公用网络、使用 `adb tcpip`、`adb connect` 或 ADB reverse；脚本不会创建防火墙规则。
 
@@ -39,19 +39,15 @@ Set-Location .\kinova-gen3-pico-teleop
 .\scripts\bootstrap_public_teleop.ps1
 ```
 
-Bootstrap 验证受跟踪的发布清单、资产身份/SHA-256，创建 `.venv-kortex`，先安装 wheel 再安装项目，固定 protobuf 3.20.0，并进行导入/离线检查。它不连接机器人、不保留凭据、不修改防火墙。
+Bootstrap 验证受跟踪的发布清单，只下载并校验 Kortex wheel，创建 `.venv-kortex`，先安装 wheel 再安装项目，固定 protobuf 3.20.0，并进行导入/离线检查。它绝不下载或安装 APK、不连接机器人、不保留凭据、不修改防火墙。
 
 ```powershell
 # LIFECYCLE: apk-install
-.\scripts\bootstrap_public_teleop.ps1 -InstallApk
-```
-
-该操作要求恰好一台已授权 ADB 设备。也可以在安装 Unity 后本地构建 APK，并只安装到已授权设备：
-
-```powershell
 $unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
 .\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
 ```
+
+该受跟踪脚本通过 Unity 从官方上游取得固定 SDK，在本地构建 APK，并且只安装刚构建出的普通文件。`-Install` 要求恰好一台已授权 ADB 设备；省略该开关即可构建但不接触设备。除非另行取得再分发许可，否则绝不上传或再分发生成的 APK。
 
 在头显中打开 **Kinova PICO Bridge**。若 ADB 无法启动它，请从头显应用库手动打开；不要为了让 ADB 工作而改变网络拓扑。
 
@@ -158,4 +154,4 @@ $profileRoot = Split-Path -Parent (Resolve-Path local-config\teleop-profile.json
 git diff --check
 ```
 
-简要顺序：clone → 校验 bootstrap 资产 → 安装/打开 APK → PICO gate → MuJoCo finite → calibration → read-only T0 → 本地测量/package → offline validation → 九项实体检查 → guarded launcher → release/press Grip → 精确 `MOVE` → Stop 并调查所有故障。
+简要顺序：clone → bootstrap wheel → 本地构建/安装 APK → 打开 APK → PICO gate → MuJoCo finite → calibration → read-only T0 → 本地测量/package → offline validation → 九项实体检查 → guarded launcher → release/press Grip → 精确 `MOVE` → Stop 并调查所有故障。

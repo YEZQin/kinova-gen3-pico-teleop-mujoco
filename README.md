@@ -14,11 +14,11 @@ Grip is a clutch: release below `0.8`, then press above `0.9` to create a new an
 
 ## Before you begin
 
-Use native Windows 10/11 PowerShell 5.1+ (not WSL), Git, CPython **3.11.x**, and Android platform tools/ADB for USB installation. For an APK build alternative, install Unity `2022.3.62f3c1` with Android Build Support, SDK/NDK, and OpenJDK. The bridge source pins PICO OpenXR SDK `3aa3e62bff41df618529eeb60ff02c29a515dafe`.
+Use native Windows 10/11 PowerShell 5.1+ (not WSL), Git, CPython **3.11.x**, and Android platform tools/ADB for USB installation. To build the required APK locally, install Unity `2022.3.62f3c1` with Android Build Support, SDK/NDK, and OpenJDK. The bridge project obtains PICO OpenXR SDK commit `3aa3e62bff41df618529eeb60ff02c29a515dafe` from its [official source](https://github.com/Pico-Developer/PICO-Unity-OpenXR-SDK/tree/3aa3e62bff41df618529eeb60ff02c29a515dafe); review its [official license](https://github.com/Pico-Developer/PICO-Unity-OpenXR-SDK/blob/3aa3e62bff41df618529eeb60ff02c29a515dafe/LICENSE.md) before use.
 
 <!-- RELEASE-ASSET-STATE: published -->
 
-The APK and Kortex wheel are hash-checked `v0.2.0-rc.1` release assets, not repository blobs. Their exact names, URLs, hashes, and sizes are tracked in [release/public-release-assets.json](release/public-release-assets.json), and bootstrap verifies every local or downloaded asset before use.
+The Kortex wheel is the only binary declared in [release/public-release-assets.json](release/public-release-assets.json); bootstrap hash-checks that `v0.2.0-rc.1` asset before use. **APK intentionally not redistributed due to PICO SDK terms; build locally.** Neither the APK nor PICO SDK binaries are GitHub release assets. The PICO terms are proprietary, not an OSI-approved license.
 
 Put the headset and PC on the same trusted LAN/VLAN. Do not set fixed PICO addresses. Permit only inbound UDP `15031` for Python on that trusted profile if Windows Firewall asks; do not add broad rules, expose the port to public networks, use `adb tcpip`, `adb connect`, or ADB reverse. The scripts never create a firewall rule.
 
@@ -39,19 +39,15 @@ If you cannot use Git, download the ZIP from that same publication branch and ex
 .\scripts\bootstrap_public_teleop.ps1
 ```
 
-Bootstrap validates the tracked release manifest, verifies asset identity/SHA-256, creates `.venv-kortex`, installs the wheel before the project, pins protobuf 3.20.0, and performs import/offline checks. It does not contact a robot, retain credentials, or alter firewall rules.
+Bootstrap validates the tracked release manifest, downloads and verifies only the Kortex wheel, creates `.venv-kortex`, installs the wheel before the project, pins protobuf 3.20.0, and performs import/offline checks. It never downloads or installs an APK, contacts a robot, retains credentials, or alters firewall rules.
 
 ```powershell
 # LIFECYCLE: apk-install
-.\scripts\bootstrap_public_teleop.ps1 -InstallApk
-```
-
-This requires exactly one authorized ADB device. Alternatively build the APK locally (after Unity is installed) and install only onto an authorized device:
-
-```powershell
 $unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
 .\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
 ```
+
+This tracked script obtains the pinned SDK from official upstream through Unity, builds the APK locally, and installs only the newly built regular artifact. `-Install` requires exactly one authorized ADB device; omit it to build without touching a device. Never upload or redistribute the resulting APK unless you independently obtain redistribution permission.
 
 Open **Kinova PICO Bridge** on the headset. If ADB cannot start it, start it from the headset library; do not change network topology to make ADB work.
 
@@ -158,4 +154,4 @@ For development-only checks (no hardware launcher):
 git diff --check
 ```
 
-Quick recap: clone → verify bootstrap assets → install/open the APK → PICO gate → finite MuJoCo → calibrate → read-only T0 → measure/package locally → offline validate → nine physical checks → guarded launcher → release/press Grip → exact `MOVE` → Stop and investigate every fault.
+Quick recap: clone → bootstrap the wheel → build/install the APK locally → open it → PICO gate → finite MuJoCo → calibrate → read-only T0 → measure/package locally → offline validate → nine physical checks → guarded launcher → release/press Grip → exact `MOVE` → Stop and investigate every fault.

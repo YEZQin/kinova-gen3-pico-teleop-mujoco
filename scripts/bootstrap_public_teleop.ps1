@@ -4,10 +4,7 @@ param(
     [string]$ReleaseManifest,
     [string]$DownloadDirectory,
     [string]$VenvDirectory,
-    [string]$ApkPath,
     [string]$KortexWheel,
-    [switch]$InstallApk,
-    [string]$DeviceSerial,
     [switch]$SkipOfflineTests
 )
 
@@ -212,7 +209,6 @@ if ($LASTEXITCODE -ne 0) {
 
 $manifest = Get-Content -LiteralPath $resolvedManifest -Raw | ConvertFrom-Json
 $assets = @($manifest.assets)
-$apkAsset = Get-ManifestAsset $assets '.apk' 'APK'
 $kortexAsset = Get-ManifestAsset $assets '.whl' 'Kortex wheel'
 $resolvedDownloadDirectory = Resolve-OrCreateDirectory $DownloadDirectory 'DownloadDirectory'
 
@@ -248,11 +244,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "Downloaded release asset verification failed with exit code $LASTEXITCODE"
 }
 
-$resolvedApk = Resolve-OptionalAsset $ApkPath $apkAsset `
-    (Join-Path $resolvedDownloadDirectory $apkAsset.name) 'ApkPath'
 $resolvedKortexWheel = Resolve-OptionalAsset $KortexWheel $kortexAsset `
     (Join-Path $resolvedDownloadDirectory $kortexAsset.name) 'KortexWheel'
-$selectedAssetPaths = @($resolvedApk, $resolvedKortexWheel)
+$selectedAssetPaths = @($resolvedKortexWheel)
 $selectedAssetVerificationArguments = @('-c', $assetVerificationScript, $resolvedManifest) + $selectedAssetPaths
 & $resolvedPython @selectedAssetVerificationArguments
 if ($LASTEXITCODE -ne 0) {
@@ -306,38 +300,6 @@ if (-not $SkipOfflineTests) {
     }
 }
 
-$installedDeviceSerial = $null
-if ($InstallApk) {
-    $adb = (Get-Command adb -CommandType Application -ErrorAction Stop |
-        Select-Object -First 1).Source
-    # adb devices is queried only after the explicit APK-install switch.
-    $adbLines = @(& $adb devices)
-    if ($LASTEXITCODE -ne 0) {
-        throw "ADB device discovery failed with exit code $LASTEXITCODE"
-    }
-    $deviceSerials = @(
-        $adbLines | ForEach-Object {
-            if ($_ -match '^(?<serial>\S+)\s+device\s*$') {
-                $Matches['serial']
-            }
-        }
-    )
-    if ($deviceSerials.Count -ne 1) {
-        throw 'APK installation requires exactly one authorized ADB device.'
-    }
-    $installedDeviceSerial = $deviceSerials[0]
-    if (-not [string]::IsNullOrWhiteSpace($DeviceSerial) -and
-        $installedDeviceSerial -cne $DeviceSerial) {
-        throw 'The requested DeviceSerial is not the exactly one authorized ADB device.'
-    }
-    # The sole device mutation is: adb -s SERIAL install -r APK.
-    $adbInstallArguments = @('-s', $installedDeviceSerial, 'install', '-r', $resolvedApk)
-    & $adb @adbInstallArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "APK installation failed with exit code $LASTEXITCODE"
-    }
-}
-
 $git = (Get-Command git -CommandType Application -ErrorAction Stop |
     Select-Object -First 1).Source
 $repositoryCommit = (& $git -C $projectRoot rev-parse HEAD).Trim()
@@ -352,11 +314,8 @@ $receipt = [ordered]@{
     venv_python_version = $venvVersion
     repository_commit = $repositoryCommit
     asset_sha256 = [ordered]@{
-        apk = (Get-FileHash -LiteralPath $resolvedApk -Algorithm SHA256).Hash.ToLowerInvariant()
         kortex_wheel = (Get-FileHash -LiteralPath $resolvedKortexWheel -Algorithm SHA256).Hash.ToLowerInvariant()
     }
-    apk_installed = [bool]$InstallApk
-    installed_device_serial = $installedDeviceSerial
 }
 $receiptPath = Join-Path $receiptDirectory 'install-receipt.json'
 $receiptJson = $receipt | ConvertTo-Json -Depth 5

@@ -6,3 +6,4 @@ pico_unity_bridge/**/*.yaml whitespace=-trailing-space
 pico_unity_bridge/**/*.yml whitespace=-trailing-space
 pico_unity_bridge/ProjectSettings/**/*.asset whitespace=-trailing-space
 docs/superpowers/** export-ignore
+.superpowers/** export-ignore

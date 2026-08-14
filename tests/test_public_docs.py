@@ -86,9 +86,9 @@ def test_bootstrap_is_gated_by_the_release_asset_state() -> None:
 def _assert_release_asset_documentation_state(document: str, manifest: dict[str, object]) -> None:
     assets = manifest["assets"]
     assert isinstance(assets, list)
-    apk = next(asset for asset in assets if asset["name"] == "kinova-pico-udp-bridge.apk")
-    assert isinstance(apk, dict)
-    fixture = apk["sha256"] == "a" * 64 and apk["size_bytes"] == 3
+    assert [asset["name"] for asset in assets] == [
+        "kortex_api-2.8.0.post5-py3-none-any.whl"
+    ]
     normalized = document.lower()
     bootstrap = next(block.lower() for block in _powershell_blocks(document) if "lifecycle: bootstrap" in block.lower())
     prepublication_terms = (
@@ -97,15 +97,10 @@ def _assert_release_asset_documentation_state(document: str, manifest: dict[str,
         "not an installable binary", "task 6 replaces", "cannot be installed",
         "task 6 将以真实资产替换", "不能安装", "发布占位", "未发布",
     )
-    if fixture:
-        assert "<!-- release-asset-state: prepublication-fixture -->" in normalized
-        assert "v0.2.0-rc.1 is not yet published" in normalized
-        assert "do not run until published" in normalized
-        assert "post-release only" in bootstrap
-    else:
-        assert "<!-- release-asset-state: published -->" in normalized
-        assert re.search(r"(?<!device-)(?<!device/)(?<!network/)fixture\b", normalized) is None
-        assert all(term not in normalized for term in prepublication_terms)
+    assert "<!-- release-asset-state: published -->" in normalized
+    assert re.search(r"(?<!device-)(?<!device/)(?<!network/)fixture\b", normalized) is None
+    assert all(term not in normalized for term in prepublication_terms)
+    assert "installapk" not in bootstrap and "apkpath" not in bootstrap
 
 
 def _published_document(document: str) -> str:
@@ -121,7 +116,9 @@ def _published_document(document: str) -> str:
 def test_real_manifest_branch_accepts_clean_published_readmes() -> None:
     real_manifest = {
         "assets": [{
-            "name": "kinova-pico-udp-bridge.apk", "sha256": "b" * 64, "size_bytes": 4,
+            "name": "kortex_api-2.8.0.post5-py3-none-any.whl",
+            "sha256": "b" * 64,
+            "size_bytes": 4,
         }]
     }
     for path in README_PATHS:
@@ -142,7 +139,9 @@ def test_real_manifest_branch_accepts_clean_published_readmes() -> None:
 def test_real_manifest_branch_rejects_each_stale_prepublication_phrase(stale_phrase: str) -> None:
     real_manifest = {
         "assets": [{
-            "name": "kinova-pico-udp-bridge.apk", "sha256": "b" * 64, "size_bytes": 4,
+            "name": "kortex_api-2.8.0.post5-py3-none-any.whl",
+            "sha256": "b" * 64,
+            "size_bytes": 4,
         }]
     }
     for path in README_PATHS:
@@ -159,8 +158,46 @@ def test_public_commands_reference_tracked_scripts_or_release_assets() -> None:
                 normalized = script.replace("\\", "/")
                 assert normalized in tracked, f"{path.name} references untracked script {normalized}"
     manifest = (ROOT / "release" / "public-release-assets.json").read_text(encoding="utf-8")
-    for asset in ("kinova-pico-udp-bridge.apk", "kortex_api-2.8.0.post5-py3-none-any.whl"):
-        assert asset in manifest
+    assert "kortex_api-2.8.0.post5-py3-none-any.whl" in manifest
+    assert ".apk" not in manifest.lower()
+
+
+def test_public_docs_build_the_nonredistributed_apk_locally() -> None:
+    source_url = "https://github.com/pico-developer/pico-unity-openxr-sdk/tree/"
+    license_url = "https://github.com/pico-developer/pico-unity-openxr-sdk/blob/"
+    for path in README_PATHS:
+        document = path.read_text(encoding="utf-8")
+        normalized = document.lower()
+        apk_block = next(
+            block.lower()
+            for block in _powershell_blocks(document)
+            if "lifecycle: apk-install" in block.lower()
+        )
+        assert "build_pico_udp_bridge.ps1" in apk_block
+        assert "bootstrap_public_teleop.ps1" not in apk_block
+        assert "2022.3.62f3c1" in document
+        assert "apk intentionally not redistributed" in normalized
+        assert "build locally" in normalized
+        assert source_url in normalized and license_url in normalized
+        assert "open source license" not in normalized
+        assert re.search(r"releases/download/[^\s)]+\.apk", normalized) is None
+
+
+def test_publication_design_and_plan_have_no_stale_apk_release_contract() -> None:
+    internal_docs = (
+        ROOT / "docs" / "superpowers" / "specs" / "2026-08-13-public-zero-to-kinova-teleop-design.md",
+        ROOT / "docs" / "superpowers" / "plans" / "2026-08-13-public-zero-to-kinova-teleop.md",
+    )
+    stale_terms = (
+        "supplied APK",
+        "APK and Kortex wheel are release assets",
+        "exact APK hash/size",
+        "four verified assets",
+    )
+    for path in internal_docs:
+        document = path.read_text(encoding="utf-8")
+        for stale_term in stale_terms:
+            assert stale_term not in document, f"{path.name}: {stale_term}"
 
 
 def test_public_docs_exclude_private_paths_secrets_and_laboratory_artifacts() -> None:
@@ -185,16 +222,17 @@ def test_all_tracked_markdown_excludes_developer_machine_paths() -> None:
 
 
 def test_public_source_archive_excludes_internal_plans() -> None:
-    result = subprocess.run(
-        [
-            "git", "-C", str(ROOT), "check-attr", "export-ignore", "--",
-            "docs/superpowers/specs/2026-08-10-gen3-pico-kortex-hardware-teleop-design.md",
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-    assert result.stdout.rstrip().endswith(": export-ignore: set")
+    for internal_path in (
+        "docs/superpowers/specs/2026-08-10-gen3-pico-kortex-hardware-teleop-design.md",
+        ".superpowers/sdd/2026-08-10-gen3-pico-kortex-hardware-completion/final-fix-report.md",
+    ):
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "check-attr", "export-ignore", "--", internal_path],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert result.stdout.rstrip().endswith(": export-ignore: set")
 
 
 def test_evidence_licenses_and_final_profile_limit_are_explicit() -> None:

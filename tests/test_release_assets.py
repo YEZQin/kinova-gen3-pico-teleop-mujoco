@@ -28,12 +28,6 @@ def valid_payload() -> dict[str, object]:
         "release": RELEASE,
         "assets": [
             {
-                "name": "kinova-pico-udp-bridge.apk",
-                "sha256": "a" * 64,
-                "size_bytes": 3,
-                "download_url": f"{DOWNLOAD_PREFIX}{RELEASE}/kinova-pico-udp-bridge.apk",
-            },
-            {
                 "name": "kortex_api-2.8.0.post5-py3-none-any.whl",
                 "sha256": "5796425d48f0ab70c56ce9ecf06b8ab91f0b951319266e5d4c0b179cdb9e99cf",
                 "size_bytes": 161265,
@@ -59,12 +53,6 @@ def test_load_release_manifest_accepts_the_public_release_contract(tmp_path: Pat
     assert manifest.release == RELEASE
     assert manifest.assets == (
         ReleaseAsset(
-            name="kinova-pico-udp-bridge.apk",
-            sha256="a" * 64,
-            size_bytes=3,
-            download_url=f"{DOWNLOAD_PREFIX}{RELEASE}/kinova-pico-udp-bridge.apk",
-        ),
-        ReleaseAsset(
             name="kortex_api-2.8.0.post5-py3-none-any.whl",
             sha256="5796425d48f0ab70c56ce9ecf06b8ab91f0b951319266e5d4c0b179cdb9e99cf",
             size_bytes=161265,
@@ -73,6 +61,46 @@ def test_load_release_manifest_accepts_the_public_release_contract(tmp_path: Pat
             ),
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "kinova-pico-udp-bridge.apk",
+        "unrelated-py3-none-any.whl",
+        "THIRD_PARTY_NOTICES.txt",
+    ),
+)
+def test_load_release_manifest_rejects_non_kortex_public_assets(
+    tmp_path: Path, name: str
+) -> None:
+    payload = valid_payload()
+    payload["assets"] = [
+        {
+            "name": name,
+            "sha256": "a" * 64,
+            "size_bytes": 3,
+            "download_url": f"{DOWNLOAD_PREFIX}{RELEASE}/{name}",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="exactly the Kortex wheel"):
+        load_release_manifest(write_manifest(tmp_path, payload))
+
+
+def test_load_release_manifest_rejects_an_extra_public_asset(tmp_path: Path) -> None:
+    payload = valid_payload()
+    payload["assets"].append(  # type: ignore[union-attr]
+        {
+            "name": "kinova-pico-udp-bridge.apk",
+            "sha256": "a" * 64,
+            "size_bytes": 3,
+            "download_url": f"{DOWNLOAD_PREFIX}{RELEASE}/kinova-pico-udp-bridge.apk",
+        }
+    )
+
+    with pytest.raises(ValueError, match="exactly the Kortex wheel"):
+        load_release_manifest(write_manifest(tmp_path, payload))
 
 
 def test_load_release_manifest_rejects_duplicate_json_keys(tmp_path: Path) -> None:

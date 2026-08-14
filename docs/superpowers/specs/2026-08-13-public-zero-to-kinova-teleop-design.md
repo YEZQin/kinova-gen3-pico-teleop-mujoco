@@ -39,15 +39,15 @@ A Draft PR will target `main`.
 A GitHub pre-release named `v0.2.0-rc.1` will point at the exact validated
 publication commit. It will contain:
 
-- `kinova-pico-udp-bridge.apk`, rebuilt from the publication commit;
 - `kortex_api-2.8.0.post5-py3-none-any.whl`;
-- `SHA256SUMS.txt` covering every binary release asset;
+- `SHA256SUMS.txt` covering the wheel and notices;
 - `THIRD_PARTY_NOTICES.txt` containing the Kinova and relevant binary
   redistribution notices.
 
-The APK and Kortex wheel are release assets, not normal Git blobs. The source
-tree will contain their expected names, versions, SHA-256 values, download
-locations, and reproducible build/install instructions. No release or tag may
+The Kortex wheel is the only binary release asset and is not a normal Git blob.
+The source tree contains its expected name, version, SHA-256, and download
+location. The APK is local-build evidence only; tracked instructions use the
+exact Unity/PICO pins and never advertise an APK download. No release or tag may
 be advertised until GitHub confirms that it exists and points at the validated
 commit.
 
@@ -62,10 +62,11 @@ Both documents must contain this zero-to-run sequence:
 1. supported hardware, evidence level, architecture, and limitations;
 2. install Git, Python 3.11, ADB/Android tooling, and required Windows tools;
 3. clone the exact publication branch or download its ZIP;
-4. run the bootstrap installer, which downloads or accepts the release assets,
-   verifies SHA-256, creates a local venv, and installs the project plus Kortex
-   wheel without storing credentials;
-5. install the supplied APK with ADB or use the documented headset-side path;
+4. run the bootstrap installer, which downloads or accepts the Kortex wheel,
+   verifies SHA-256, creates a local venv, and installs the project plus wheel
+   without storing credentials;
+5. build the APK locally with the tracked Unity script and optionally install
+   that newly built artifact to the single authorized ADB device;
 6. start the PICO Bridge and pass a PICO-only fresh-sample/Grip check;
 7. run the deterministic MuJoCo 2000-step finite-state check;
 8. capture or load an operator-axis calibration and verify right/up/forward;
@@ -94,15 +95,20 @@ copyable defaults.
 The publication will add a focused bootstrap script that:
 
 - validates Windows PowerShell and Python 3.11;
-- obtains the APK and Kortex wheel from the exact GitHub pre-release, or accepts
-  explicitly supplied local files;
-- verifies the pinned SHA-256 values before install;
+- obtains only the Kortex wheel from the exact GitHub pre-release, or accepts
+  an explicitly supplied local wheel;
+- verifies its pinned SHA-256 before install;
 - creates `.venv-kortex` and installs the wheel, project, and locked compatible
   dependencies;
-- optionally installs the APK only after confirming exactly one authorized
-  PICO ADB device;
 - performs import-only and offline checks;
 - never changes the firewall automatically and never contacts the robot.
+
+The PICO APK is intentionally excluded from public assets because the pinned
+PICO SDK terms require prior written permission for dissemination or
+reproduction. Users obtain the pinned SDK from its official upstream and use
+the tracked Unity build script locally. APK installation, when requested, is a
+same-invocation local build step guarded by exactly one authorized ADB device;
+bootstrap never downloads or installs an APK.
 
 A separate local setup tool will guide the operator through calibration and
 hardware-package creation. Its responsibilities are:
@@ -146,9 +152,10 @@ required for first motion.
 The repository remains MIT licensed for project-owned source. The Kinova
 Kortex wheel declares BSD-3-Clause metadata and will be redistributed only
 with the Kinova copyright, conditions, disclaimer, exact upstream identity,
-version, and SHA-256. The PICO APK is a compiled artifact of this repository's
-Unity project; third-party Unity/PICO components and their source pins will be
-identified in the notices and README.
+version, and SHA-256. The PICO APK is a local compiled artifact of this
+repository's Unity project and is not redistributed. The notices and README
+link the official pinned Unity/PICO source and exact license and explain the
+local build boundary without describing the proprietary terms as open source.
 
 The release must not contain Unity installation files, Android SDK/NDK files,
 virtual environments, firmware packages, private SDK directories, generated
@@ -175,8 +182,8 @@ Before any push or GitHub release:
   and re-verify SHA-256.
 
 The final handoff must provide actual URLs for the branch README, Chinese
-README, branch ZIP, Draft PR, pre-release, APK, Kortex wheel, checksums, and
-clone command.
+README, branch ZIP, Draft PR, pre-release, Kortex wheel, checksums, notices,
+and clone command. The local APK build hash is evidence, not a public URL.
 
 ## Acceptance criteria
 

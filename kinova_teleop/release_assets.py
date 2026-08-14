@@ -20,6 +20,7 @@ _ASSET_FIELDS = frozenset({"name", "sha256", "size_bytes", "download_url"})
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _RELEASE_PATTERN = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?")
 _READ_CHUNK_BYTES = 1024 * 1024
+KORTEX_WHEEL_NAME = "kortex_api-2.8.0.post5-py3-none-any.whl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +145,8 @@ def load_release_manifest(path: Path) -> ReleaseManifest:
     assets = tuple(_validate_asset(asset, release) for asset in raw_assets)
     if len({asset.name for asset in assets}) != len(assets):
         raise ValueError("asset names must be unique")
+    if len(assets) != 1 or assets[0].name != KORTEX_WHEEL_NAME:
+        raise ValueError("assets must contain exactly the Kortex wheel")
     return ReleaseManifest(schema_version, release, assets)
 
 

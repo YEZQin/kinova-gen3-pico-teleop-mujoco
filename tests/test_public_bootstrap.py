@@ -24,10 +24,7 @@ def test_public_bootstrap_exposes_the_safe_windows_cli(bootstrap_source: str) ->
         "ReleaseManifest",
         "DownloadDirectory",
         "VenvDirectory",
-        "ApkPath",
         "KortexWheel",
-        "InstallApk",
-        "DeviceSerial",
         "SkipOfflineTests",
     ):
         assert f"${parameter}" in bootstrap_source
@@ -79,16 +76,11 @@ def test_public_bootstrap_uses_argument_arrays_and_required_install_order(
     assert positions == sorted(positions)
 
 
-def test_public_bootstrap_never_touches_a_device_without_the_explicit_switch(
+def test_public_bootstrap_has_no_device_or_apk_surface(
     bootstrap_source: str,
 ) -> None:
-    install_guard = bootstrap_source.index("if ($InstallApk)")
-    adb_commands = bootstrap_source.index("adb devices")
-    assert install_guard < adb_commands
-    assert "adb -s" in bootstrap_source
-    assert "install -r" in bootstrap_source
-    assert "adb tcpip" not in bootstrap_source
-    assert "adb connect" not in bootstrap_source
+    for forbidden in ("InstallApk", "ApkPath", "DeviceSerial", "adb", ".apk"):
+        assert forbidden.lower() not in bootstrap_source.lower()
     assert "New-NetFirewallRule" not in bootstrap_source
     assert "netsh advfirewall" not in bootstrap_source
 
@@ -185,10 +177,7 @@ public static class FakePython {
 def _write_release_manifest(project: Path) -> None:
     downloads = project / "downloads"
     downloads.mkdir()
-    assets = {
-        "kinova-pico-udp-bridge.apk": b"apk",
-        "kortex_api-2.8.0.post5-py3-none-any.whl": b"wheel",
-    }
+    assets = {"kortex_api-2.8.0.post5-py3-none-any.whl": b"wheel"}
     release = "v0.2.0-rc.1"
     prefix = "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/releases/download"
     manifest_assets = []
@@ -306,7 +295,37 @@ def test_public_bootstrap_offline_fixture_uses_fake_python_and_never_invokes_adb
     assert not adb_log.exists()
     receipt = json.loads((project / "local-config" / "install-receipt.json").read_text())
     assert receipt["repository_commit"]
-    assert receipt["asset_sha256"]["apk"] == hashlib.sha256(b"apk").hexdigest()
+    assert receipt["asset_sha256"] == {
+        "kortex_wheel": hashlib.sha256(b"wheel").hexdigest()
+    }
+    assert not any(project.rglob("*.apk"))
+
+
+def test_public_bootstrap_has_no_apk_install_parameter_or_adb_side_effect(
+    tmp_path: Path,
+) -> None:
+    project, fake_python, environment = _prepare_offline_project(tmp_path)
+    local_apk = tmp_path / "locally-built.apk"
+    local_apk.write_bytes(b"local-only")
+    adb_log = Path(environment["FAKE_ADB_LOG"])
+    (tmp_path / "adb.cmd").write_text(
+        "@echo %*>>\"%FAKE_ADB_LOG%\"\r\n@echo List of devices attached\r\n@echo one device\r\n",
+        encoding="utf-8",
+    )
+
+    result = _run_bootstrap(
+        project,
+        fake_python,
+        environment,
+        "-SkipOfflineTests",
+        "-InstallApk",
+        "-ApkPath",
+        str(local_apk),
+    )
+
+    assert result.returncode != 0
+    assert "InstallApk" in result.stderr and "parameter" in result.stderr.lower()
+    assert not adb_log.exists()
 
 
 def test_public_bootstrap_uses_a_fake_git_executable_for_gate_and_receipt(
@@ -541,28 +560,3 @@ def test_release_asset_redirect_resolver_executes_hermetic_redirect_chains(
     else:
         assert result.returncode != 0
         assert expected in result.stderr
-
-
-@pytest.mark.parametrize("device_lines, extra_arguments", [
-    ("one device\ntwo device", ()),
-    ("one device\ntwo device", ("-DeviceSerial", "one")),
-    ("one device", ("-DeviceSerial", "not-one")),
-])
-def test_public_bootstrap_rejects_ambiguous_or_unauthorized_adb_device(
-    tmp_path: Path, device_lines: str, extra_arguments: tuple[str, ...]
-) -> None:
-    project, fake_python, environment = _prepare_offline_project(tmp_path)
-    (tmp_path / "adb.cmd").write_text(
-        "@echo %*>>\"%FAKE_ADB_LOG%\"\r\n@echo List of devices attached\r\n"
-        + "\r\n".join(f"@echo {line}" for line in device_lines.split("\n"))
-        + "\r\n",
-        encoding="utf-8",
-    )
-
-    result = _run_bootstrap(
-        project, fake_python, environment, "-SkipOfflineTests", "-InstallApk", *extra_arguments
-    )
-
-    assert result.returncode != 0
-    assert "authorized ADB device" in result.stderr
-    assert "install -r" not in Path(environment["FAKE_ADB_LOG"]).read_text(encoding="utf-8")

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish a GitHub branch, Draft PR, and `v0.2.0-rc.1` pre-release that let a new Windows user install the supplied PICO APK and Kortex wheel, validate PICO/MuJoCo/Kortex, generate robot-specific guarded artifacts, and reach translation-only Gen3 teleoperation without developer-local files.
+**Goal:** Publish a GitHub branch, Draft PR, and `v0.2.0-rc.1` pre-release that let a new Windows user install the supplied Kortex wheel, build the PICO APK locally from the pinned official SDK source, validate PICO/MuJoCo/Kortex, generate robot-specific guarded artifacts, and reach translation-only Gen3 teleoperation without developer-local files.
 
-**Architecture:** Keep binary dependencies out of Git history and distribute them as hash-pinned GitHub pre-release assets. Add one PowerShell bootstrap boundary for clean-host installation, one Python calibration command for PICO-only operator-axis capture, and one Python hardware-package command that converts current T0 evidence plus explicit local bounds/checklist into strict lease/report/launcher artifacts. The existing `kinova_teleop.main` Kortex admission remains the only motion engine and continues to bind clean HEAD, calibration SHA, safety limits, evidence uniqueness, exact `MOVE`, watchdog, Stop, and source identity.
+**Architecture:** Keep binary dependencies out of Git history and distribute only the licensed Kortex wheel as a hash-pinned GitHub pre-release asset. Build the non-redistributed PICO APK locally through the tracked Unity script. Add one PowerShell bootstrap boundary for clean-host Python installation, one Python calibration command for PICO-only operator-axis capture, and one Python hardware-package command that converts current T0 evidence plus explicit local bounds/checklist into strict lease/report/launcher artifacts. The existing `kinova_teleop.main` Kortex admission remains the only motion engine and continues to bind clean HEAD, calibration SHA, safety limits, evidence uniqueness, exact `MOVE`, watchdog, Stop, and source identity.
 
 **Tech Stack:** Windows PowerShell 5.1+, CPython 3.11, pytest/coverage, NumPy, MuJoCo, Kinova Kortex API 2.8.0.post5/protobuf 3.20.0, Unity 2022.3.62f3c1/Android IL2CPP/OpenXR, GitHub CLI and GitHub Releases.
 
@@ -16,7 +16,7 @@
 - Public first motion is translation-only, no gripper writes, 40 Hz, stale timeout at most 0.2 s, angular cap at most 2 deg/s, and operator-selected linear cap no greater than 0.02 m/s.
 - Each robot must create its own calibration, T0 report, bounds, motion lease, reviewed report, evidence path, and generated launcher; never publish the laboratory's local report/lease/bounds as defaults.
 - Never hardcode or persist the robot password. Non-secret package checks precede the masked prompt; exact `MOVE` remains inside the Python motion process.
-- APK and Kortex wheel are release assets, not Git blobs. Pin exact SHA-256 and include redistribution notices.
+- The Kortex wheel is the only binary release asset. The APK is reproducible local-build evidence only and must not be uploaded without separate PICO redistribution permission.
 - No implementation or documentation step may connect to PICO or Kortex or run a motion launcher. Hardware/network work is reserved for a human following the published instructions.
 - Full regression coverage must remain at least 80%; final publication evidence must state the actual stronger result.
 - Never describe the project as safety-rated, unattended, production-safe, or universally hardware-validated.
@@ -45,12 +45,6 @@ Add tests that construct a valid manifest and reject duplicate JSON keys, unexpe
     "schema_version": "1.0",
     "release": "v0.2.0-rc.1",
     "assets": [
-        {
-            "name": "kinova-pico-udp-bridge.apk",
-            "sha256": "a" * 64,
-            "size_bytes": 3,
-            "download_url": "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/releases/download/v0.2.0-rc.1/kinova-pico-udp-bridge.apk",
-        },
         {
             "name": "kortex_api-2.8.0.post5-py3-none-any.whl",
             "sha256": "5796425d48f0ab70c56ce9ecf06b8ab91f0b951319266e5d4c0b179cdb9e99cf",
@@ -94,15 +88,15 @@ git commit -m "feat: define public release asset integrity"
 - Modify: `scripts/assert_no_untracked_python_startup_hooks.ps1`
 
 **Interfaces:**
-- CLI: `bootstrap_public_teleop.ps1 [-PythonExe <python.exe>] [-ReleaseManifest <json>] [-DownloadDirectory <dir>] [-VenvDirectory <dir>] [-ApkPath <apk>] [-KortexWheel <whl>] [-InstallApk] [-DeviceSerial <serial>] [-SkipOfflineTests]`.
-- Produces: verified `downloads/` binaries, `.venv-kortex/`, `local-config/install-receipt.json`, and optionally an APK installed on exactly one authorized PICO.
+- CLI: `bootstrap_public_teleop.ps1 [-PythonExe <python.exe>] [-ReleaseManifest <json>] [-DownloadDirectory <dir>] [-VenvDirectory <dir>] [-KortexWheel <whl>] [-SkipOfflineTests]`.
+- Produces: a verified wheel under `downloads/`, `.venv-kortex/`, and `local-config/install-receipt.json`; it has no APK or ADB surface.
 
 - [ ] **Step 1: Write bootstrap RED contract tests**
 
-Use temporary repositories plus fake `python`, `git`, `Invoke-WebRequest`, and `adb` shims. Assert that the script rejects non-Windows/Python-not-3.11, a dirty/untracked startup hook, manifest/hash/size mismatch, an existing non-venv target, multiple/unauthorized ADB devices, and download redirects outside HTTPS GitHub release assets. Assert that it never invokes ADB unless `-InstallApk`, never creates firewall rules, never reads `KINOVA_PASSWORD`, and orders:
+Use temporary repositories plus fake `python`, `git`, and `Invoke-WebRequest` shims. Assert that the script rejects non-Windows/Python-not-3.11, a dirty/untracked startup hook, manifest/hash/size mismatch, an existing non-venv target, and download redirects outside HTTPS GitHub release assets. Assert that it has no APK/ADB parameters or calls, never creates firewall rules, never reads `KINOVA_PASSWORD`, and orders:
 
 ```text
-startup hook gate -> manifest load -> downloads -> hash verification -> venv -> pip installs -> import-only check -> pytest/dry-run -> optional ADB install -> receipt
+startup hook gate -> manifest load -> wheel download -> hash verification -> venv -> pip installs -> import-only check -> pytest/dry-run -> receipt
 ```
 
 - [ ] **Step 2: Run RED**
@@ -115,9 +109,9 @@ Expected: missing bootstrap script failures.
 
 The script must default to the tracked manifest, `downloads`, and `.venv-kortex`; select a Python 3.11 executable; invoke the existing startup-hook gate; download only missing assets; call a small import-only Python snippet using `release_assets.load_release_manifest` and `verify_release_asset`; create the venv; install the Kortex wheel before `${projectRoot}[dev]`; pin `protobuf==3.20.0`; run `import kortex_api`, focused pytest, and `--dry-run --headless --steps 2000`; and write a receipt containing versions, hashes, Git HEAD, and no secret.
 
-- [ ] **Step 4: Implement safe APK installation**
+- [ ] **Step 4: Keep APK installation outside bootstrap**
 
-When `-InstallApk`, require ADB, parse `adb devices` to exactly one `device` entry or an exact authorized `-DeviceSerial`, run `adb -s SERIAL install -r APK`, and never run `adb tcpip`, `adb connect`, or firewall commands.
+Bootstrap must expose no APK or ADB parameter or call. Document the tracked Unity build script as the only local APK build/install path; its explicit `-Install` path requires exactly one authorized ADB device and installs only the APK produced by that same build invocation.
 
 - [ ] **Step 5: Run GREEN and commit**
 
@@ -273,26 +267,26 @@ git add README.md README_CN.md docs/kortex-hardware-quickstart.md docs/pico-udp-
 git commit -m "docs: add bilingual zero-to-Kinova guide"
 ```
 
-### Task 6: Publication branch, exact binaries, full validation, Draft PR, and pre-release
+### Task 6: Publication branch, licensed assets, full validation, Draft PR, and pre-release
 
 **Files:**
-- Modify: `release/public-release-assets.json` with exact APK hash/size and confirmed URLs
-- Create locally only: `artifacts/kinova-pico-udp-bridge.apk`
-- Create locally only: `artifacts/kortex_api-2.8.0.post5-py3-none-any.whl`
-- Create locally only: `artifacts/SHA256SUMS.txt`
-- Create locally only: `artifacts/THIRD_PARTY_NOTICES.txt`
+- Modify: `release/public-release-assets.json` to require only the exact Kortex wheel
+- Create locally only as non-upload evidence: `artifacts/local-build-evidence/kinova-pico-udp-bridge-<hash>.apk`
+- Stage for upload: `artifacts/release-staging-v0.2.0-rc.1/kortex_api-2.8.0.post5-py3-none-any.whl`
+- Stage for upload: `artifacts/release-staging-v0.2.0-rc.1/SHA256SUMS.txt`
+- Stage for upload: `artifacts/release-staging-v0.2.0-rc.1/THIRD_PARTY_NOTICES.txt`
 - Report: `.superpowers/sdd/2026-08-13-public-zero-to-kinova-teleop/final-report.md`
 
 **Interfaces:**
-- Produces remote branch `codex/public-gen3-pico-hardware-teleop`, Draft PR to `main`, and GitHub pre-release `v0.2.0-rc.1` with four verified assets.
+- Produces remote branch `codex/public-gen3-pico-hardware-teleop`, Draft PR to `main`, and GitHub pre-release `v0.2.0-rc.1` with exactly three verified assets and no APK.
 
 - [ ] **Step 1: Reconcile with remote main on a publication branch**
 
 Fetch `origin`, create `codex/public-gen3-pico-hardware-teleop` from the completed feature tip, and merge `origin/main` with a merge commit. Resolve conflicts by preserving the new bilingual/public workflow and the latest stable-main changes. Do not modify local or remote `main`.
 
-- [ ] **Step 2: Build the exact APK**
+- [ ] **Step 2: Build the exact local-only APK evidence**
 
-Use Unity `2022.3.62f3c1` and the tracked `build_pico_udp_bridge.ps1` without installation to run EditMode tests and build ARM64/IL2CPP from the exact publication commit. Copy only the resulting APK to `artifacts/kinova-pico-udp-bridge.apk`, compute SHA-256/size, update the tracked manifest, and commit:
+Use Unity `2022.3.62f3c1` and the tracked `build_pico_udp_bridge.ps1` without installation to run EditMode tests and build ARM64/IL2CPP from the exact publication commit. Record the reproducible APK SHA-256/size as local build evidence only. Do not add it to the manifest, public staging, tag, or release.
 
 ```powershell
 git add release/public-release-assets.json
@@ -301,11 +295,11 @@ git commit -m "chore: pin public release binaries"
 
 - [ ] **Step 3: Assemble and scan release assets**
 
-Copy the exact Kortex wheel and notices to `artifacts`, create sorted `SHA256SUMS.txt`, inspect archive/APK contents for secrets and developer paths, verify Kortex metadata/license, and confirm no firmware, virtualenv, Unity installation, logs, serial numbers, credentials, or private report is present.
+Copy the exact Kortex wheel and notices to dedicated staging, create sorted `SHA256SUMS.txt` covering those two files, inspect all three public assets for secrets and developer paths, verify Kortex metadata/license, and confirm no APK, firmware, virtualenv, Unity installation, logs, serial numbers, credentials, or private report is present.
 
 - [ ] **Step 4: Test from a clean temporary checkout**
 
-Clone the local publication commit into a temporary directory with no reused venv. Run the bootstrap against local asset overrides, without APK installation or network/robot access; run calibration and package CLIs against deterministic fixtures; run documentation command/path checks. Verify the temporary tree creates only ignored `downloads`, `.venv-kortex`, and `local-config` outputs.
+Clone the local publication commit into a temporary directory with no reused venv. Run the bootstrap against a local wheel override, without network/robot access; run calibration and package CLIs against deterministic fixtures; run documentation command/path checks. Verify the temporary tree creates only ignored `downloads`, `.venv-kortex`, and `local-config` outputs and no APK.
 
 - [ ] **Step 5: Run final verification**
 
@@ -329,7 +323,7 @@ Push the named branch with upstream tracking; verify `git rev-parse HEAD` equals
 
 - [ ] **Step 7: Create and verify pre-release**
 
-Create annotated tag `v0.2.0-rc.1` at the exact remote branch head and a GitHub pre-release with the APK, wheel, checksums, and notices. Download all four assets into a fresh directory and verify their SHA-256 against `SHA256SUMS.txt`. Verify the GitHub tag target equals the validated commit.
+Create annotated tag `v0.2.0-rc.1` at the exact remote branch head and a GitHub pre-release with exactly the wheel, checksums, and notices. Download all three assets into a fresh directory, verify the wheel and notices against `SHA256SUMS.txt`, and verify the GitHub tag target equals the validated commit. Confirm no APK asset exists.
 
 - [ ] **Step 8: Write final report and handoff links**
 
@@ -340,5 +334,5 @@ Record local/remote/tag hashes, tests, coverage, Unity build evidence, asset has
 ## Plan self-review
 
 - Spec coverage: all publication topology, binary, bilingual docs, bootstrap, calibration, robot-local package, evidence, licensing, validation, push, PR, release, and link requirements map to Tasks 1–6.
-- Placeholder scan: no TBD/TODO/deferred implementation instruction remains. Release hashes that cannot exist before the exact APK build are updated and committed explicitly in Task 6 before publication.
+- Placeholder scan: no TBD/TODO/deferred implementation instruction remains. The exact APK hash is retained only as local reproducible-build evidence; it is never added to the public manifest or release.
 - Interface consistency: Task 1 manifest is consumed by Task 2; Task 3 output is accepted by the existing strict calibration loader and consumed by Task 4; Task 4 artifacts are consumed by the existing `kinova_teleop.main`; Task 5 documents only these tracked interfaces; Task 6 validates and publishes their exact commit.

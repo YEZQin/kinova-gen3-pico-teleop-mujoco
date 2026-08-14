@@ -3,12 +3,6 @@
   "release": "v0.2.0-rc.1",
   "assets": [
     {
-      "name": "kinova-pico-udp-bridge.apk",
-      "sha256": "27abd5aa975ecce36df6ba151c115c6f819699efe45ade0468d907b38b580c5e",
-      "size_bytes": 23718862,
-      "download_url": "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/releases/download/v0.2.0-rc.1/kinova-pico-udp-bridge.apk"
-    },
-    {
       "name": "kortex_api-2.8.0.post5-py3-none-any.whl",
       "sha256": "5796425d48f0ab70c56ce9ecf06b8ab91f0b951319266e5d4c0b179cdb9e99cf",
       "size_bytes": 161265,
