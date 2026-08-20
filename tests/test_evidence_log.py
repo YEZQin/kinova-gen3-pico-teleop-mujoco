@@ -75,6 +75,12 @@ def test_evidence_logger_writes_workspace_clamped_moving_event(tmp_path):
     assert record["state"] == "MOVING"
     assert record["payload"] == {"reason": "target clamped to workspace"}
     assert json.loads(path.read_text(encoding="utf-8")) == record
+    schema = json.loads(
+        (Path(__file__).parents[1] / "schemas" / "event-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    Draft202012Validator(schema).validate(record)
 
 
 def test_evidence_logger_monotonic_order_is_strict(tmp_path):
