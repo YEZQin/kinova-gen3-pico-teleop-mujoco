@@ -20,9 +20,14 @@ from .pose_mapping import (
     quat_multiply,
     quat_to_rotvec,
 )
-from .workspace import AnchorEnvelope, WorkspaceLimits, validate_target_pose
+from .workspace import (
+    AnchorEnvelope,
+    WorkspaceLimits,
+    project_pose_into_workspace,
+    validate_target_pose,
+)
 
-MAX_LINEAR_SPEED = 0.03
+MAX_LINEAR_SPEED = 0.05
 MAX_ANGULAR_SPEED_DEG = 5.0
 WATCHDOG_TIMEOUT = 0.2
 RPC_LOCK_TIMEOUT = 0.15
@@ -32,6 +37,8 @@ SERVO_READY_TIMEOUT = 3.0
 FAULT_POLL_INTERVAL = 0.05
 STATIONARY_MAX_LINEAR_SPEED = 0.001
 STATIONARY_MAX_ANGULAR_SPEED_DEG = 0.5
+GRIPPER_DEADBAND = 0.02
+GRIPPER_MIN_INTERVAL = 0.1
 
 # Private test seam. Production callers cannot replace or disable the watchdog.
 _watchdog_thread_factory = threading.Thread
@@ -95,7 +102,7 @@ class KortexBackend:
         self,
         connection: Any,
         *,
-        anchor_envelope: AnchorEnvelope,
+        anchor_envelope: AnchorEnvelope | None,
         kp_linear: float = 1.0,
         kp_angular: float = 1.0,
         max_linear_speed: float = MAX_LINEAR_SPEED,
@@ -114,12 +121,12 @@ class KortexBackend:
         if kp_linear < 0.0 or kp_angular < 0.0:
             raise ValueError("Kortex proportional gains must be non-negative")
         if not 0.0 < max_linear_speed <= MAX_LINEAR_SPEED:
-            raise ValueError("Linear speed limit must be in (0, 0.03] m/s")
+            raise ValueError("Linear speed limit must be in (0, 0.05] m/s")
         if not 0.0 < max_angular_speed_deg <= MAX_ANGULAR_SPEED_DEG:
             raise ValueError("Angular speed limit must be in (0, 5] deg/s")
         if connection.base is None or connection.base_cyclic is None:
             raise RuntimeError("Kortex connection is not connected")
-        if not isinstance(anchor_envelope, AnchorEnvelope):
+        if anchor_envelope is not None and not isinstance(anchor_envelope, AnchorEnvelope):
             raise TypeError("anchor_envelope must be an AnchorEnvelope")
 
         self.connection = connection
@@ -155,6 +162,8 @@ class KortexBackend:
         self._stop_failure_reason: str | None = None
         self._closed = False
         self._connection_closed = False
+        self._gripper_last_value: float | None = None
+        self._gripper_last_time: float | None = None
 
         try:
             self._require_startup_ready()
@@ -453,11 +462,13 @@ class KortexBackend:
         if self.workspace_limits is not None:
             decision = validate_target_pose(target, self.workspace_limits)
             if not decision.accepted:
-                return self._reject_boundary_and_stop(
-                    decision.reason,
-                    generation=generation,
-                    event_kind="workspace_rejected",
-                )
+                if self.anchor_envelope is not None:
+                    return self._reject_boundary_and_stop(
+                        decision.reason,
+                        generation=generation,
+                        event_kind="workspace_rejected",
+                    )
+                target = project_pose_into_workspace(target, self.workspace_limits)
 
         if anchor is None:
             reason = "control anchor is unavailable"
@@ -469,13 +480,14 @@ class KortexBackend:
                 return _inactive_result()
             raise KortexSafetyError(latched_reason)
 
-        decision = self.anchor_envelope.evaluate(anchor, target)
-        if not decision.accepted:
-            return self._reject_boundary_and_stop(
-                decision.reason,
-                generation=generation,
-                event_kind="anchor_rejected",
-            )
+        if self.anchor_envelope is not None:
+            decision = self.anchor_envelope.evaluate(anchor, target)
+            if not decision.accepted:
+                return self._reject_boundary_and_stop(
+                    decision.reason,
+                    generation=generation,
+                    event_kind="anchor_rejected",
+                )
 
         try:
             target_position = np.asarray(target.position, dtype=np.float64)
@@ -813,6 +825,95 @@ class KortexBackend:
 
         with self._state_lock:
             self._raise_latched_fault_locked()
+
+    def command_gripper(self, position: float) -> bool:
+        """Send a rate-limited positional gripper command.
+
+        Gripper position commands are self-terminating and must not arm or
+        refresh the Twist watchdog.
+        """
+
+        with self._state_lock:
+            if not self._state_allows_command_locked():
+                return False
+            generation = self._generation
+
+        if not math.isfinite(position):
+            reason = "Gripper position must be finite"
+            latched_reason = self._latch_fault_and_stop(
+                reason,
+                generation=generation,
+            )
+            if latched_reason is None:
+                return False
+            raise KortexSafetyError(latched_reason) from ValueError(reason)
+        position = float(min(1.0, max(0.0, position)))
+
+        now = self._monotonic()
+        with self._state_lock:
+            if not self._state_allows_command_locked(generation):
+                return False
+            if (
+                self._gripper_last_value is not None
+                and abs(position - self._gripper_last_value) < GRIPPER_DEADBAND
+            ):
+                return True
+            if (
+                self._gripper_last_time is not None
+                and now - self._gripper_last_time < GRIPPER_MIN_INTERVAL
+            ):
+                return True
+
+        command = self.connection.base_pb2.GripperCommand()
+        command.mode = self.connection.base_pb2.GRIPPER_POSITION
+        finger = command.gripper.finger.add()
+        finger.finger_identifier = 1
+        finger.value = position
+
+        if not self._rpc_lock.acquire(timeout=RPC_LOCK_TIMEOUT):
+            reason = "Timed out waiting for in-flight RPC"
+            latched_reason = self._latch_fault_and_stop(
+                reason,
+                generation=generation,
+            )
+            if latched_reason is None:
+                return False
+            raise KortexSafetyError(latched_reason)
+
+        send_error: BaseException | None = None
+        sent = False
+        try:
+            with self._state_lock:
+                if not self._state_allows_command_locked(generation):
+                    return False
+            try:
+                self.connection.base.SendGripperCommand(
+                    command,
+                    options=self.connection.rpc_options(),
+                )
+                sent = True
+            except BaseException as error:
+                send_error = error
+        finally:
+            self._rpc_lock.release()
+
+        if send_error is not None:
+            reason = str(send_error) or "Kortex gripper command RPC failed"
+            latched_reason = self._latch_fault_and_stop(
+                reason,
+                generation=generation,
+            )
+            if latched_reason is None:
+                return False
+            raise KortexSafetyError(latched_reason) from send_error
+
+        with self._state_lock:
+            if not sent or not self._state_allows_command_locked(generation):
+                return False
+            if sent:
+                self._gripper_last_value = position
+                self._gripper_last_time = now
+        return True
 
     def close(self) -> None:
         emit_stop_request = False

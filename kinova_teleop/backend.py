@@ -7,7 +7,7 @@ safety-critical hardware code can depend on it without pulling in MuJoCo.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .pose_mapping import Pose
 
@@ -34,3 +34,8 @@ class EndEffectorTargetBackend(Protocol):
     def step(self) -> None: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class ProportionalGripperBackend(Protocol):
+    def command_gripper(self, position: float) -> bool: ...

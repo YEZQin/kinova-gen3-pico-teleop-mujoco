@@ -2,27 +2,36 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import threading
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+import kinova_teleop.backend as backend_module
 import kinova_teleop.kortex_backend as kortex_backend_module
+from kinova_teleop.backend import EndEffectorTargetBackend
 from kinova_teleop.kortex_backend import KortexBackend, KortexSafetyError
 from kinova_teleop.pose_mapping import Pose
 from kinova_teleop.workspace import AnchorEnvelope
 
 
-def test_first_hardware_backend_exposes_no_gripper_write_surface() -> None:
+def test_hardware_backend_exposes_separate_runtime_gripper_capability() -> None:
     backend = _backend(_Connection())
-    assert not hasattr(backend, "command_gripper")
-    production = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in Path("kinova_teleop").glob("*.py")
+    assert hasattr(backend_module, "ProportionalGripperBackend")
+    gripper_protocol = backend_module.ProportionalGripperBackend
+    pose_only_backend = SimpleNamespace(
+        current_pose=lambda: None,
+        begin_control=lambda: None,
+        command_pose=lambda _target: None,
+        hold=lambda: None,
+        step=lambda: None,
+        close=lambda: None,
     )
-    assert "SendGripperCommand" not in production
+
+    assert not hasattr(EndEffectorTargetBackend, "command_gripper")
+    assert isinstance(backend, gripper_protocol)
+    assert not isinstance(pose_only_backend, gripper_protocol)
 
 
 TEST_ANCHOR_ENVELOPE = AnchorEnvelope((1.0, 1.0, 1.0), float(np.pi))

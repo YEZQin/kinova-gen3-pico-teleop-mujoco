@@ -210,6 +210,220 @@ def _begin_pose_control(backend):
     return backend.current_pose()
 
 
+def _active_gripper_backend():
+    connection = _Connection(_feedback())
+    clock = _Clock()
+    backend = _backend(connection, monotonic=clock)
+    backend.begin_control()
+    backend.current_pose()
+    return backend, connection, clock
+
+
+def test_gripper_sends_position_mode_command():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    assert backend.command_gripper(0.5) is True
+
+    command = connection.base.gripper_sent[-1]
+    assert command.mode == BASE_PB2.GRIPPER_POSITION
+    fingers = command.gripper.finger.entries
+    assert len(fingers) == 1
+    assert fingers[0].finger_identifier == 1
+    assert fingers[0].value == 0.5
+    assert connection.base.gripper_options[-1].timeout_ms < 200
+
+
+def test_gripper_is_rejected_before_begin_control():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+
+    assert backend.command_gripper(0.5) is False
+    assert connection.base.gripper_sent == []
+
+
+def test_gripper_deadband_and_rate_limit():
+    connection = _Connection(_feedback())
+    clock = _Clock()
+    backend = _backend(connection, monotonic=clock)
+    backend.begin_control()
+
+    assert backend.command_gripper(0.5) is True
+    clock.now += kortex_backend_module.GRIPPER_MIN_INTERVAL / 2
+    assert backend.command_gripper(0.9) is True
+    clock.now += kortex_backend_module.GRIPPER_MIN_INTERVAL
+    assert (
+        backend.command_gripper(
+            0.5 + kortex_backend_module.GRIPPER_DEADBAND / 2
+        )
+        is True
+    )
+    assert backend.command_gripper(0.9) is True
+
+    assert len(connection.base.gripper_sent) == 2
+
+
+def test_gripper_value_is_clamped_to_unit_interval():
+    connection = _Connection(_feedback())
+    clock = _Clock()
+    backend = _backend(connection, monotonic=clock)
+    backend.begin_control()
+
+    assert backend.command_gripper(1.5) is True
+    assert connection.base.gripper_sent[-1].gripper.finger.entries[0].value == 1.0
+
+    clock.now += kortex_backend_module.GRIPPER_MIN_INTERVAL + 0.01
+    assert backend.command_gripper(-0.5) is True
+    assert connection.base.gripper_sent[-1].gripper.finger.entries[0].value == 0.0
+
+
+def test_gripper_nonfinite_value_attempts_stop():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    with pytest.raises(KortexSafetyError, match="finite"):
+        backend.command_gripper(float("nan"))
+
+    assert connection.base.stop_count == 1
+    assert backend.stop_requested is True
+    assert backend.stop_confirmed is True
+    assert backend.fault_reason == "Gripper position must be finite"
+
+
+def test_gripper_send_failure_attempts_stop():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    def failing_gripper(command, *, options=None):
+        raise RuntimeError("gripper offline")
+
+    connection.base.SendGripperCommand = failing_gripper
+
+    with pytest.raises(KortexSafetyError, match="gripper offline") as captured:
+        backend.command_gripper(0.5)
+
+    assert connection.base.stop_count == 1
+    assert backend.stop_requested is True
+    assert backend.stop_confirmed is True
+    assert backend.fault_reason == "gripper offline"
+    assert isinstance(captured.value.__cause__, RuntimeError)
+
+
+def test_gripper_command_does_not_arm_twist_watchdog():
+    connection = _Connection(_feedback())
+    clock = _Clock()
+    backend = _backend(connection, monotonic=clock)
+    backend.begin_control()
+
+    assert backend.command_gripper(1.0) is True
+    clock.now = 10.0
+    backend.check_watchdog()
+
+    assert connection.base.stop_count == 0
+
+
+class _GateLock:
+    def __init__(self):
+        self.attempted = threading.Event()
+        self.permit = threading.Event()
+
+    def acquire(self, timeout=None):
+        self.attempted.set()
+        return self.permit.wait(timeout=timeout)
+
+    def release(self):
+        pass
+
+
+def test_gripper_queued_behind_stop_is_dropped():
+    connection = _Connection(_feedback())
+    backend = _backend(connection)
+    backend.begin_control()
+
+    gate = _GateLock()
+    backend._rpc_lock = gate
+    results: list[bool] = []
+    errors: list[BaseException] = []
+    worker = threading.Thread(
+        target=_capture_result_or_error,
+        args=(lambda: backend.command_gripper(0.5), results, errors),
+    )
+    worker.start()
+    assert gate.attempted.wait(timeout=2.0)
+
+    backend._request_stop(force=True)
+    gate.permit.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results == [False]
+    assert connection.base.gripper_sent == []
+
+
+def test_gripper_is_rejected_after_stop_and_accepted_after_rearm() -> None:
+    backend, connection, clock = _active_gripper_backend()
+    assert backend.command_gripper(0.5) is True
+    backend.hold()
+    assert backend.command_gripper(0.9) is False
+    backend.begin_control()
+    backend.current_pose()
+    clock.now += 0.11
+    assert backend.command_gripper(0.9) is True
+    assert len(connection.base.gripper_sent) == 2
+
+
+def test_gripper_rpc_lock_timeout_latches_stop_failure() -> None:
+    backend, connection, _clock = _active_gripper_backend()
+    backend._rpc_lock.acquire()
+    try:
+        with pytest.raises(KortexSafetyError, match="Stop attempted but unconfirmed"):
+            backend.command_gripper(0.5)
+    finally:
+        backend._rpc_lock.release()
+    assert connection.base.gripper_sent == []
+    assert backend.stop_requested is True
+    assert backend.stop_confirmed is False
+    assert backend.fault_reason == "Stop attempted but unconfirmed"
+
+
+def test_close_never_sends_gripper_open() -> None:
+    backend, connection, _clock = _active_gripper_backend()
+    backend.command_gripper(0.7)
+    backend.close()
+    assert [
+        command.gripper.finger.entries[0].value
+        for command in connection.base.gripper_sent
+    ] == [0.7]
+
+
+def test_workspace_projection_clamps_target_without_stop_or_reanchor():
+    connection = _Connection(_feedback(position=(0.0, 0.0, 0.3)))
+    backend = _backend(
+        connection,
+        anchor_envelope=None,
+        workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
+        max_linear_speed=0.05,
+    )
+    backend.begin_control()
+    backend.current_pose()
+
+    result = backend.command_pose(_target(position=(1.0, 1.0, 1.0)))
+
+    assert result.accepted is True
+    assert result.reanchor_required is False
+    assert result.reason == ""
+    assert connection.base.stop_count == 0
+    velocity = _velocity(connection.base.sent[-1])
+    expected_direction = np.array([0.2, 0.2, 0.3], dtype=float)
+    expected_linear = expected_direction * (0.05 / np.linalg.norm(expected_direction))
+    np.testing.assert_allclose(velocity[:3], expected_linear)
+    np.testing.assert_allclose(velocity[3:], [0.0, 0.0, 0.0])
+
+
 @pytest.fixture(autouse=True)
 def _private_watchdog_thread_seam(monkeypatch):
     _ManualThread.instances.clear()
@@ -544,7 +758,7 @@ def test_position_error_is_base_frame_and_clipped_by_vector_norm():
 
     backend.command_pose(_target(position=(0.1, 0.0, 0.0)))
 
-    np.testing.assert_allclose(_velocity(connection.base.sent[-1]), [0.03, 0, 0, 0, 0, 0])
+    np.testing.assert_allclose(_velocity(connection.base.sent[-1]), [0.05, 0, 0, 0, 0, 0])
     assert connection.base.sent[-1].reference_frame == 17
     assert connection.base.sent[-1].duration == 0
     assert connection.base.send_options[-1].timeout_ms < 200
