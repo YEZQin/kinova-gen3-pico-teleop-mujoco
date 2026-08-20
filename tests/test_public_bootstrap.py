@@ -216,7 +216,11 @@ def _prepare_offline_project(tmp_path: Path) -> tuple[Path, Path, dict[str, str]
     shutil.copy2("kinova_teleop/release_assets.py", package / "release_assets.py")
     fake_python = _build_fake_python(tmp_path)
     environment = {
-        **os.environ,
+        **{
+            name: value
+            for name, value in os.environ.items()
+            if name.casefold() != "psmodulepath"
+        },
         "FAKE_PYTHON_LOG": str(tmp_path / "fake-python.log"),
         "FAKE_ADB_LOG": str(tmp_path / "fake-adb.log"),
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
@@ -272,6 +276,25 @@ def _run_bootstrap(
         text=True,
         env=environment,
     )
+
+
+def test_public_bootstrap_fixture_uses_child_powershell_module_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    powershell_core = shutil.which("pwsh")
+    if powershell_core is None:
+        pytest.skip("PowerShell Core is required for the module-isolation regression")
+    powershell_core_modules = Path(powershell_core).parent / "Modules"
+    inherited_module_path = os.environ.get("PSModulePath", "")
+    monkeypatch.setenv(
+        "PSModulePath",
+        f"{powershell_core_modules}{os.pathsep}{inherited_module_path}",
+    )
+    project, fake_python, environment = _prepare_offline_project(tmp_path)
+
+    result = _run_bootstrap(project, fake_python, environment, "-SkipOfflineTests")
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_public_bootstrap_offline_fixture_uses_fake_python_and_never_invokes_adb(
