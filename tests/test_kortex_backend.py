@@ -358,6 +358,45 @@ class _ObservedRpcLock:
         self._lock.release()
 
 
+class _FailureHandoffLock:
+    """Make the first releaser wait until the queued writer completes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count_lock = threading.Lock()
+        self._owner_ordinals: dict[int, int] = {}
+        self.acquire_count = 0
+        self.second_attempted = threading.Event()
+        self.second_acquired = threading.Event()
+        self.second_completed = threading.Event()
+
+    def acquire(self, timeout=None):
+        with self._count_lock:
+            self.acquire_count += 1
+            ordinal = self.acquire_count
+            if ordinal == 2:
+                self.second_attempted.set()
+        acquired = (
+            self._lock.acquire()
+            if timeout is None
+            else self._lock.acquire(timeout=timeout)
+        )
+        if acquired:
+            self._owner_ordinals[threading.get_ident()] = ordinal
+            if ordinal == 2:
+                self.second_acquired.set()
+        return acquired
+
+    def release(self):
+        ordinal = self._owner_ordinals.pop(threading.get_ident())
+        self._lock.release()
+        if ordinal == 1:
+            assert self.second_acquired.wait(timeout=1.0)
+            assert self.second_completed.wait(timeout=1.0)
+        elif ordinal == 2:
+            self.second_completed.set()
+
+
 def test_gripper_queued_behind_stop_is_dropped():
     connection = _Connection(_feedback())
     backend = _backend(connection)
@@ -382,6 +421,107 @@ def test_gripper_queued_behind_stop_is_dropped():
     assert errors == []
     assert results == [False]
     assert connection.base.gripper_sent == []
+
+
+def test_failed_gripper_revokes_queued_twist_before_releasing_rpc_lock() -> None:
+    """Moving the fault latch after RPC unlock must allow the queued Twist."""
+
+    backend, connection, _clock = _active_gripper_backend()
+    generation = backend._generation
+    backend.current_pose = lambda: _target()
+    handoff = _FailureHandoffLock()
+    backend._rpc_lock = handoff
+    send_entered = threading.Event()
+
+    def failing_gripper(_command, *, options=None):
+        send_entered.set()
+        assert handoff.second_attempted.wait(timeout=1.0)
+        raise RuntimeError("gripper offline")
+
+    connection.base.SendGripperCommand = failing_gripper
+    gripper_results: list[bool] = []
+    gripper_errors: list[BaseException] = []
+    twist_results: list[object] = []
+    twist_errors: list[BaseException] = []
+    gripper = threading.Thread(
+        target=_capture_result_or_error,
+        args=(lambda: backend.command_gripper(0.5), gripper_results, gripper_errors),
+    )
+    twist = threading.Thread(
+        target=_capture_result_or_error,
+        args=(
+            lambda: backend.command_pose(_target(position=(0.01, 0.0, 0.0))),
+            twist_results,
+            twist_errors,
+        ),
+    )
+
+    gripper.start()
+    assert send_entered.wait(timeout=1.0)
+    twist.start()
+    gripper.join(timeout=2.0)
+    twist.join(timeout=2.0)
+
+    assert not gripper.is_alive()
+    assert not twist.is_alive()
+    assert len(gripper_errors) == 1
+    assert "gripper offline" in str(gripper_errors[0])
+    assert twist_errors == []
+    assert len(twist_results) == 1
+    assert twist_results[0].accepted is False
+    assert connection.base.sent == []
+    assert connection.base.stop_count == 1
+    assert backend._generation > generation
+
+
+def test_failed_twist_revokes_queued_gripper_before_releasing_rpc_lock() -> None:
+    """Moving the fault latch after RPC unlock must allow the queued gripper."""
+
+    backend, connection, _clock = _active_gripper_backend()
+    generation = backend._generation
+    backend.current_pose = lambda: _target()
+    handoff = _FailureHandoffLock()
+    backend._rpc_lock = handoff
+    send_entered = threading.Event()
+
+    def failing_twist(_command, *, options=None):
+        send_entered.set()
+        assert handoff.second_attempted.wait(timeout=1.0)
+        raise RuntimeError("twist offline")
+
+    connection.base.SendTwistCommand = failing_twist
+    twist_results: list[object] = []
+    twist_errors: list[BaseException] = []
+    gripper_results: list[bool] = []
+    gripper_errors: list[BaseException] = []
+    twist = threading.Thread(
+        target=_capture_result_or_error,
+        args=(
+            lambda: backend.command_pose(_target(position=(0.01, 0.0, 0.0))),
+            twist_results,
+            twist_errors,
+        ),
+    )
+    gripper = threading.Thread(
+        target=_capture_result_or_error,
+        args=(lambda: backend.command_gripper(0.5), gripper_results, gripper_errors),
+    )
+
+    twist.start()
+    assert send_entered.wait(timeout=1.0)
+    gripper.start()
+    twist.join(timeout=2.0)
+    gripper.join(timeout=2.0)
+
+    assert not twist.is_alive()
+    assert not gripper.is_alive()
+    assert len(twist_errors) == 1
+    assert "twist offline" in str(twist_errors[0])
+    assert gripper_errors == []
+    assert gripper_results == [False]
+    assert connection.base.gripper_sent == []
+    assert connection.base.stop_count == 1
+    assert backend._generation > generation
 
 
 def test_concurrent_gripper_commands_recheck_rate_limit_after_rpc_lock() -> None:
@@ -529,6 +669,8 @@ def test_advanced_workspace_projection_clamps_target_without_stop_or_reanchor(
     assert result.accepted is True
     assert result.reanchor_required is False
     assert result.reason == "target clamped to workspace"
+    assert getattr(result, "active_rebase_target", None) is not None
+    np.testing.assert_allclose(result.active_rebase_target.position, [0.2, 0.2, 0.6])
     assert connection.base.stop_count == 0
     velocity = _velocity(connection.base.sent[-1])
     expected_direction = np.array([0.2, 0.2, 0.3], dtype=float)
@@ -1583,8 +1725,6 @@ def test_close_never_joins_standard_thread_before_start_completes(monkeypatch):
 def test_command_failure_after_close_token_cannot_override_close_confirmation():
     send_entered = threading.Event()
     release_send = threading.Event()
-    failure_request_entered = threading.Event()
-    allow_failure_request = threading.Event()
     connection_closed = threading.Event()
     connection = _Connection(_feedback())
     backend = _backend(connection)
@@ -1596,18 +1736,6 @@ def test_command_failure_after_close_token_cannot_override_close_confirmation():
         raise RuntimeError("send failed")
 
     connection.base.SendTwistCommand = failing_send
-    original_latch_fault = backend._latch_fault_and_stop
-
-    def delayed_failure_latch(reason, *, generation=None, require_active=True):
-        failure_request_entered.set()
-        assert allow_failure_request.wait(timeout=1.0)
-        return original_latch_fault(
-            reason,
-            generation=generation,
-            require_active=require_active,
-        )
-
-    backend._latch_fault_and_stop = delayed_failure_latch
 
     def successful_clearing_close():
         connection.closed += 1
@@ -1640,9 +1768,7 @@ def test_command_failure_after_close_token_cannot_override_close_confirmation():
     assert close_token_created
 
     release_send.set()
-    assert failure_request_entered.wait(timeout=1.0)
     assert connection_closed.wait(timeout=1.0)
-    allow_failure_request.set()
     command.join(timeout=1.0)
     closer.join(timeout=1.0)
 

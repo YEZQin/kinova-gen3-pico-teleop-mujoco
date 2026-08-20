@@ -43,6 +43,7 @@ def wait_for_fresh_released_input(
     *,
     sample_count: int = 3,
     timeout_s: float = 1.0,
+    require_trigger: bool = False,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> InputAdmissionResult:
@@ -53,6 +54,7 @@ def wait_for_fresh_released_input(
     """
 
     _validate_window_arguments(sample_count, timeout_s)
+    _validate_trigger_requirement(require_trigger)
     deadline = monotonic() + timeout_s
     previous_timestamp: int | None = None
     active_source: tuple[str, int] | None = None
@@ -68,6 +70,8 @@ def wait_for_fresh_released_input(
             sleep(_POLL_INTERVAL_S)
             continue
         sample = _validate_finite_sample(candidate)
+        if require_trigger:
+            _validate_trigger_capability(sample)
         timestamp = _sample_timestamp(sample)
         if float(sample.grip) >= _GRIP_RELEASE_THRESHOLD:
             raise InputAdmissionError("Grip must remain released during admission")
@@ -112,6 +116,7 @@ def verify_released_now(
     after_timestamp_ns: int,
     admission: InputAdmissionResult | None = None,
     timeout_s: float = 1.0,
+    require_trigger: bool = False,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> ControllerSample:
@@ -119,6 +124,7 @@ def verify_released_now(
 
     _validate_timestamp(after_timestamp_ns, name="after_timestamp_ns")
     _validate_timeout(timeout_s)
+    _validate_trigger_requirement(require_trigger)
     deadline = monotonic() + timeout_s
     while monotonic() < deadline:
         candidate = _read_sample(source)
@@ -127,6 +133,8 @@ def verify_released_now(
             sleep(_POLL_INTERVAL_S)
             continue
         sample = _validate_finite_sample(candidate)
+        if require_trigger:
+            _validate_trigger_capability(sample)
         _verify_source_continuity(source, admission)
         if float(sample.grip) >= _GRIP_RELEASE_THRESHOLD:
             raise InputAdmissionError("Grip must remain released after confirmation")
@@ -149,6 +157,29 @@ def _validate_window_arguments(sample_count: int, timeout_s: float) -> None:
 def _validate_timeout(timeout_s: float) -> None:
     if not math.isfinite(timeout_s) or timeout_s <= 0.0:
         raise ValueError("timeout_s must be positive and finite")
+
+
+def _validate_trigger_requirement(require_trigger: bool) -> None:
+    if not isinstance(require_trigger, bool):
+        raise ValueError("require_trigger must be a bool")
+
+
+def _validate_trigger_capability(sample: ControllerSample) -> None:
+    try:
+        available = sample.trigger_available
+        trigger = float(sample.trigger)
+    except (AttributeError, TypeError, ValueError, OverflowError) as error:
+        raise InputAdmissionError(
+            "PICO V2 Trigger capability is required for advanced gripper teleoperation"
+        ) from error
+    if (
+        not isinstance(available, (bool, np.bool_))
+        or not bool(available)
+        or not math.isfinite(trigger)
+    ):
+        raise InputAdmissionError(
+            "PICO V2 Trigger capability is required for advanced gripper teleoperation"
+        )
 
 
 def _read_sample(source: XrInputSource) -> ControllerSample:

@@ -15,7 +15,7 @@ from kinova_teleop.teleop_controller import (
     TeleopController,
     TeleopSafetyError,
 )
-from kinova_teleop.workspace import AnchorEnvelope
+from kinova_teleop.workspace import AnchorEnvelope, WorkspaceLimits
 from kinova_teleop.xr_input import ControllerSample
 
 
@@ -86,6 +86,45 @@ class RejectedGripperBackend(RecordingBackendWithGripper):
         self.events.append("command_gripper")
         self.gripper_values.append(position)
         return False
+
+
+class ProjectingBackend(RecordingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pose = Pose(
+            np.array([0.19, 0.0, 0.3], dtype=np.float64),
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+        )
+        self.workspace = WorkspaceLimits(
+            (-0.2, -0.2, 0.1),
+            (0.2, 0.2, 0.6),
+        )
+        self.generation = 0
+        self.holds = 0
+
+    def begin_control(self) -> None:
+        super().begin_control()
+        self.generation += 1
+
+    def command_pose(self, target: Pose) -> BackendResult:
+        projection = self.workspace.project(target)
+        self.events.append("command_pose")
+        self.targets.append(projection.target)
+        self.pose = projection.target
+        return BackendResult(
+            accepted=True,
+            converged=True,
+            position_error=0.0,
+            rotation_error=0.0,
+            reason="target clamped to workspace" if projection.projected else "",
+            active_rebase_target=(
+                projection.target if projection.projected else None
+            ),
+        )
+
+    def hold(self) -> None:
+        self.holds += 1
+        super().hold()
 
 
 class RpcOrderingBackend(RecordingBackend):
@@ -408,6 +447,43 @@ def test_first_press_anchors_without_twist_when_feedback_changes(
     assert max(np.linalg.norm(command[3:]) for command in sent) <= 2.0
 
     controller.close()
+
+
+def test_workspace_projection_rebases_active_mapping_for_immediate_inward_motion() -> None:
+    """Dropping the ACTIVE rebase must pin the next inward target to the face."""
+
+    backend = ProjectingBackend()
+    controller = TeleopController(
+        TeleopConfig(
+            realtime=False,
+            translation_scale=1.0,
+            orientation_enabled=False,
+        ),
+        ScriptedInput(
+            [
+                sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+                sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+                sample([0.0, 0.0, -1.0], 1.0, 3, 1.02),
+                sample([0.0, 0.0, -0.99], 1.0, 4, 1.03),
+            ]
+        ),
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    clamped = controller.step_once()
+    generation = backend.generation
+    inward = controller.step_once()
+
+    assert clamped.active is True
+    assert clamped.reason == "target clamped to workspace"
+    assert inward.active is True
+    assert inward.clutch_state.value == "active"
+    assert backend.targets[0].position[0] == pytest.approx(0.2)
+    assert backend.targets[1].position[0] < 0.2
+    assert backend.generation == generation
+    assert backend.holds == 0
 
 
 @pytest.mark.parametrize(

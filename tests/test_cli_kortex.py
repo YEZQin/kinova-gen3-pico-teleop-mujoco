@@ -5,7 +5,9 @@ from __future__ import annotations
 import builtins
 import importlib
 import subprocess
+import tempfile
 import threading
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -206,6 +208,9 @@ def _advanced_pico_motion_argv() -> list[str]:
         "--workspace-max", "0.6", "0.6", "0.6",
         "--motion-lease", "fixture-motion.lock",
         "--preflight-report", "fixture-preflight.json",
+        "--evidence-jsonl", str(
+            Path(tempfile.gettempdir()) / f"kinova-evidence-{uuid.uuid4().hex}.jsonl"
+        ),
     ]
 
 
@@ -1140,10 +1145,11 @@ def _install_valid_kortex_fakes(monkeypatch, created: dict) -> None:
     class FakeController:
         steps = 7
 
-        def __init__(self, config, source, backend) -> None:
+        def __init__(self, config, source, backend, **kwargs) -> None:
             created["controller_config"] = config
             created["source"] = source
             created["backend"] = backend
+            created["controller_kwargs"] = kwargs
 
         def run(self, **_kwargs) -> None:
             pass
@@ -1209,6 +1215,122 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
     assert controller_config.realtime is True
     assert controller_config.fatal_input_faults is True
     assert backend.closed
+
+
+def test_advanced_pico_requires_evidence_before_secret_sdk_input_move_or_connection(
+    monkeypatch,
+    capsys,
+) -> None:
+    """Removing the advanced evidence gate must expose a later startup surface."""
+
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    argv = _advanced_pico_motion_argv()
+    evidence_index = argv.index("--evidence-jsonl")
+    del argv[evidence_index:evidence_index + 2]
+
+    assert main(argv) == 2
+    assert calls == []
+    assert "--evidence-jsonl is required" in capsys.readouterr().err
+
+
+def test_advanced_pico_v2_rejection_precedes_move_readonly_and_motion_connections(
+    monkeypatch,
+    capsys,
+) -> None:
+    """Dropping the pre-MOVE Trigger flag must expose later hardware gates."""
+
+    events: list[str] = []
+    _install_advanced_pico_package_fakes(monkeypatch)
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: object())
+    monkeypatch.setattr(
+        main_module,
+        "create_input",
+        lambda _args: events.append("input") or _FakeReleasedPico(),
+    )
+
+    def reject_v1(_source, **kwargs):
+        assert kwargs.get("require_trigger") is True
+        events.append("v2_rejected")
+        raise RuntimeError("PICO V2 Trigger capability is required")
+
+    monkeypatch.setattr(main_module, "wait_for_fresh_released_input", reject_v1)
+    monkeypatch.setattr(
+        main_module,
+        "confirm_move",
+        lambda: events.append("MOVE"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_connection",
+        lambda *_args, **_kwargs: events.append("connection"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_backend",
+        lambda *_args, **_kwargs: events.append("backend"),
+    )
+
+    assert main(_advanced_pico_motion_argv()) == 2
+    assert events == ["input", "v2_rejected"]
+    assert "PICO V2 Trigger capability" in capsys.readouterr().err
+
+
+def test_advanced_pico_v2_post_move_rejection_precedes_motion_connection_and_backend(
+    monkeypatch,
+    capsys,
+) -> None:
+    """Dropping the post-MOVE Trigger flag must allow motion construction."""
+
+    events: list[str] = []
+    _install_advanced_pico_package_fakes(monkeypatch)
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: object())
+    monkeypatch.setattr(main_module, "create_input", lambda _args: _FakeReleasedPico())
+
+    def admit_v2(_source, **kwargs):
+        assert kwargs.get("require_trigger") is True
+        events.append("v2_admitted")
+        return _admitted()
+
+    def reject_downgrade(_source, **kwargs):
+        assert kwargs.get("require_trigger") is True
+        events.append("v2_recheck_rejected")
+        raise RuntimeError("PICO V2 Trigger capability is required")
+
+    monkeypatch.setattr(main_module, "wait_for_fresh_released_input", admit_v2)
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_connection",
+        _readonly_then_motion_connection(events),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_kortex_readonly_preflight",
+        lambda *_args, **_kwargs: _ready_report(),
+    )
+    monkeypatch.setattr(main_module, "require_live_kortex_ready", lambda _report: None)
+    monkeypatch.setattr(
+        main_module,
+        "read_kortex_tool_position",
+        lambda _connection: (0.0, 0.0, 0.3),
+    )
+    monkeypatch.setattr(main_module, "confirm_move", lambda: events.append("MOVE"))
+    monkeypatch.setattr(main_module, "verify_released_now", reject_downgrade)
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_backend",
+        lambda *_args, **_kwargs: events.append("backend"),
+    )
+
+    assert main(_advanced_pico_motion_argv()) == 2
+    assert events == [
+        "v2_admitted",
+        "readonly_connect",
+        "readonly_close",
+        "MOVE",
+        "v2_recheck_rejected",
+    ]
+    assert "PICO V2 Trigger capability" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -1418,9 +1540,9 @@ def test_advanced_pico_rejects_reused_evidence_before_hardware(
     _install_advanced_pico_package_fakes(monkeypatch)
     calls = _forbid_advanced_hardware_side_effects(monkeypatch)
 
-    assert main(
-        _advanced_pico_motion_argv() + ["--evidence-jsonl", str(evidence)]
-    ) == 2
+    argv = _advanced_pico_motion_argv()
+    argv[argv.index("--evidence-jsonl") + 1] = str(evidence)
+    assert main(argv) == 2
     assert calls == []
     assert "evidence path must be absent" in capsys.readouterr().err
 

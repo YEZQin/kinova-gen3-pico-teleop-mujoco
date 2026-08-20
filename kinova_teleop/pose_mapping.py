@@ -344,6 +344,20 @@ class RelativePoseMapper:
 
         return self._deactivate(stale=False, input_fault=InputFault.NONE)
 
+    def rebase_active(self, sample: Any, ee_pose: Pose) -> None:
+        """Rebase relative mapping at a commanded pose without releasing Grip."""
+
+        if self.clutch_state is not ClutchState.ACTIVE:
+            raise RuntimeError("Pose mapper must be active before rebasing")
+        controller_pose = transform_controller_pose(
+            sample.position,
+            sample.quaternion_xyzw,
+        )
+        rebased_pose = _copy_pose(ee_pose)
+        self._controller_reference = controller_pose
+        self._ee_reference = rebased_pose
+        self._last_target = _copy_pose(rebased_pose)
+
     def update(
         self,
         sample: Any,

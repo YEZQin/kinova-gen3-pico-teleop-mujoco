@@ -19,6 +19,8 @@ def sample(
     timestamp_ns: int,
     grip: float,
     valid: bool = True,
+    trigger: float = 0.0,
+    trigger_available: bool = True,
     invalid_reason: str = "",
 ) -> ControllerSample:
     return ControllerSample(
@@ -28,6 +30,8 @@ def sample(
         timestamp_ns=timestamp_ns,
         received_monotonic=0.0,
         valid=valid,
+        trigger=trigger,
+        trigger_available=trigger_available,
         invalid_reason=invalid_reason,
     )
 
@@ -224,6 +228,63 @@ def test_admission_rejects_pressed_grip_anywhere_in_release_window() -> None:
             sample_count=3,
             timeout_s=1.0,
         )
+
+
+@pytest.mark.parametrize(
+    "v1_sample",
+    (
+        sample(timestamp_ns=1, grip=0.0, trigger_available=False),
+        sample(timestamp_ns=1, grip=0.0, trigger=float("nan")),
+    ),
+)
+def test_advanced_admission_requires_finite_pico_v2_trigger_capability(
+    v1_sample: ControllerSample,
+) -> None:
+    """Removing Trigger admission must allow V1/non-finite input toward MOVE."""
+
+    with pytest.raises(InputAdmissionError, match="PICO V2 Trigger capability"):
+        wait_for_fresh_released_input(
+            ScriptedSource([v1_sample]),
+            sample_count=1,
+            timeout_s=1.0,
+            require_trigger=True,
+        )
+
+
+def test_advanced_release_recheck_requires_pico_v2_trigger_capability() -> None:
+    """Removing the post-MOVE Trigger recheck must admit a downgraded stream."""
+
+    with pytest.raises(InputAdmissionError, match="PICO V2 Trigger capability"):
+        verify_released_now(
+            ScriptedSource(
+                [sample(timestamp_ns=4, grip=0.0, trigger_available=False)]
+            ),
+            after_timestamp_ns=3,
+            timeout_s=0.5,
+            require_trigger=True,
+        )
+
+
+def test_legacy_admission_accepts_released_input_without_trigger_capability() -> None:
+    source = ScriptedSource(
+        [
+            sample(timestamp_ns=1, grip=0.0, trigger_available=False),
+            sample(timestamp_ns=2, grip=0.0, trigger_available=False),
+        ]
+    )
+
+    admitted = wait_for_fresh_released_input(
+        source,
+        sample_count=1,
+        timeout_s=1.0,
+    )
+    rechecked = verify_released_now(
+        source,
+        after_timestamp_ns=admitted.last_timestamp_ns,
+        timeout_s=0.5,
+    )
+
+    assert rechecked.timestamp_ns == 2
 
 
 def test_move_confirmation_is_exact_and_requires_released_recheck() -> None:

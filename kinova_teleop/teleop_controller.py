@@ -190,16 +190,19 @@ class TeleopController:
                 # not send a second Stop; require a fresh release sequence
                 # and let the next Grip activation read a new feedback pose.
                 mapping = self.mapper.require_release()
-            elif self.config.gripper and sample.valid:
-                assert callable(self._command_gripper)
-                if not self._command_gripper(float(sample.trigger)):
-                    try:
-                        self.backend.hold()
-                    except BaseException as error:
-                        raise TeleopSafetyError(
-                            "Stop attempted but unconfirmed"
-                        ) from error
-                    raise TeleopSafetyError("fatal gripper command rejected")
+            else:
+                if result.active_rebase_target is not None:
+                    self.mapper.rebase_active(sample, result.active_rebase_target)
+                if self.config.gripper and sample.valid:
+                    assert callable(self._command_gripper)
+                    if not self._command_gripper(float(sample.trigger)):
+                        try:
+                            self.backend.hold()
+                        except BaseException as error:
+                            raise TeleopSafetyError(
+                                "Stop attempted but unconfirmed"
+                            ) from error
+                        raise TeleopSafetyError("fatal gripper command rejected")
         else:
             if mapping.deactivated:
                 self._emit("input_release", "STOPPING", {})

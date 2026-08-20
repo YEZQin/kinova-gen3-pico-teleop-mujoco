@@ -49,6 +49,13 @@ class _StopToken:
     generation: int
 
 
+@dataclass(frozen=True)
+class _PendingFaultStop:
+    reason: str
+    token: _StopToken
+    emit_stop_request: bool
+
+
 class KortexSafetyError(RuntimeError):
     """A bounded safety operation could not be confirmed."""
 
@@ -565,6 +572,7 @@ class KortexBackend:
             position_error=float(np.linalg.norm(position_error)),
             rotation_error=float(np.linalg.norm(rotation_error)),
             reason="target clamped to workspace" if projected else "",
+            active_rebase_target=target if projected else None,
         )
         nonzero = float(np.linalg.norm(velocity)) > 0.0
         if nonzero:
@@ -577,6 +585,8 @@ class KortexBackend:
             )
 
         send_error: BaseException | None = None
+        latched_reason: str | None = None
+        pending_fault_stop: _PendingFaultStop | None = None
         sent = False
         try:
             with self._state_lock:
@@ -596,14 +606,18 @@ class KortexBackend:
                 sent = True
             except BaseException as error:
                 send_error = error
+                reason = str(error) or "Kortex command RPC failed"
+                latched_reason, pending_fault_stop = self._prepare_fault_stop(
+                    reason,
+                    generation=generation,
+                )
         finally:
             self._rpc_lock.release()
 
         if send_error is not None:
-            reason = str(send_error) or "Kortex command RPC failed"
-            latched_reason = self._latch_fault_and_stop(
-                reason,
-                generation=generation,
+            latched_reason = self._complete_fault_stop(
+                latched_reason,
+                pending_fault_stop,
             )
             if latched_reason is None:
                 raise send_error
@@ -649,22 +663,53 @@ class KortexBackend:
         generation: int | None = None,
         require_active: bool = True,
     ) -> str | None:
-        emit_stop_request = False
+        latched_reason, pending = self._prepare_fault_stop(
+            reason,
+            generation=generation,
+            require_active=require_active,
+        )
+        return self._complete_fault_stop(latched_reason, pending)
+
+    def _prepare_fault_stop(
+        self,
+        reason: str,
+        *,
+        generation: int | None = None,
+        require_active: bool = True,
+    ) -> tuple[str | None, _PendingFaultStop | None]:
+        """Latch fault state and revoke admission without issuing a Stop RPC."""
+
         with self._state_lock:
             if generation is not None:
                 if generation != self._generation:
-                    return None
+                    return None, None
                 if require_active and not self._state_allows_command_locked(generation):
-                    return None
+                    return None, None
             if self._fault_reason is not None:
-                return self._effective_fault_reason_locked()
+                return self._effective_fault_reason_locked(), None
             self._fault_reason = reason
             emit_stop_request = not self._stop_requested
             token = self._request_stop_locked(force=True)
-        self._emit("faulted", "FAULTED", {"reason": reason})
-        if emit_stop_request:
+            latched_reason = self._effective_fault_reason_locked()
+        return latched_reason, _PendingFaultStop(
+            reason=reason,
+            token=token,
+            emit_stop_request=emit_stop_request,
+        )
+
+    def _complete_fault_stop(
+        self,
+        latched_reason: str | None,
+        pending: _PendingFaultStop | None,
+    ) -> str | None:
+        """Emit a prepared fault and attempt Stop after RPC serialization exits."""
+
+        if pending is None:
+            return latched_reason
+        self._emit("faulted", "FAULTED", {"reason": pending.reason})
+        if pending.emit_stop_request:
             self._emit("host_stop_requested", "STOPPING", {})
-        self._attempt_stop(token=token, raise_on_failure=False)
+        self._attempt_stop(token=pending.token, raise_on_failure=False)
         with self._state_lock:
             return self._effective_fault_reason_locked()
 
@@ -905,6 +950,8 @@ class KortexBackend:
             raise KortexSafetyError(latched_reason)
 
         send_error: BaseException | None = None
+        latched_reason: str | None = None
+        pending_fault_stop: _PendingFaultStop | None = None
         sent = False
         try:
             with self._state_lock:
@@ -931,6 +978,11 @@ class KortexBackend:
                 sent = True
             except BaseException as error:
                 send_error = error
+                reason = str(error) or "Kortex gripper command RPC failed"
+                latched_reason, pending_fault_stop = self._prepare_fault_stop(
+                    reason,
+                    generation=generation,
+                )
             if sent:
                 with self._state_lock:
                     if not self._state_allows_command_locked(generation):
@@ -941,10 +993,9 @@ class KortexBackend:
             self._rpc_lock.release()
 
         if send_error is not None:
-            reason = str(send_error) or "Kortex gripper command RPC failed"
-            latched_reason = self._latch_fault_and_stop(
-                reason,
-                generation=generation,
+            latched_reason = self._complete_fault_stop(
+                latched_reason,
+                pending_fault_stop,
             )
             if latched_reason is None:
                 return False

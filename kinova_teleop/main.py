@@ -492,6 +492,8 @@ def _validate_args(args: argparse.Namespace) -> str | None:
     advanced = _is_advanced_pico_teleop(args)
     if args.gripper and not advanced:
         return "--gripper requires --advanced-pico-teleop"
+    if advanced and args.evidence_jsonl is None:
+        return "--evidence-jsonl is required for --advanced-pico-teleop"
     advanced_mode_valid = (
         args.backend == "kortex"
         and args.enable_hardware
@@ -1112,10 +1114,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             versions = validate_kortex_runtime()
             if args.fixed_trajectory is None:
                 source = create_input(args)
+                admission_kwargs: dict[str, object] = {
+                    "sample_count": 10,
+                    "timeout_s": args.check_timeout,
+                }
+                if _is_advanced_pico_teleop(args):
+                    admission_kwargs["require_trigger"] = True
                 admitted = wait_for_fresh_released_input(
                     source,
-                    sample_count=10,
-                    timeout_s=args.check_timeout,
+                    **admission_kwargs,
                 )
             readonly = _create_kortex_connection(
                 KortexConfig(args.robot_ip, args.robot_user, password),
@@ -1148,11 +1155,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise RuntimeError("read-only Kortex cleanup failed")
             confirm_move()
             if source is not None:
+                recheck_kwargs: dict[str, object] = {
+                    "after_timestamp_ns": admitted.last_timestamp_ns,
+                    "admission": admitted,
+                    "timeout_s": 0.5,
+                }
+                if _is_advanced_pico_teleop(args):
+                    recheck_kwargs["require_trigger"] = True
                 verify_released_now(
                     source,
-                    after_timestamp_ns=admitted.last_timestamp_ns,
-                    admission=admitted,
-                    timeout_s=0.5,
+                    **recheck_kwargs,
                 )
 
             connection = _create_kortex_connection(

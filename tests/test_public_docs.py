@@ -123,6 +123,8 @@ def test_advanced_gripper_guide_documents_the_guarded_parameterized_contract() -
         "recoverable stale input, workspace boundary projection/contact, and shutdown/cleanup",
         "send no automatic gripper command and hold the current gripper position",
         "No automatic open occurs in any of these cases",
+        "For the first gripper trial, use no payload, begin with a small Trigger value, and keep the physical E-stop and Web Stop reachable.",
+        "首次夹爪试验必须空载，从较小的 Trigger 值开始，并保持实体 E-stop 与 Web Stop 可达。",
     ):
         assert required in document, required
 

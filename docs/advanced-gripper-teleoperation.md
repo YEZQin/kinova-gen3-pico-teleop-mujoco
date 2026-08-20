@@ -10,6 +10,10 @@ The advanced profile is documented and automatically checked, but is **not hardw
 
 该高级模式已有文档与自动化检查，但**尚未完成硬件现场观察**，也**未完成硬件验证**；这不代表可安全进行实体运行。必须保持实体 E-stop 与 Web Stop 可达，保留第二观察员和全部九项现场检查，让人员远离，并在每个锁存故障后调查原因才可再次尝试。Kinova 固件限制及全部操作者控制始终有效。
 
+For the first gripper trial, use no payload, begin with a small Trigger value, and keep the physical E-stop and Web Stop reachable.
+
+首次夹爪试验必须空载，从较小的 Trigger 值开始，并保持实体 E-stop 与 Web Stop 可达。
+
 ## Prerequisites and measured inputs / 前置条件与实测输入
 
 Use artifacts produced afresh for this exact robot, calibration, package, and session. Do not reuse another robot's lease, preflight report, calibration, or bounds. Measure an inclusive absolute XYZ box around the current TCP pose after the public T0 and physical inspection. Every bound must be finite, and each minimum must be strictly less than its corresponding maximum.

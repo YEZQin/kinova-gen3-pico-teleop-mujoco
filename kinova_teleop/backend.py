@@ -20,6 +20,7 @@ class BackendResult:
     rotation_error: float
     reason: str
     reanchor_required: bool = False
+    active_rebase_target: Pose | None = None
 
 
 class EndEffectorTargetBackend(Protocol):
