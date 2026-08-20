@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -34,6 +35,15 @@ $record = [ordered]@{
     password = [string]$env:KINOVA_PASSWORD
 }
 $record | ConvertTo-Json -Compress -Depth 5 | Add-Content -LiteralPath $env:KINOVA_FAKE_LOG -Encoding UTF8
+if ($stage -eq 'pico' -and -not [string]::IsNullOrWhiteSpace($env:KINOVA_FAKE_PICO_SCENARIO)) {
+    Push-Location -LiteralPath $env:KINOVA_FAKE_PICO_MODULE_ROOT
+    try {
+        & $env:KINOVA_TEST_REAL_PYTHON -S @childArguments
+    } finally {
+        Pop-Location
+    }
+    return
+}
 $exitCode = if ($stage -eq 'pico') {
     [int]$env:KINOVA_FAKE_PICO_EXIT
 } elseif ($stage -eq 'motion') {
@@ -58,9 +68,45 @@ def launcher_fixture(tmp_path: Path) -> dict[str, Path]:
         "python": tmp_path / "fake-python.ps1",
         "log": tmp_path / "fake-child.jsonl",
         "prompt": tmp_path / "password-prompt.txt",
+        "pico_module": tmp_path / "fake-pico-module",
     }
     for key in ("lease", "report", "calibration"):
         paths[key].write_text("{}\n", encoding="utf-8")
+    pico_package = paths["pico_module"] / "kinova_teleop"
+    pico_package.mkdir(parents=True)
+    (pico_package / "__init__.py").write_text("", encoding="utf-8")
+    (pico_package / "main.py").write_text(
+        """from types import SimpleNamespace
+
+
+class ReleasedThenPressedSource:
+    def __init__(self):
+        self._samples = [
+            SimpleNamespace(
+                valid=True,
+                timestamp_ns=index + 1,
+                trigger_available=True,
+                trigger=0.5,
+                grip=0.0 if index == 0 else 1.0,
+            )
+            for index in range(10)
+        ]
+        self._index = 0
+
+    def read(self):
+        sample = self._samples[self._index]
+        self._index += 1
+        return sample
+
+    def close(self):
+        return None
+
+
+def create_pico_udp_input(**_kwargs):
+    return ReleasedThenPressedSource()
+""",
+        encoding="utf-8",
+    )
     _write_fake_python(paths["python"])
     return paths
 
@@ -98,6 +144,7 @@ def _run_launcher(
     validation_exit: int = 0,
     pico_exit: int = 0,
     motion_exit: int = 0,
+    pico_scenario: str = "",
     **call_overrides: object,
 ) -> subprocess.CompletedProcess[str]:
     command = (
@@ -105,6 +152,9 @@ def _run_launcher(
         f"$env:KINOVA_FAKE_VALIDATION_EXIT='{validation_exit}';"
         f"$env:KINOVA_FAKE_PICO_EXIT='{pico_exit}';"
         f"$env:KINOVA_FAKE_MOTION_EXIT='{motion_exit}';"
+        f"$env:KINOVA_FAKE_PICO_SCENARIO={_ps_literal(pico_scenario)};"
+        f"$env:KINOVA_FAKE_PICO_MODULE_ROOT={_ps_literal(paths['pico_module'])};"
+        f"$env:KINOVA_TEST_REAL_PYTHON={_ps_literal(sys.executable)};"
         "$env:KINOVA_PASSWORD=$null;"
         "function Read-Host {param([string]$Prompt,[switch]$AsSecureString)"
         f"[IO.File]::WriteAllText({_ps_literal(paths['prompt'])},"
@@ -289,6 +339,23 @@ def test_failed_pico_v2_gate_never_prompts_or_runs_motion(
 ) -> None:
     """A V1/unavailable Trigger gate failure must precede password and motion."""
     result = _run_launcher(launcher_fixture, pico_exit=23)
+
+    assert result.returncode != 0
+    assert [record["stage"] for record in _records(launcher_fixture["log"])] == [
+        "validate",
+        "pico",
+    ]
+    assert not launcher_fixture["prompt"].exists()
+
+
+def test_pico_gate_requires_every_fresh_v2_sample_to_remain_released(
+    launcher_fixture: dict[str, Path],
+) -> None:
+    """A released sample followed by a held Grip must not reach the password."""
+    result = _run_launcher(
+        launcher_fixture,
+        pico_scenario="released-then-pressed",
+    )
 
     assert result.returncode != 0
     assert [record["stage"] for record in _records(launcher_fixture["log"])] == [

@@ -169,7 +169,6 @@ required_samples = int(sys.argv[4])
 deadline = time.monotonic() + float(sys.argv[5])
 last_timestamp = None
 read_count = 0
-saw_release = False
 try:
     while read_count < required_samples:
         if time.monotonic() >= deadline:
@@ -183,13 +182,12 @@ try:
             continue
         if not sample.trigger_available or not math.isfinite(sample.trigger):
             raise RuntimeError('PICO V2 Trigger capability is required')
+        if not sample.grip < 0.8:
+            raise RuntimeError('Grip must remain released below 0.8 throughout the PICO input gate')
         last_timestamp = sample.timestamp_ns
         read_count += 1
-        saw_release = saw_release or sample.grip < 0.8
 finally:
     source.close()
-if not saw_release:
-    raise RuntimeError('release Grip below 0.8 before starting teleoperation')
 '@
 $picoGateArgs = @(
     '-c', $picoV2GateProgram,
