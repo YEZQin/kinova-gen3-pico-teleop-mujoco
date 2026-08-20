@@ -122,6 +122,8 @@ def _launcher_call(
     report: Path | None = None,
     calibration: Path | None = None,
     enable_gripper: str = "-EnableGripper",
+    run_id: str = "generated-run-id",
+    lease_owner: str = "kinova-teleop",
 ) -> str:
     resolved_lease = paths["lease"] if lease is None else lease
     resolved_report = paths["report"] if report is None else report
@@ -133,6 +135,7 @@ def _launcher_call(
         f"-OperatorCalibration {_ps_literal(resolved_calibration)} "
         f"-WorkspaceMin {workspace_min} -WorkspaceMax {workspace_max} "
         f"-RobotHost '192.0.2.10' -RobotUser 'test-operator' "
+        f"-RunId '{run_id}' -LeaseOwner '{lease_owner}' "
         f"-Scale {scale} -MaxLinearSpeed {max_linear_speed} "
         f"{enable_gripper} -PythonPath {_ps_literal(paths['python'])}"
     )
@@ -211,6 +214,8 @@ def test_launcher_declares_the_guarded_single_confirmation_contract() -> None:
         "WorkspaceMin",
         "WorkspaceMax",
         "EnableGripper",
+        "RunId",
+        "LeaseOwner",
     ):
         assert re.search(
             rf"\[Parameter\(Mandatory=\$true\)\][^\r\n]*\${parameter}\b", source
@@ -297,6 +302,8 @@ def test_fake_child_observes_exact_gated_arguments_and_child_only_password(
         assert required in motion_args
     assert _value_after(motion_args, "--robot-ip") == "192.0.2.10"
     assert _value_after(motion_args, "--robot-user") == "test-operator"
+    assert _value_after(motion_args, "--run-id") == "generated-run-id"
+    assert _value_after(motion_args, "--lease-owner") == "kinova-teleop"
     assert _value_after(motion_args, "--scale") == "1"
     assert _value_after(motion_args, "--max-linear-speed") == "0.05"
     min_index = motion_args.index("--workspace-min")

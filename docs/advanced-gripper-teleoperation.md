@@ -30,6 +30,7 @@ $robotUser = Read-Host 'Kortex user name for this Gen3'
 $motionLease = Read-Host 'Path to the fresh local motion-lease artifact'
 $preflightReport = Read-Host 'Path to the fresh local reviewed preflight report'
 $operatorCalibration = Read-Host 'Path to the captured operator calibration'
+$teleopProfile = Get-Content -LiteralPath (Read-Host 'Path to teleop-profile.json') -Raw | ConvertFrom-Json
 
 [double[]]$workspaceMin = @(
   [double](Read-Host 'Measured absolute X minimum (m)'),
@@ -48,6 +49,8 @@ $operatorCalibration = Read-Host 'Path to the captured operator calibration'
   -MotionLease $motionLease `
   -PreflightReport $preflightReport `
   -OperatorCalibration $operatorCalibration `
+  -RunId $teleopProfile.run_id `
+  -LeaseOwner $teleopProfile.lease_owner `
   -WorkspaceMin $workspaceMin `
   -WorkspaceMax $workspaceMax `
   -Scale 1.0 `

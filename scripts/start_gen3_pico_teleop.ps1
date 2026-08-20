@@ -10,6 +10,8 @@ param(
     [Parameter(Mandatory=$true)][string]$PreflightReport,
     [Parameter(Mandatory=$true)][string]$OperatorCalibration,
     [Parameter(Mandatory=$true)][switch]$EnableGripper,
+    [Parameter(Mandatory=$true)][string]$RunId,
+    [Parameter(Mandatory=$true)][string]$LeaseOwner,
     [string]$PythonPath
 )
 
@@ -139,6 +141,8 @@ $motionArgs = @(
     '--workspace-max'
 ) + @($WorkspaceMax | ForEach-Object { $_.ToString('R', $invariantCulture) }) + @(
     '--motion-lease', $lease,
+    '--run-id', $RunId,
+    '--lease-owner', $LeaseOwner,
     '--preflight-report', $preflight,
     '--operator-calibration', $calibration,
     '--evidence-jsonl', $evidence
