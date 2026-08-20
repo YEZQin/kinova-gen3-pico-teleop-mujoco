@@ -115,6 +115,17 @@ def test_advanced_gripper_guide_documents_the_guarded_parameterized_contract() -
     assert re.search(r"\$workspaceMax\s*=\s*@\(", document)
     assert "start_gen3_pico_teleop.ps1" in document
 
+    for required in (
+        "Grip activation establishes an anchor frame only",
+        "sends neither an arm motion command nor a gripper command",
+        "Proportional Trigger commands begin only on subsequent active samples",
+        "Grip release holds the last/current gripper command",
+        "recoverable stale input, workspace boundary projection/contact, and shutdown/cleanup",
+        "send no automatic gripper command and hold the current gripper position",
+        "No automatic open occurs in any of these cases",
+    ):
+        assert required in document, required
+
     forbidden = (
         r"D:[\\/]", r"C:[\\/]Users", r"KINOVA_PASSWORD\s*=",
         r"download[^\n]*apk", r"hardware-observed evidence",

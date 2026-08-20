@@ -58,10 +58,14 @@ Before a password prompt, the launcher validates the artifact-bound package and 
 
 在密码提示前，启动器验证绑定产物的包，并要求新鲜的 **PICO V2** 采样具备 Trigger 能力且 Grip 始终释放。密码被掩码且只提供给 Python 子进程。在子进程中精确输入一次 `MOVE`；确认前不得运动。
 
-Grip is the arm-motion clutch. Press it once above the required threshold to establish the anchor, then hold Grip to follow the controller. While Grip is held, the left index Trigger commands the Gen3 gripper proportionally: Trigger `0.0` requests open and Trigger `1.0` requests closed. Releasing Grip stops arm following and holds the last gripper command; it is not permission to ignore any Stop or fault.
+Grip is the arm-motion clutch. Grip activation establishes an anchor frame only: it sends neither an arm motion command nor a gripper command, so it cannot create an arm jump or change the gripper. Proportional Trigger commands begin only on subsequent active samples. Then hold Grip to follow the controller. While Grip is held, the left index Trigger commands the Gen3 gripper proportionally: Trigger `0.0` requests open and Trigger `1.0` requests closed. Grip release holds the last/current gripper command and stops arm following; it is not permission to ignore any Stop or fault.
 
-Grip 是机械臂运动离合。首次按到阈值以上以建立锚点，随后持续按住 Grip 才跟随控制器。按住 Grip 时，左手食指 Trigger 按比例命令 Gen3 夹爪：Trigger `0.0` 请求张开，Trigger `1.0` 请求闭合。松开 Grip 会停止机械臂跟随并保持最后一次夹爪命令；这不允许忽略任何 Stop 或故障。
+Grip 是机械臂运动离合。激活 Grip 只建立锚点帧：它既不发送机械臂运动命令，也不发送夹爪命令，因此不会造成机械臂跳变或改变夹爪。比例 Trigger 命令只从后续的有效活动采样开始。随后持续按住 Grip 才跟随控制器。按住 Grip 时，左手食指 Trigger 按比例命令 Gen3 夹爪：Trigger `0.0` 请求张开，Trigger `1.0` 请求闭合。松开 Grip 会停止机械臂跟随并保持最后/当前夹爪命令；这不允许忽略任何 Stop 或故障。
 
 For workspace handling, each requested Cartesian target is projected into the measured XYZ box by a coordinate-wise clamp: a coordinate below its minimum becomes that minimum, a coordinate above its maximum becomes that maximum, and a coordinate already inside is unchanged. The arm follows this projected target rather than treating the software boundary as an automatic exit. This projection neither enlarges the physically inspected workspace nor overrides Kinova limits, the physical E-stop, Web Stop, or the operator's responsibility to stop.
 
 工作区处理会将每个请求的笛卡尔目标投影到实测 XYZ 盒中：逐坐标 clamp，低于最小值的坐标变为最小值，高于最大值的坐标变为最大值，盒内坐标保持不变。机械臂跟随投影后的目标，而不是把软件边界视为自动退出条件。该投影不会扩大已实体检查的工作区，也不会覆盖 Kinova 限制、实体 E-stop、Web Stop 或操作者的停止责任。
+
+A recoverable stale input, workspace boundary projection/contact, and shutdown/cleanup send no automatic gripper command and hold the current gripper position. No automatic open occurs in any of these cases. Resolve the condition and follow the normal admission and operator controls before another commanded motion.
+
+可恢复的陈旧输入、工作区边界投影/接触以及关闭/清理均不发送自动夹爪命令，并保持当前夹爪位置；这些情况都不会自动张开夹爪。排除条件后，必须重新遵循正常门禁与操作者控制，才可再次执行命令运动。
