@@ -61,6 +61,22 @@ def test_evidence_logger_writes_anchor_rejection_reason(tmp_path):
     Draft202012Validator(schema).validate(record)
 
 
+def test_evidence_logger_writes_workspace_clamped_moving_event(tmp_path):
+    path = tmp_path / "events.jsonl"
+    logger = EvidenceLogger(path, run_id="g-001", monotonic_ns=lambda: 10)
+
+    record = logger.event(
+        "workspace_clamped",
+        "MOVING",
+        {"reason": "target clamped to workspace"},
+    )
+
+    assert record["kind"] == "workspace_clamped"
+    assert record["state"] == "MOVING"
+    assert record["payload"] == {"reason": "target clamped to workspace"}
+    assert json.loads(path.read_text(encoding="utf-8")) == record
+
+
 def test_evidence_logger_monotonic_order_is_strict(tmp_path):
     values = iter((3, 3))
     logger = EvidenceLogger(tmp_path / "events.jsonl", run_id="g-001", monotonic_ns=lambda: next(values))

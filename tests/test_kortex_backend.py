@@ -507,13 +507,19 @@ def test_close_never_sends_gripper_open() -> None:
     ] == [0.7]
 
 
-def test_workspace_projection_clamps_target_without_stop_or_reanchor():
+def test_advanced_workspace_projection_clamps_target_without_stop_or_reanchor(
+    tmp_path,
+):
     connection = _Connection(_feedback(position=(0.0, 0.0, 0.3)))
+    events_path = tmp_path / "events.jsonl"
+    logger = EvidenceLogger(events_path, run_id="g-001", monotonic_ns=lambda: 10)
     backend = _backend(
         connection,
         anchor_envelope=None,
+        advanced_translation=True,
         workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
         max_linear_speed=0.05,
+        event_sink=logger_event_sink(logger),
     )
     backend.begin_control()
     backend.current_pose()
@@ -522,13 +528,68 @@ def test_workspace_projection_clamps_target_without_stop_or_reanchor():
 
     assert result.accepted is True
     assert result.reanchor_required is False
-    assert result.reason == ""
+    assert result.reason == "target clamped to workspace"
     assert connection.base.stop_count == 0
     velocity = _velocity(connection.base.sent[-1])
     expected_direction = np.array([0.2, 0.2, 0.3], dtype=float)
     expected_linear = expected_direction * (0.05 / np.linalg.norm(expected_direction))
     np.testing.assert_allclose(velocity[:3], expected_linear)
     np.testing.assert_allclose(velocity[3:], [0.0, 0.0, 0.0])
+    records = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert records[-2]["kind"] == "workspace_clamped"
+    assert records[-2]["state"] == "MOVING"
+    assert records[-2]["payload"] == {"reason": "target clamped to workspace"}
+
+
+def test_advanced_workspace_projection_resumes_inward_in_same_generation():
+    connection = _Connection(_feedback(position=(0.0, 0.0, 0.3)))
+    backend = _backend(
+        connection,
+        anchor_envelope=None,
+        advanced_translation=True,
+        workspace_limits=WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6)),
+        max_linear_speed=0.05,
+    )
+    _begin_pose_control(backend)
+    generation = backend._generation
+
+    clamped = backend.command_pose(_target(position=(1.0, 0.0, 0.3)))
+    inward = backend.command_pose(_target(position=(0.1, 0.0, 0.3)))
+
+    assert clamped.accepted is True
+    assert clamped.reason == "target clamped to workspace"
+    assert inward.accepted is True
+    assert inward.reason == ""
+    assert backend._generation == generation
+    assert connection.base.stop_count == 0
+    assert len(connection.base.sent) == 2
+    np.testing.assert_allclose(_velocity(connection.base.sent[-1])[:3], [0.05, 0, 0])
+
+
+def test_translation_policy_constructor_invariants():
+    limits = WorkspaceLimits((-0.2, -0.2, 0.1), (0.2, 0.2, 0.6))
+
+    with pytest.raises(ValueError, match="legacy translation requires anchor_envelope"):
+        KortexBackend(_Connection(_feedback()), anchor_envelope=None)
+    with pytest.raises(ValueError, match="advanced translation requires workspace_limits"):
+        KortexBackend(
+            _Connection(_feedback()),
+            anchor_envelope=None,
+            advanced_translation=True,
+        )
+    with pytest.raises(ValueError, match="advanced translation requires anchor_envelope=None"):
+        KortexBackend(
+            _Connection(_feedback()),
+            anchor_envelope=TEST_ANCHOR_ENVELOPE,
+            advanced_translation=True,
+            workspace_limits=limits,
+        )
+    with pytest.raises(TypeError, match="advanced_translation must be a bool"):
+        KortexBackend(
+            _Connection(_feedback()),
+            anchor_envelope=TEST_ANCHOR_ENVELOPE,
+            advanced_translation=1,
+        )
 
 
 @pytest.fixture(autouse=True)

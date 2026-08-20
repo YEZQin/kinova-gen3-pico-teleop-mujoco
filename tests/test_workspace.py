@@ -8,6 +8,7 @@ import pytest
 from kinova_teleop.pose_mapping import Pose, quat_from_axis_angle
 from kinova_teleop.workspace import (
     AnchorEnvelope,
+    WorkspaceProjection,
     WorkspaceLimits,
     validate_target_pose,
 )
@@ -35,6 +36,56 @@ def test_workspace_rejects_invalid_bounds_and_malformed_pose() -> None:
     assert limits.evaluate(Pose(np.zeros(2), np.array([1.0, 0.0, 0.0, 0.0]))).reason == "target pose is non-finite"
     with pytest.raises(TypeError):
         validate_target_pose(pose_at(0.0, 0.0, 0.0), object())
+
+
+@pytest.mark.parametrize(
+    ("position", "expected"),
+    [
+        ((-1.0, 0.0, 0.3), (-0.2, 0.0, 0.3)),
+        ((1.0, 0.0, 0.3), (0.2, 0.0, 0.3)),
+        ((0.0, -1.0, 0.3), (0.0, -0.3, 0.3)),
+        ((0.0, 1.0, 0.3), (0.0, 0.3, 0.3)),
+        ((0.0, 0.0, -1.0), (0.0, 0.0, 0.1)),
+        ((0.0, 0.0, 1.0), (0.0, 0.0, 0.6)),
+    ],
+)
+def test_workspace_project_clamps_each_face(
+    position: tuple[float, float, float],
+    expected: tuple[float, float, float],
+) -> None:
+    limits = WorkspaceLimits((-0.2, -0.3, 0.1), (0.2, 0.3, 0.6))
+    target = Pose(np.asarray(position, dtype=float), np.array([1.0, 0.0, 0.0, 0.0]))
+
+    projection = limits.project(target)
+
+    assert isinstance(projection, WorkspaceProjection)
+    assert projection.projected is True
+    np.testing.assert_allclose(projection.target.position, expected)
+    assert limits.evaluate(projection.target).accepted
+
+
+def test_workspace_project_returns_immutable_copies_and_preserves_orientation() -> None:
+    limits = WorkspaceLimits((-0.2, -0.3, 0.1), (0.2, 0.3, 0.6))
+    position = np.array([0.1, 0.0, 0.3], dtype=float)
+    quaternion = quat_from_axis_angle(np.array([0.0, 0.0, 1.0]), 0.25)
+    target = Pose(position, quaternion)
+
+    projection = limits.project(target)
+
+    assert projection.projected is False
+    np.testing.assert_allclose(projection.target.position, position)
+    np.testing.assert_allclose(projection.target.quaternion, quaternion)
+    assert not np.shares_memory(projection.target.position, position)
+    assert not np.shares_memory(projection.target.quaternion, quaternion)
+    assert projection.target.position.flags.writeable is False
+    assert projection.target.quaternion.flags.writeable is False
+
+
+def test_workspace_project_rejects_nonfinite_pose() -> None:
+    limits = WorkspaceLimits((-0.2, -0.3, 0.1), (0.2, 0.3, 0.6))
+
+    with pytest.raises(ValueError, match="target pose is non-finite"):
+        limits.project(pose_at(float("nan"), 0.0, 0.3))
 
 
 def test_anchor_envelope_accepts_boundary_and_rejects_translation_overrun() -> None:

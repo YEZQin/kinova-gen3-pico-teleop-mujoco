@@ -23,7 +23,6 @@ from .pose_mapping import (
 from .workspace import (
     AnchorEnvelope,
     WorkspaceLimits,
-    project_pose_into_workspace,
     validate_target_pose,
 )
 
@@ -108,6 +107,7 @@ class KortexBackend:
         max_linear_speed: float = MAX_LINEAR_SPEED,
         max_angular_speed_deg: float = MAX_ANGULAR_SPEED_DEG,
         workspace_limits: WorkspaceLimits | None = None,
+        advanced_translation: bool = False,
         event_sink: Callable[[str, str, Mapping[str, object]], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -126,6 +126,18 @@ class KortexBackend:
             raise ValueError("Angular speed limit must be in (0, 5] deg/s")
         if connection.base is None or connection.base_cyclic is None:
             raise RuntimeError("Kortex connection is not connected")
+        if not isinstance(advanced_translation, bool):
+            raise TypeError("advanced_translation must be a bool")
+        if workspace_limits is not None and not isinstance(
+            workspace_limits, WorkspaceLimits
+        ):
+            raise TypeError("workspace_limits must be a WorkspaceLimits")
+        if advanced_translation and workspace_limits is None:
+            raise ValueError("advanced translation requires workspace_limits")
+        if advanced_translation and anchor_envelope is not None:
+            raise ValueError("advanced translation requires anchor_envelope=None")
+        if not advanced_translation and anchor_envelope is None:
+            raise ValueError("legacy translation requires anchor_envelope")
         if anchor_envelope is not None and not isinstance(anchor_envelope, AnchorEnvelope):
             raise TypeError("anchor_envelope must be an AnchorEnvelope")
 
@@ -136,6 +148,7 @@ class KortexBackend:
         self.max_linear_speed = float(max_linear_speed)
         self.max_angular_speed_deg = float(max_angular_speed_deg)
         self.workspace_limits = workspace_limits
+        self.advanced_translation = advanced_translation
         self.event_sink = event_sink
         self._monotonic = monotonic
         self._sleep = sleep
@@ -459,16 +472,20 @@ class KortexBackend:
             anchor = self._control_anchor
 
         # Workspace checks are deliberately before any feedback or Twist RPC.
-        if self.workspace_limits is not None:
+        projected = False
+        if self.advanced_translation:
+            assert self.workspace_limits is not None
+            projection = self.workspace_limits.project(target)
+            target = projection.target
+            projected = projection.projected
+        elif self.workspace_limits is not None:
             decision = validate_target_pose(target, self.workspace_limits)
             if not decision.accepted:
-                if self.anchor_envelope is not None:
-                    return self._reject_boundary_and_stop(
-                        decision.reason,
-                        generation=generation,
-                        event_kind="workspace_rejected",
-                    )
-                target = project_pose_into_workspace(target, self.workspace_limits)
+                return self._reject_boundary_and_stop(
+                    decision.reason,
+                    generation=generation,
+                    event_kind="workspace_rejected",
+                )
 
         if anchor is None:
             reason = "control anchor is unavailable"
@@ -480,7 +497,8 @@ class KortexBackend:
                 return _inactive_result()
             raise KortexSafetyError(latched_reason)
 
-        if self.anchor_envelope is not None:
+        if not self.advanced_translation:
+            assert self.anchor_envelope is not None
             decision = self.anchor_envelope.evaluate(anchor, target)
             if not decision.accepted:
                 return self._reject_boundary_and_stop(
@@ -546,7 +564,7 @@ class KortexBackend:
             converged=True,
             position_error=float(np.linalg.norm(position_error)),
             rotation_error=float(np.linalg.norm(rotation_error)),
-            reason="",
+            reason="target clamped to workspace" if projected else "",
         )
         nonzero = float(np.linalg.norm(velocity)) > 0.0
         if nonzero:
@@ -596,6 +614,12 @@ class KortexBackend:
                 return _inactive_result()
             if nonzero:
                 self._deadline = self._monotonic() + WATCHDOG_TIMEOUT
+        if projected:
+            self._emit(
+                "workspace_clamped",
+                "MOVING",
+                {"reason": "target clamped to workspace"},
+            )
         if nonzero:
             self._emit("moving", "MOVING", {})
         return result

@@ -25,6 +25,14 @@ class WorkspaceDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceProjection:
+    """Immutable pose projected into inclusive XYZ workspace bounds."""
+
+    target: Pose
+    projected: bool
+
+
+@dataclass(frozen=True, slots=True)
 class AnchorEnvelope:
     """Inclusive translation-axis and shortest-arc rotation limits."""
 
@@ -136,6 +144,27 @@ class WorkspaceLimits:
         )
         return WorkspaceDecision(
             bool(inside), "" if inside else "target outside workspace"
+        )
+
+    def project(self, target: Pose) -> WorkspaceProjection:
+        """Return an immutable finite target clamped to inclusive XYZ bounds."""
+
+        components = _pose_components(target)
+        if components is None:
+            raise ValueError("target pose is non-finite")
+        position, quaternion = components
+        projected_position = np.clip(
+            position,
+            np.asarray(self.minimum_xyz, dtype=float),
+            np.asarray(self.maximum_xyz, dtype=float),
+        )
+        immutable_position = projected_position.copy()
+        immutable_quaternion = quaternion.copy()
+        immutable_position.setflags(write=False)
+        immutable_quaternion.setflags(write=False)
+        return WorkspaceProjection(
+            Pose(immutable_position, immutable_quaternion),
+            projected=not np.array_equal(projected_position, position),
         )
 
 
