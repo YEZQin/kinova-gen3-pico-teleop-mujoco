@@ -81,6 +81,13 @@ class RecordingBackendWithGripper(RecordingBackend):
         return True
 
 
+class RejectedGripperBackend(RecordingBackendWithGripper):
+    def command_gripper(self, position: float) -> bool:
+        self.events.append("command_gripper")
+        self.gripper_values.append(position)
+        return False
+
+
 class RpcOrderingBackend(RecordingBackend):
     def current_pose(self) -> Pose:
         self.events.append("current_pose")
@@ -581,3 +588,62 @@ def test_nonfinite_or_unavailable_trigger_stops_before_pose_or_gripper_write() -
     assert backend.targets == []
     assert backend.gripper_values == []
     assert backend.events == ["hold"]
+
+
+def test_gripper_rejection_holds_and_stops_before_backend_step() -> None:
+    backend = RejectedGripperBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False, gripper=True),
+        ScriptedInput(
+            [
+                replace(sample([0.0, 0.0, 0.0], 0.0, 1, 1.00), trigger=0.1),
+                replace(sample([0.0, 0.0, 0.0], 1.0, 2, 1.01), trigger=0.2),
+                replace(sample([0.01, 0.0, 0.0], 1.0, 3, 1.02), trigger=0.3),
+            ]
+        ),
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    with pytest.raises(TeleopSafetyError, match="gripper command"):
+        controller.step_once()
+
+    assert backend.gripper_values == [0.3]
+    assert backend.events == [
+        "step",
+        "begin_control",
+        "step",
+        "command_pose",
+        "command_gripper",
+        "hold",
+    ]
+    assert controller.steps == 2
+
+
+def test_gripper_rejection_reports_unconfirmed_stop_failure() -> None:
+    class FailingStopRejectedGripperBackend(RejectedGripperBackend):
+        def hold(self) -> None:
+            self.events.append("hold")
+            raise RuntimeError("stop RPC failed")
+
+    backend = FailingStopRejectedGripperBackend()
+    controller = TeleopController(
+        TeleopConfig(realtime=False, gripper=True),
+        ScriptedInput(
+            [
+                replace(sample([0.0, 0.0, 0.0], 0.0, 1, 1.00), trigger=0.1),
+                replace(sample([0.0, 0.0, 0.0], 1.0, 2, 1.01), trigger=0.2),
+                replace(sample([0.01, 0.0, 0.0], 1.0, 3, 1.02), trigger=0.3),
+            ]
+        ),
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    with pytest.raises(TeleopSafetyError, match="Stop attempted but unconfirmed") as captured:
+        controller.step_once()
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert controller.steps == 2

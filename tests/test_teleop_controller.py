@@ -68,6 +68,16 @@ class RecordingBackend:
         return self.close_calls > 0
 
 
+class RecordingBackendWithGripper(RecordingBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gripper_values: list[float] = []
+
+    def command_gripper(self, position: float) -> bool:
+        self.gripper_values.append(position)
+        return True
+
+
 def sample(
     position: list[float],
     grip: float,
@@ -158,6 +168,40 @@ def test_recoverable_stale_stops_once_and_requires_fresh_release_streak() -> Non
     assert diagnostics[10].clutch_state is ClutchState.WAITING_FOR_RELEASE
     assert diagnostics[12].clutch_state is ClutchState.WAITING_FOR_RELEASE
     assert diagnostics[13].clutch_state is ClutchState.READY
+
+
+def test_gripper_recovers_from_unavailable_buffered_stale_input() -> None:
+    backend = RecordingBackendWithGripper()
+    controller = TeleopController(
+        TeleopConfig(realtime=False, gripper=True, recover_stale_input=True),
+        ScriptedInput(
+            [
+                sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+                sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+                ControllerSample(
+                    position=np.zeros(3, dtype=np.float64),
+                    quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0]),
+                    grip=0.0,
+                    timestamp_ns=0,
+                    received_monotonic=1.02,
+                    valid=False,
+                    trigger=0.0,
+                    trigger_available=False,
+                    invalid_reason="stream is stale",
+                ),
+            ]
+        ),
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    stale = controller.step_once()
+
+    assert stale.stale is True
+    assert backend.holds == 1
+    assert backend.gripper_values == []
+    assert backend.steps == 3
 
 
 def test_stale_recovery_reanchors_before_any_new_motion_command() -> None:

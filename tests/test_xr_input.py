@@ -179,6 +179,7 @@ def test_continuous_buffer_does_not_mask_stale_source_sample() -> None:
                 timestamp_ns=0,
                 received_monotonic=2.0,
                 valid=False,
+                trigger_available=False,
                 invalid_reason="stream is stale",
             )
 
@@ -190,6 +191,7 @@ def test_continuous_buffer_does_not_mask_stale_source_sample() -> None:
         assert stale_emitted.wait(0.2)
         sample = buffered.read()
         assert not sample.valid
+        assert sample.trigger_available is False
         assert sample.invalid_reason == "stream is stale"
     finally:
         buffered.close()

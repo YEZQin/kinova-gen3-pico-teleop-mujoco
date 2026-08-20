@@ -118,9 +118,14 @@ class TeleopController:
 
     def step_once(self) -> StepDiagnostics:
         sample = self.source.read()
+        recoverable_stale_sample = (
+            self.config.recover_stale_input
+            and not sample.valid
+            and sample.invalid_reason == "stream is stale"
+        )
         if self.config.gripper and (
             not sample.trigger_available or not math.isfinite(sample.trigger)
-        ):
+        ) and not recoverable_stale_sample:
             try:
                 self.backend.hold()
             except BaseException as error:
@@ -187,7 +192,14 @@ class TeleopController:
                 mapping = self.mapper.require_release()
             elif self.config.gripper and sample.valid:
                 assert callable(self._command_gripper)
-                self._command_gripper(float(sample.trigger))
+                if not self._command_gripper(float(sample.trigger)):
+                    try:
+                        self.backend.hold()
+                    except BaseException as error:
+                        raise TeleopSafetyError(
+                            "Stop attempted but unconfirmed"
+                        ) from error
+                    raise TeleopSafetyError("fatal gripper command rejected")
         else:
             if mapping.deactivated:
                 self._emit("input_release", "STOPPING", {})
