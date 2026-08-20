@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 README_PATHS = (ROOT / "README.md", ROOT / "README_CN.md")
+ADVANCED_GUIDE = ROOT / "docs" / "advanced-gripper-teleoperation.md"
 LIFECYCLE = (
     "clone", "bootstrap", "apk-install", "pico-gate", "mujoco-finite",
     "calibration", "t0", "local-package", "offline-validation",
@@ -75,6 +76,51 @@ def test_hardware_lifecycle_is_an_operator_sequence_not_inert_commands() -> None
         assert sequence < launcher, f"{path.name} must explain the launcher sequence before launch"
         lifecycle_blocks = [block for block in _powershell_blocks(document) if "LIFECYCLE:" in block]
         assert all("Write-Host" not in block for block in lifecycle_blocks)
+
+
+def test_readmes_link_to_the_separate_advanced_gripper_guide() -> None:
+    """The public first-motion path stays gripper-free; advanced use is separate."""
+    english, chinese = (path.read_text(encoding="utf-8") for path in README_PATHS)
+
+    assert "[Advanced PICO gripper teleoperation](docs/advanced-gripper-teleoperation.md)" in english
+    assert "[高级 PICO 夹爪遥操](docs/advanced-gripper-teleoperation.md)" in chinese
+
+
+def test_advanced_gripper_guide_documents_the_guarded_parameterized_contract() -> None:
+    """A public advanced command must remain artifact-bound and safety-qualified."""
+    document = ADVANCED_GUIDE.read_text(encoding="utf-8")
+
+    for required in (
+        "-MotionLease",
+        "-PreflightReport",
+        "-OperatorCalibration",
+        "-EnableGripper",
+        "-Scale 1.0",
+        "-MaxLinearSpeed 0.05",
+        "PICO V2",
+        "MOVE",
+        "Trigger `0.0`",
+        "Trigger `1.0`",
+        "Grip",
+        "projection",
+        "clamp",
+        "physical E-stop",
+        "Web Stop",
+        "not hardware-observed",
+        "not hardware-validated",
+    ):
+        assert required in document, required
+
+    assert re.search(r"\$workspaceMin\s*=\s*@\(", document)
+    assert re.search(r"\$workspaceMax\s*=\s*@\(", document)
+    assert "start_gen3_pico_teleop.ps1" in document
+
+    forbidden = (
+        r"D:[\\/]", r"C:[\\/]Users", r"KINOVA_PASSWORD\s*=",
+        r"download[^\n]*apk", r"hardware-observed evidence",
+    )
+    for pattern in forbidden:
+        assert re.search(pattern, document, flags=re.IGNORECASE) is None, pattern
 
 
 def test_bootstrap_is_gated_by_the_release_asset_state() -> None:
@@ -207,7 +253,12 @@ def test_public_docs_exclude_private_paths_secrets_and_laboratory_artifacts() ->
         r"KINOVA_PASSWORD\s*=\s*['\"]", r"password\s*[:=]\s*['\"]",
         r"admin\s+as\s+(?:the\s+)?password", r"copy.*(?:entire|whole|broad).*workspace",
     )
-    for path in (*README_PATHS, ROOT / "docs" / "kortex-hardware-quickstart.md", ROOT / "docs" / "pico-udp-quickstart.md"):
+    for path in (
+        *README_PATHS,
+        ADVANCED_GUIDE,
+        ROOT / "docs" / "kortex-hardware-quickstart.md",
+        ROOT / "docs" / "pico-udp-quickstart.md",
+    ):
         text = path.read_text(encoding="utf-8")
         for pattern in forbidden:
             assert re.search(pattern, text, flags=re.IGNORECASE) is None, f"{path.name}: {pattern}"

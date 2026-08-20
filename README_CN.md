@@ -1,6 +1,6 @@
 # PICO 到 Kinova Gen3 的受控遥操作
 
-[English](README.md) | [证据等级](docs/evidence-levels.md) | [PICO 详情](docs/pico-udp-quickstart.md) | [Kortex 详情](docs/kortex-hardware-quickstart.md)
+[English](README.md) | [证据等级](docs/evidence-levels.md) | [PICO 详情](docs/pico-udp-quickstart.md) | [Kortex 详情](docs/kortex-hardware-quickstart.md) | [高级 PICO 夹爪遥操](docs/advanced-gripper-teleoperation.md)
 
 本公开流程从一台干净的 Windows 电脑开始，逐步到达经过明确门禁的首次运动流程。支持对象为 **Kinova Gen3 L53、7 自由度、固件 2.8.0-5**，搭配 **Kortex 2.8 / `kortex_api` 2.8.0.post5** 和 PICO 4 或 PICO 4 Ultra 左手柄。默认且推荐的路径是 MuJoCo。
 
@@ -139,6 +139,10 @@ $profileRoot = Split-Path -Parent (Resolve-Path local-config\teleop-profile.json
 上面的启动器顺序是实际操作说明，不是用 shell 命令模拟的流程。将 Grip 按过 `0.9` 一次以锚定；第一次按下不得跳变。每次仅移动一个轴几毫米，观察方向和速度，然后松开 Grip。首跑路径刻意禁用夹爪写入和视觉控制。
 
 若发生陈旧输入、UDP、换源、工作区、watchdog 或 Stop 故障：保持人员远离，按需要使用实体 Stop，不要在锁存故障后重新启动，检查线缆/网络/夹具，再从适当门禁重做。PICO 故障检查头显应用是否在前台、左手柄 tracking、受信任 LAN/VLAN、VPN/AP 隔离和窄范围 UDP 15031 规则。Kortex 故障时不得随意更换固件或 SDK；确认必需 wheel/固件组合并重新执行只读 T0。
+
+## 高级 PICO 遥操与比例夹爪
+
+上方公开首动生命周期仍为仅平移，且不写入夹爪。只有完成该流程后，操作者才可使用独立的[高级 PICO 夹爪遥操指南](docs/advanced-gripper-teleoperation.md)。该指南要求当前机器人新鲜生成的本地包产物和实测边界；它不改变实体急停、Web Stop、第二观察员或精确 `MOVE` 控制。
 
 ## 证据、许可证与开发
 

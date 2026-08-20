@@ -1,6 +1,6 @@
 # PICO-to-Kinova Gen3 guarded teleoperation
 
-[中文说明](README_CN.md) | [Evidence levels](docs/evidence-levels.md) | [PICO detail](docs/pico-udp-quickstart.md) | [Kortex detail](docs/kortex-hardware-quickstart.md)
+[中文说明](README_CN.md) | [Evidence levels](docs/evidence-levels.md) | [PICO detail](docs/pico-udp-quickstart.md) | [Kortex detail](docs/kortex-hardware-quickstart.md) | [Advanced PICO gripper teleoperation](docs/advanced-gripper-teleoperation.md)
 
 This public walkthrough starts from clean Windows and ends at a deliberately guarded first motion workflow. It supports a **Kinova Gen3 L53, 7 DoF, firmware 2.8.0-5** with the **Kortex 2.8 / `kortex_api` 2.8.0.post5** stack, plus a PICO 4 or PICO 4 Ultra left controller. The default and recommended path is MuJoCo.
 
@@ -139,6 +139,10 @@ Before the launcher may proceed, physically verify all nine conditions represent
 The launcher sequence above is the operational instruction, not a shell command to simulate. Press Grip above `0.9` once to anchor; that first press must not jump. Move one axis a few millimetres, observe direction and speed, then release Grip. Gripper writes and vision control are intentionally unavailable in this first-run path.
 
 For a stale-input, UDP, source-change, workspace, watchdog, or Stop failure: keep hands clear, use physical Stop when indicated, do not relaunch after a latched fault, inspect cables/network/fixture, and repeat from the applicable gate. For PICO failure check headset app foreground state, left-controller tracking, trusted LAN/VLAN, VPN/AP isolation, and the narrow UDP 15031 rule. For Kortex failure, do not change firmware or SDK ad hoc: confirm the required wheel/firmware pair and repeat a fresh read-only T0.
+
+## Advanced PICO teleop with proportional gripper
+
+The public first-motion lifecycle above remains translation-only and has no gripper writes. Only after completing it may an operator use the separate [advanced PICO gripper guide](docs/advanced-gripper-teleoperation.md). That guide requires fresh local package artifacts and bounds measured for the current robot; it does not change the physical E-stop, Web Stop, observer, or exact-`MOVE` controls.
 
 ## Evidence, licenses, and development
 
