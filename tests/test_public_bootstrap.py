@@ -278,18 +278,70 @@ def _run_bootstrap(
     )
 
 
-def test_public_bootstrap_fixture_uses_child_powershell_module_defaults(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _powershell_core_modules() -> Path:
     powershell_core = shutil.which("pwsh")
     if powershell_core is None:
         pytest.skip("PowerShell Core is required for the module-isolation regression")
-    powershell_core_modules = Path(powershell_core).parent / "Modules"
-    inherited_module_path = os.environ.get("PSModulePath", "")
-    monkeypatch.setenv(
-        "PSModulePath",
-        f"{powershell_core_modules}{os.pathsep}{inherited_module_path}",
+    install_root_result = subprocess.run(
+        [powershell_core, "-NoProfile", "-NonInteractive", "-Command", "$PSHOME"],
+        check=False,
+        capture_output=True,
+        text=True,
     )
+    assert install_root_result.returncode == 0, install_root_result.stderr
+    install_root_lines = [
+        line.strip() for line in install_root_result.stdout.splitlines() if line.strip()
+    ]
+    assert len(install_root_lines) == 1, install_root_result.stdout
+    powershell_core_modules = Path(install_root_lines[0]) / "Modules"
+    core_utility_manifest = (
+        powershell_core_modules
+        / "Microsoft.PowerShell.Utility"
+        / "Microsoft.PowerShell.Utility.psd1"
+    )
+    if not core_utility_manifest.is_file():
+        pytest.skip("PowerShell Core Utility module is unavailable for isolation test")
+    return powershell_core_modules
+
+
+def _incompatible_powershell_core_module_path() -> str:
+    powershell_core_modules = _powershell_core_modules()
+    inherited_module_path = os.environ.get("PSModulePath", "")
+    polluted_module_path = (
+        f"{powershell_core_modules}{os.pathsep}{inherited_module_path}"
+    )
+    probe_environment = {
+        **{
+            name: value
+            for name, value in os.environ.items()
+            if name.casefold() != "psmodulepath"
+        },
+        "PSModulePath": polluted_module_path,
+    }
+    probe = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$resolvedCommand = Get-Command Get-FileHash -ErrorAction SilentlyContinue; "
+            "if ($null -eq $resolvedCommand) { exit 86 }",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=probe_environment,
+    )
+    if probe.returncode == 0:
+        pytest.skip("PowerShell Core Utility module does not mask Get-FileHash")
+    assert probe.returncode == 86, probe.stderr
+    return polluted_module_path
+
+
+def test_public_bootstrap_fixture_uses_child_powershell_module_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PSModulePath", _incompatible_powershell_core_module_path())
     project, fake_python, environment = _prepare_offline_project(tmp_path)
 
     result = _run_bootstrap(project, fake_python, environment, "-SkipOfflineTests")
