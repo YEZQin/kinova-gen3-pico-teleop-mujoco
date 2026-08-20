@@ -886,6 +886,19 @@ class KortexBackend:
             with self._state_lock:
                 if not self._state_allows_command_locked(generation):
                     return False
+                locked_now = self._monotonic()
+                if (
+                    self._gripper_last_value is not None
+                    and abs(position - self._gripper_last_value)
+                    < GRIPPER_DEADBAND
+                ):
+                    return True
+                if (
+                    self._gripper_last_time is not None
+                    and locked_now - self._gripper_last_time
+                    < GRIPPER_MIN_INTERVAL
+                ):
+                    return True
             try:
                 self.connection.base.SendGripperCommand(
                     command,
@@ -894,6 +907,12 @@ class KortexBackend:
                 sent = True
             except BaseException as error:
                 send_error = error
+            if sent:
+                with self._state_lock:
+                    if not self._state_allows_command_locked(generation):
+                        return False
+                    self._gripper_last_value = position
+                    self._gripper_last_time = self._monotonic()
         finally:
             self._rpc_lock.release()
 
@@ -906,13 +925,6 @@ class KortexBackend:
             if latched_reason is None:
                 return False
             raise KortexSafetyError(latched_reason) from send_error
-
-        with self._state_lock:
-            if not sent or not self._state_allows_command_locked(generation):
-                return False
-            if sent:
-                self._gripper_last_value = position
-                self._gripper_last_time = now
         return True
 
     def close(self) -> None:

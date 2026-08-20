@@ -338,6 +338,26 @@ class _GateLock:
         pass
 
 
+class _ObservedRpcLock:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._count_lock = threading.Lock()
+        self.acquire_count = 0
+        self.second_attempted = threading.Event()
+
+    def acquire(self, timeout=None):
+        with self._count_lock:
+            self.acquire_count += 1
+            if self.acquire_count == 2:
+                self.second_attempted.set()
+        if timeout is None:
+            return self._lock.acquire()
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self):
+        self._lock.release()
+
+
 def test_gripper_queued_behind_stop_is_dropped():
     connection = _Connection(_feedback())
     backend = _backend(connection)
@@ -362,6 +382,93 @@ def test_gripper_queued_behind_stop_is_dropped():
     assert errors == []
     assert results == [False]
     assert connection.base.gripper_sent == []
+
+
+def test_concurrent_gripper_commands_recheck_rate_limit_after_rpc_lock() -> None:
+    backend, connection, _clock = _active_gripper_backend()
+    rpc_lock = _ObservedRpcLock()
+    backend._rpc_lock = rpc_lock
+    send_entered = threading.Event()
+    release_send = threading.Event()
+    original_send = connection.base.SendGripperCommand
+
+    def blocked_send(command, *, options=None):
+        send_entered.set()
+        assert release_send.wait(timeout=1.0)
+        original_send(command, options=options)
+
+    connection.base.SendGripperCommand = blocked_send
+    first_results: list[bool] = []
+    first_errors: list[BaseException] = []
+    second_results: list[bool] = []
+    second_errors: list[BaseException] = []
+    first = threading.Thread(
+        target=_capture_result_or_error,
+        args=(lambda: backend.command_gripper(0.4), first_results, first_errors),
+    )
+    second = threading.Thread(
+        target=_capture_result_or_error,
+        args=(lambda: backend.command_gripper(0.9), second_results, second_errors),
+    )
+
+    first.start()
+    assert send_entered.wait(timeout=1.0)
+    second.start()
+    assert rpc_lock.second_attempted.wait(timeout=1.0)
+    release_send.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert first_errors == []
+    assert second_errors == []
+    assert first_results == [True]
+    assert second_results == [True]
+    assert [
+        command.gripper.finger.entries[0].value
+        for command in connection.base.gripper_sent
+    ] == [0.4]
+
+
+def test_gripper_rate_limit_starts_after_slow_rpc_succeeds() -> None:
+    backend, connection, clock = _active_gripper_backend()
+    send_entered = threading.Event()
+    release_send = threading.Event()
+    original_send = connection.base.SendGripperCommand
+
+    def blocked_send(command, *, options=None):
+        send_entered.set()
+        assert release_send.wait(timeout=1.0)
+        original_send(command, options=options)
+
+    connection.base.SendGripperCommand = blocked_send
+    results: list[bool] = []
+    errors: list[BaseException] = []
+    worker = threading.Thread(
+        target=_capture_result_or_error,
+        args=(lambda: backend.command_gripper(0.4), results, errors),
+    )
+    worker.start()
+    assert send_entered.wait(timeout=1.0)
+    clock.now = 5.0
+    release_send.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert results == [True]
+    assert backend.command_gripper(0.9) is True
+    assert len(connection.base.gripper_sent) == 1
+    clock.now += 0.099
+    assert backend.command_gripper(0.9) is True
+    assert len(connection.base.gripper_sent) == 1
+    clock.now += 0.002
+    assert backend.command_gripper(0.9) is True
+    assert [
+        command.gripper.finger.entries[0].value
+        for command in connection.base.gripper_sent
+    ] == [0.4, 0.9]
 
 
 def test_gripper_is_rejected_after_stop_and_accepted_after_rearm() -> None:
