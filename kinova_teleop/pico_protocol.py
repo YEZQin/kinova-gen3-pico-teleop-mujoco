@@ -29,6 +29,7 @@ class PicoControllerFrame:
     received_at: float
     source: tuple[str, int]
     trigger: float = 0.0
+    protocol_version: int = PICO_VERSION_2
 
 
 def sequence_delta(candidate: int, previous: int) -> int:
@@ -170,4 +171,5 @@ def decode_pico_packet(
         received_at=received_at,
         source=source,
         trigger=trigger,
+        protocol_version=version,
     )

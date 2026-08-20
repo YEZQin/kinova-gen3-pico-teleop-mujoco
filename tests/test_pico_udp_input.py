@@ -430,17 +430,23 @@ def test_v2_trigger_propagates_into_controller_sample() -> None:
     sample = source.read()
     assert sample.valid
     assert sample.trigger == pytest.approx(0.6)
+    assert sample.trigger_available is True
 
 
 def test_legacy_frame_without_trigger_yields_zero_trigger() -> None:
     receiver = FakeReceiver([
-        make_frame(sequence=1, trigger=0.9, received_at=5.0),
-        make_frame(sequence=2, received_at=5.01),
+        make_frame(
+            sequence=1,
+            protocol_version=1,
+            trigger=0.9,
+            received_at=5.0,
+        ),
     ])
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
     sample = source.read()
     assert sample.valid
     assert sample.trigger == 0.0
+    assert sample.trigger_available is False
 
 
 def test_inactive_sample_has_zero_trigger() -> None:

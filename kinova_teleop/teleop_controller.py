@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import time
 from collections.abc import Mapping
@@ -32,6 +32,7 @@ class TeleopConfig:
     recover_stale_input: bool = False
     recovery_release_samples: int = 1
     translation_rotation: tuple[tuple[float, float, float], ...] | None = None
+    gripper: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -75,16 +76,19 @@ class TeleopController:
             or config.recovery_release_samples <= 0
         ):
             raise ValueError("recovery_release_samples must be a positive integer")
+        if config.gripper and not callable(getattr(backend, "command_gripper", None)):
+            raise ValueError("The selected backend does not support a gripper")
         self.config = config
         self.source = source
         self.backend = backend
+        self._command_gripper = getattr(backend, "command_gripper", None)
         self.event_sink = event_sink
         self.mapper = RelativePoseMapper(
             MappingConfig(
                 translation_scale=config.translation_scale,
                 orientation_enabled=config.orientation_enabled,
                 invert_translation=config.invert_translation,
-                release_stability_samples=config.recovery_release_samples,
+                release_stability_samples=1,
                 stale_timeout=config.stale_timeout,
                 translation_rotation=config.translation_rotation,
             ),
@@ -114,6 +118,16 @@ class TeleopController:
 
     def step_once(self) -> StepDiagnostics:
         sample = self.source.read()
+        if self.config.gripper and (
+            not sample.trigger_available or not math.isfinite(sample.trigger)
+        ):
+            try:
+                self.backend.hold()
+            except BaseException as error:
+                raise TeleopSafetyError("Stop attempted but unconfirmed") from error
+            raise TeleopSafetyError(
+                "fatal input fault: gripper trigger is unavailable or non-finite"
+            )
         now = (
             time.monotonic()
             if self.config.realtime
@@ -126,6 +140,10 @@ class TeleopController:
             and self.config.recover_stale_input
         )
         if recoverable_stale:
+            self.mapper.config = replace(
+                self.mapper.config,
+                release_stability_samples=self.config.recovery_release_samples,
+            )
             if mapping.deactivated:
                 try:
                     self.backend.hold()
@@ -167,6 +185,9 @@ class TeleopController:
                 # not send a second Stop; require a fresh release sequence
                 # and let the next Grip activation read a new feedback pose.
                 mapping = self.mapper.require_release()
+            elif self.config.gripper and sample.valid:
+                assert callable(self._command_gripper)
+                self._command_gripper(float(sample.trigger))
         else:
             if mapping.deactivated:
                 self._emit("input_release", "STOPPING", {})

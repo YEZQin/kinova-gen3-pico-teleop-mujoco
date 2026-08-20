@@ -33,6 +33,7 @@ class ControllerSample:
     received_monotonic: float
     valid: bool = True
     trigger: float = 0.0
+    trigger_available: bool = True
     invalid_reason: str = ""
 
 
@@ -106,6 +107,7 @@ class ContinuousInputBuffer:
                 received_monotonic=self._monotonic(),
                 valid=False,
                 trigger=0.0,
+                trigger_available=False,
                 invalid_reason="stream is stale",
             )
         return ControllerSample(
@@ -120,6 +122,7 @@ class ContinuousInputBuffer:
             received_monotonic=float(sample.received_monotonic),
             valid=bool(sample.valid),
             trigger=float(sample.trigger),
+            trigger_available=bool(sample.trigger_available),
             invalid_reason=str(sample.invalid_reason),
         )
 

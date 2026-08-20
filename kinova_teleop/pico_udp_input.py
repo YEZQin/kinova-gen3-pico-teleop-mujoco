@@ -225,6 +225,7 @@ class PicoUdpInput:
             received_monotonic=now,
             valid=False,
             trigger=0.0,
+            trigger_available=False,
             invalid_reason=invalid_reason,
         )
 
@@ -237,5 +238,6 @@ class PicoUdpInput:
             timestamp_ns=frame.source_time_us * 1000,
             received_monotonic=frame.received_at,
             valid=True,
-            trigger=float(frame.trigger),
+            trigger=(float(frame.trigger) if frame.protocol_version >= 2 else 0.0),
+            trigger_available=frame.protocol_version >= 2,
         )

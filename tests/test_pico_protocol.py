@@ -58,6 +58,7 @@ def test_decode_accepts_legacy_v1_packet_with_zero_trigger() -> None:
     )
 
     assert decoded.tracked
+    assert decoded.protocol_version == 1
     assert decoded.grip == pytest.approx(0.75)
     assert decoded.trigger == 0.0
 
@@ -88,6 +89,7 @@ def test_round_trip_preserves_controller_values_and_receive_metadata() -> None:
         source=("10.0.0.3", 4567),
     )
     assert decoded.sequence == 42
+    assert decoded.protocol_version == 2
     assert decoded.tracked
     assert decoded.position == pytest.approx((0.1, 1.2, -0.3))
     assert decoded.quaternion_xyzw == pytest.approx((0.0, 0.0, 0.0, 1.0))
