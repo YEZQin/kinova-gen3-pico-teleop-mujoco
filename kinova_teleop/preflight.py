@@ -262,6 +262,28 @@ def _feedback_values(feedback: Any) -> tuple[np.ndarray, np.ndarray]:
     return position, angles
 
 
+def read_kortex_tool_position(connection: Any) -> tuple[float, float, float]:
+    """Read one immutable finite XYZ tool position over read-only RPC options."""
+
+    try:
+        options = connection.readonly_rpc_options()
+        feedback = connection.base_cyclic.RefreshFeedback(options=options)
+        base = getattr(feedback, "base", feedback)
+        position = np.asarray(
+            [base.tool_pose_x, base.tool_pose_y, base.tool_pose_z],
+            dtype=float,
+        )
+    except Exception as error:
+        raise ValueError(
+            "current Kortex tool position must contain three finite XYZ values"
+        ) from error
+    if position.shape != (3,) or not np.isfinite(position).all():
+        raise ValueError(
+            "current Kortex tool position must contain three finite XYZ values"
+        )
+    return tuple(float(value) for value in position)
+
+
 def decode_firmware_version(raw: int) -> str:
     """Format the packed Kortex firmware integer without recording device IDs."""
 

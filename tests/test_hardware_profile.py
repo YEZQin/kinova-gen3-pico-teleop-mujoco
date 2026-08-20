@@ -1,6 +1,8 @@
 import pytest
 
 from kinova_teleop.hardware_profile import (
+    ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS,
+    ADVANCED_PICO_TELEOP_MAX_SCALE,
     EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
     FIRST_HARDWARE_PROFILE,
     MAX_TRANSLATION_ONLY_SCALE,
@@ -12,6 +14,7 @@ from kinova_teleop.hardware_profile import (
     validate_workspace_span,
 )
 from kinova_teleop.main import (
+    _resolve_max_linear_speed,
     build_parser,
     resolve_anchor_translation_axis,
     resolve_control_hz,
@@ -43,6 +46,17 @@ def test_backend_specific_defaults_preserve_mujoco() -> None:
     assert resolve_translation_scale(mujoco) == 0.5
     assert resolve_control_hz(kortex) == 40.0
     assert resolve_translation_scale(kortex) == 0.25
+
+
+def test_advanced_pico_profile_has_exact_scale_and_speed_defaults() -> None:
+    args = build_parser().parse_args(
+        ["--backend", "kortex", "--advanced-pico-teleop"]
+    )
+
+    assert ADVANCED_PICO_TELEOP_MAX_SCALE == 1.0
+    assert ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS == 0.05
+    assert resolve_translation_scale(args) == 1.0
+    assert _resolve_max_linear_speed(args) == 0.05
 
 
 def test_runtime_gate_requires_the_tested_sdk_stack() -> None:

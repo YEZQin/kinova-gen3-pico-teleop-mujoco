@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from kinova_teleop.kortex_backend import KortexBackend
+
 from kinova_teleop.main import (
     _approve_fixed_segment,
     _cleanup_resources,
@@ -187,6 +189,62 @@ def _expanded_motion_gate_args(arguments: list[str]) -> list[str]:
 
 def _valid_motion_argv() -> list[str]:
     return _motion_gate_args(["--backend", "kortex", "--enable-hardware"])
+
+
+def _advanced_pico_motion_argv() -> list[str]:
+    return [
+        "--backend", "kortex",
+        "--enable-hardware",
+        "--advanced-pico-teleop",
+        "--input", "pico-udp",
+        "--translation-only",
+        "--responsive-translation-profile",
+        "--operator-calibration", "operator-axis.json",
+        "--recover-stale-input",
+        "--gripper",
+        "--workspace-min", "-0.6", "-0.6", "-0.04",
+        "--workspace-max", "0.6", "0.6", "0.6",
+        "--motion-lease", "fixture-motion.lock",
+        "--preflight-report", "fixture-preflight.json",
+    ]
+
+
+def _install_advanced_pico_package_fakes(monkeypatch, captured: dict | None = None) -> None:
+    monkeypatch.setattr(main_module, "validate_motion_lease", lambda *_args: object())
+    monkeypatch.setattr(
+        main_module,
+        "load_operator_axis_calibration",
+        lambda _path: SimpleNamespace(
+            translation_rotation=(
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            ),
+            source_sha256="a" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_passing_preflight_report",
+        lambda *_args, **kwargs: (captured.update(kwargs) if captured is not None else None) or object(),
+    )
+    monkeypatch.setenv("KINOVA_PASSWORD", "test-password")
+
+
+def _forbid_advanced_hardware_side_effects(monkeypatch) -> list[str]:
+    calls: list[str] = []
+
+    def forbidden(name: str):
+        return lambda *_args, **_kwargs: calls.append(name) or (_ for _ in ()).throw(
+            AssertionError(f"{name} reached")
+        )
+
+    monkeypatch.setattr(main_module.os, "getenv", forbidden("password"))
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", forbidden("sdk"))
+    monkeypatch.setattr(main_module, "create_input", forbidden("input"))
+    monkeypatch.setattr(main_module, "confirm_move", forbidden("MOVE"))
+    monkeypatch.setattr(main_module, "_create_kortex_connection", forbidden("connection"))
+    return calls
 
 
 def _valid_fixed_motion_argv() -> list[str]:
@@ -768,7 +826,7 @@ def test_kortex_rejections_happen_before_connection(
     assert calls == []
 
 
-def test_deprecated_gripper_flag_rejects_before_hardware_setup(monkeypatch, capsys) -> None:
+def test_gripper_without_advanced_flag_rejects_before_hardware_setup(monkeypatch, capsys) -> None:
     sdk_imports = 0
     robot_connections = 0
     move_prompts = 0
@@ -799,7 +857,7 @@ def test_deprecated_gripper_flag_rejects_before_hardware_setup(monkeypatch, caps
     monkeypatch.setattr("builtins.input", count_move_prompts)
 
     assert main(["--gripper"]) == 2
-    assert "--gripper is disabled" in capsys.readouterr().err
+    assert "--gripper requires --advanced-pico-teleop" in capsys.readouterr().err
     assert sdk_imports == 0
     assert robot_connections == 0
     assert move_prompts == 0
@@ -1151,6 +1209,362 @@ def test_valid_kortex_path_connects_and_uses_hardware_defaults(monkeypatch) -> N
     assert controller_config.realtime is True
     assert controller_config.fatal_input_faults is True
     assert backend.closed
+
+
+@pytest.mark.parametrize(
+    ("missing_scope", "expected_error"),
+    (
+        ("kortex", "advanced PICO profile requires"),
+        ("hardware", "advanced PICO profile requires"),
+        ("pico_udp", "advanced PICO profile requires"),
+        ("translation_only", "advanced PICO profile requires"),
+        ("responsive_profile", "advanced PICO profile requires"),
+        ("recover_stale", "advanced PICO profile requires"),
+        ("operator_calibration", "advanced PICO profile requires"),
+        ("advanced", "--gripper requires --advanced-pico-teleop"),
+        ("gripper", "advanced PICO profile requires"),
+    ),
+)
+def test_advanced_pico_scope_rejects_before_secret_sdk_input_move_or_connection(
+    monkeypatch,
+    capsys,
+    missing_scope: str,
+    expected_error: str,
+) -> None:
+    argv = _advanced_pico_motion_argv()
+    if missing_scope == "kortex":
+        argv[argv.index("--backend") + 1] = "mujoco"
+    elif missing_scope == "hardware":
+        argv.remove("--enable-hardware")
+    elif missing_scope == "pico_udp":
+        argv[argv.index("--input") + 1] = "xrobotoolkit"
+    elif missing_scope in {
+        "translation_only", "responsive_profile", "recover_stale", "advanced", "gripper",
+    }:
+        argv.remove(
+            {
+                "translation_only": "--translation-only",
+                "responsive_profile": "--responsive-translation-profile",
+                "recover_stale": "--recover-stale-input",
+                "advanced": "--advanced-pico-teleop",
+                "gripper": "--gripper",
+            }[missing_scope]
+        )
+    else:
+        index = argv.index("--operator-calibration")
+        del argv[index:index + 2]
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(argv) == 2
+    assert calls == []
+    assert expected_error in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "expected_error"),
+    (
+        ("--scale", "1.000001", "--scale must not exceed 1"),
+        ("--max-linear-speed", "0.050001", "--max-linear-speed must be in (0, 0.05]"),
+    ),
+)
+def test_advanced_pico_limits_reject_overrun_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    flag: str,
+    value: str,
+    expected_error: str,
+) -> None:
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(_advanced_pico_motion_argv() + [flag, value]) == 2
+    assert calls == []
+    assert expected_error in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("nonfinite", "equal", "reversed"),
+)
+def test_advanced_pico_bounds_require_strict_ordered_finite_axes_before_hardware(
+    monkeypatch,
+    capsys,
+    mutation: str,
+) -> None:
+    argv = _advanced_pico_motion_argv()
+    minimum_index = argv.index("--workspace-min") + 1
+    maximum_index = argv.index("--workspace-max") + 1
+    if mutation == "nonfinite":
+        argv[minimum_index] = "nan"
+    elif mutation == "equal":
+        argv[maximum_index] = argv[minimum_index]
+    else:
+        argv[maximum_index] = "-0.7"
+    _install_advanced_pico_package_fakes(monkeypatch)
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(argv) == 2
+    assert calls == []
+    assert "strictly ordered finite XYZ axes" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing_flag", ("--workspace-min", "--workspace-max"))
+def test_advanced_pico_bounds_are_mandatory_before_hardware(
+    monkeypatch,
+    capsys,
+    missing_flag: str,
+) -> None:
+    argv = _advanced_pico_motion_argv()
+    index = argv.index(missing_flag)
+    del argv[index:index + 4]
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(argv) == 2
+    assert calls == []
+    assert "--workspace-min and --workspace-max are required" in capsys.readouterr().err
+
+
+def test_advanced_pico_report_retains_identity_bindings_and_relaxes_only_limits(
+    monkeypatch,
+) -> None:
+    args = build_parser().parse_args(_advanced_pico_motion_argv())
+    captured: dict[str, object] = {}
+    lease_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        main_module,
+        "validate_motion_lease",
+        lambda *values: lease_calls.append(values) or object(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_passing_preflight_report",
+        lambda *_args, **kwargs: captured.update(kwargs) or object(),
+    )
+
+    assert _validate_args(args) is None
+    assert _validate_kortex_args(
+        args,
+        None,
+        check_password=False,
+        operator_calibration_sha256="a" * 64,
+        expected_code_revision="b" * 40,
+    ) is None
+    assert lease_calls == [
+        (args.motion_lease, args.run_id, args.lease_owner),
+    ]
+    assert captured == {
+        "expected_safety_limits": None,
+        "expected_code_revision": "b" * 40,
+        "expected_calibration_sha256": "a" * 64,
+        "expected_transport_identity": {
+            "kind": "tcp",
+            "host": "192.168.1.10",
+            "port": 10000,
+            "robot_user": "admin",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "code_revision does not match",
+        "calibration hash does not match",
+        "transport identity mismatch: host",
+        "contains a non-passing check",
+    ),
+)
+def test_advanced_pico_report_failures_precede_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    failure: str,
+) -> None:
+    _install_advanced_pico_package_fakes(monkeypatch)
+    monkeypatch.setattr(
+        main_module,
+        "load_passing_preflight_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError(failure)),
+    )
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(_advanced_pico_motion_argv()) == 2
+    assert calls == []
+    assert failure in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing_flag", ("--motion-lease", "--preflight-report"))
+def test_advanced_pico_requires_lease_and_report_before_hardware(
+    monkeypatch,
+    capsys,
+    missing_flag: str,
+) -> None:
+    argv = _advanced_pico_motion_argv()
+    index = argv.index(missing_flag)
+    del argv[index:index + 2]
+    _install_advanced_pico_package_fakes(monkeypatch)
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(argv) == 2
+    assert calls == []
+    assert f"{missing_flag} is required" in capsys.readouterr().err
+
+
+def test_advanced_pico_rejects_reused_evidence_before_hardware(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    evidence = tmp_path / "used.jsonl"
+    evidence.write_text("{}\n", encoding="utf-8")
+    _install_advanced_pico_package_fakes(monkeypatch)
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(
+        _advanced_pico_motion_argv() + ["--evidence-jsonl", str(evidence)]
+    ) == 2
+    assert calls == []
+    assert "evidence path must be absent" in capsys.readouterr().err
+
+
+def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
+    monkeypatch,
+) -> None:
+    created: dict[str, object] = {}
+    _install_valid_kortex_fakes(monkeypatch, created)
+    _install_advanced_pico_package_fakes(monkeypatch)
+    monkeypatch.setattr(main_module, "create_input", lambda _args: _FakeSource())
+    monkeypatch.setattr(
+        main_module,
+        "read_kortex_tool_position",
+        lambda _connection: (0.0, 0.0, 0.3),
+        raising=False,
+    )
+
+    assert main(_advanced_pico_motion_argv()) == 0
+
+    backend = created["backend"]
+    assert backend.kwargs["max_linear_speed"] == 0.05
+    assert backend.kwargs["workspace_limits"].minimum_xyz == (-0.6, -0.6, -0.04)
+    assert backend.kwargs["workspace_limits"].maximum_xyz == (0.6, 0.6, 0.6)
+    assert backend.kwargs["anchor_envelope"] is None
+    assert backend.kwargs["advanced_translation"] is True
+    controller_config = created["controller_config"]
+    assert controller_config.translation_scale == 1.0
+    assert controller_config.gripper is True
+
+
+@pytest.mark.parametrize(
+    ("live_position", "expected_code"),
+    (
+        ((0.0, 0.0, 0.3), 0),
+        ((0.600001, 0.0, 0.3), 2),
+    ),
+)
+def test_advanced_pico_live_pose_orders_readonly_close_before_move_and_motion(
+    monkeypatch,
+    live_position: tuple[float, float, float],
+    expected_code: int,
+) -> None:
+    events: list[str] = []
+    _install_advanced_pico_package_fakes(monkeypatch)
+    monkeypatch.setattr(main_module, "validate_kortex_runtime", lambda: object())
+    monkeypatch.setattr(main_module, "create_input", lambda _args: _FakeReleasedPico())
+    monkeypatch.setattr(
+        main_module,
+        "wait_for_fresh_released_input",
+        lambda *_args, **_kwargs: _admitted(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_connection",
+        _readonly_then_motion_connection(events),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_kortex_readonly_preflight",
+        lambda *_args, **_kwargs: _ready_report(),
+    )
+    monkeypatch.setattr(main_module, "require_live_kortex_ready", lambda _report: None)
+    monkeypatch.setattr(
+        main_module,
+        "read_kortex_tool_position",
+        lambda _connection: events.append("readonly_pose") or live_position,
+        raising=False,
+    )
+    monkeypatch.setattr(main_module, "confirm_move", lambda: events.append("MOVE"))
+    monkeypatch.setattr(main_module, "verify_released_now", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_backend",
+        lambda *_args, **_kwargs: _FakeBackend(),
+    )
+    monkeypatch.setattr(main_module, "TeleopController", _FakeController)
+
+    assert main(_advanced_pico_motion_argv()) == expected_code
+    if expected_code == 0:
+        assert events[:5] == [
+            "readonly_connect",
+            "readonly_pose",
+            "readonly_close",
+            "MOVE",
+            "motion_connect",
+        ]
+    else:
+        assert events == ["readonly_connect", "readonly_pose", "readonly_close"]
+
+
+def test_advanced_pico_kwargs_satisfy_real_backend_constructor(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    _install_advanced_pico_package_fakes(monkeypatch)
+    _install_passing_motion_admission(monkeypatch)
+    monkeypatch.setattr(main_module, "create_input", lambda _args: _FakeReleasedPico())
+    monkeypatch.setattr(
+        main_module,
+        "read_kortex_tool_position",
+        lambda _connection: (0.0, 0.0, 0.3),
+        raising=False,
+    )
+
+    class ServoingModeInformation:
+        servoing_mode = None
+
+    class Connection:
+        base_pb2 = SimpleNamespace(
+            ServoingModeInformation=ServoingModeInformation,
+            SINGLE_LEVEL_SERVOING=23,
+            ARMSTATE_SERVOING_READY=31,
+            ARMSTATE_IN_FAULT=32,
+        )
+        base = SimpleNamespace(
+            GetArmState=lambda **_kwargs: SimpleNamespace(active_state=31),
+            SetServoingMode=lambda *_args, **_kwargs: None,
+        )
+        base_cyclic = SimpleNamespace()
+
+        def rpc_options(self) -> SimpleNamespace:
+            return SimpleNamespace(timeout_ms=100)
+
+        def close(self, *, send_stop: bool = True) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        main_module,
+        "_create_kortex_connection",
+        lambda *_args, **_kwargs: Connection(),
+    )
+
+    def construct_real_backend(connection, **kwargs):
+        created["kwargs"] = kwargs
+        backend = KortexBackend(connection, **kwargs)
+        created["backend"] = backend
+        return backend
+
+    monkeypatch.setattr(main_module, "_create_kortex_backend", construct_real_backend)
+    monkeypatch.setattr(main_module, "TeleopController", _FakeController)
+
+    assert main(_advanced_pico_motion_argv()) == 0
+    assert isinstance(created["backend"], KortexBackend)
+    assert created["kwargs"]["advanced_translation"] is True
+    assert created["kwargs"]["anchor_envelope"] is None
 
 
 def test_translation_only_kortex_disables_orientation_mapping(monkeypatch) -> None:

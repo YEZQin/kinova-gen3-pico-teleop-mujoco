@@ -19,6 +19,8 @@ from .pico_udp_input import PicoUdpInput
 from .evidence_log import EvidenceLogger, logger_event_sink
 from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
 from .hardware_profile import (
+    ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS,
+    ADVANCED_PICO_TELEOP_MAX_SCALE,
     CALIBRATED_RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS,
     CALIBRATED_RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
     EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
@@ -41,6 +43,7 @@ from .operator_calibration import load_operator_axis_calibration
 from .preflight import (
     PreflightContext,
     load_passing_preflight_report,
+    read_kortex_tool_position,
     require_live_kortex_ready,
     run_kortex_readonly_preflight,
 )
@@ -171,6 +174,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--advanced-pico-teleop",
+        action="store_true",
+        help=(
+            "enable parameterized PICO Kortex translation teleoperation with "
+            "workspace projection and required proportional gripper control"
+        ),
+    )
+    parser.add_argument(
         "--control-hz",
         type=float,
         default=None,
@@ -285,7 +296,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-linear-speed",
         type=float,
         default=None,
-        help="Kortex linear-speed limit in m/s (maximum: 0.005)",
+        help=(
+            "Kortex linear-speed limit in m/s "
+            "(legacy maximum: 0.005; advanced maximum: 0.05)"
+        ),
     )
     parser.add_argument(
         "--max-angular-speed-deg",
@@ -296,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gripper",
         action="store_true",
-        help="deprecated first-hardware option; always rejected",
+        help="enable proportional Trigger gripper control in advanced PICO Kortex teleop",
     )
     parser.add_argument("--workspace-min", nargs=3, type=float, metavar=("X", "Y", "Z"), help="explicit workspace minimum XYZ (m)")
     parser.add_argument("--workspace-max", nargs=3, type=float, metavar=("X", "Y", "Z"), help="explicit workspace maximum XYZ (m)")
@@ -321,6 +335,8 @@ def resolve_translation_scale(args: argparse.Namespace) -> float:
 
     if args.scale is not None:
         return float(args.scale)
+    if _is_advanced_pico_teleop(args):
+        return ADVANCED_PICO_TELEOP_MAX_SCALE
     if args.backend == "kortex":
         return FIRST_HARDWARE_PROFILE.translation_scale
     return DEFAULT_MUJOCO_TRANSLATION_SCALE
@@ -352,6 +368,10 @@ def _uses_calibrated_responsive_translation(args: argparse.Namespace) -> bool:
     return args.responsive_translation_profile and args.operator_calibration is not None
 
 
+def _is_advanced_pico_teleop(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "advanced_pico_teleop", False))
+
+
 def _resolve_stale_timeout(args: argparse.Namespace) -> float:
     if args.stale_timeout is not None:
         return float(args.stale_timeout)
@@ -363,6 +383,8 @@ def _resolve_stale_timeout(args: argparse.Namespace) -> float:
 def _resolve_max_linear_speed(args: argparse.Namespace) -> float:
     if args.max_linear_speed is not None:
         return float(args.max_linear_speed)
+    if _is_advanced_pico_teleop(args):
+        return ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS
     return FIRST_HARDWARE_PROFILE.max_linear_speed_mps
 
 
@@ -467,10 +489,31 @@ def check_input(
 
 
 def _validate_args(args: argparse.Namespace) -> str | None:
-    # This is intentionally first: the bare-arm profile never permits a
-    # gripper flag, regardless of backend or any other malformed option.
-    if args.gripper:
-        return "--gripper is disabled for the first-hardware profile"
+    advanced = _is_advanced_pico_teleop(args)
+    if args.gripper and not advanced:
+        return "--gripper requires --advanced-pico-teleop"
+    advanced_mode_valid = (
+        args.backend == "kortex"
+        and args.enable_hardware
+        and args.input == "pico-udp"
+        and args.translation_only
+        and args.responsive_translation_profile
+        and args.recover_stale_input
+        and args.operator_calibration is not None
+        and args.gripper
+        and not args.expanded_translation_envelope
+        and not args.invert_translation
+        and not args.check_kortex
+        and not args.check_input
+        and not args.check_xr
+        and args.fixed_trajectory is None
+    )
+    if advanced and not advanced_mode_valid:
+        return (
+            "advanced PICO profile requires Kortex hardware, PICO UDP, "
+            "translation-only, responsive profile, stale recovery, operator "
+            "calibration, and --gripper"
+        )
     expanded_mode_valid = (
         args.backend == "kortex"
         and args.enable_hardware
@@ -486,32 +529,33 @@ def _validate_args(args: argparse.Namespace) -> str | None:
             "--expanded-translation-envelope requires Kortex "
             "translation-only hardware teleoperation"
         )
-    responsive_flags = (
-        args.responsive_translation_profile,
-        args.invert_translation,
-        args.recover_stale_input,
-        args.operator_calibration is not None,
-    )
-    responsive_mode_valid = (
-        expanded_mode_valid
-        and args.expanded_translation_envelope
-        and args.responsive_translation_profile
-        and args.recover_stale_input
-    )
-    if any(responsive_flags) and not responsive_mode_valid:
-        return (
-            "responsive translation profile requires "
-            "--responsive-translation-profile and --recover-stale-input "
-            "in expanded Kortex translation-only "
-            "hardware teleoperation"
+    if not advanced:
+        responsive_flags = (
+            args.responsive_translation_profile,
+            args.invert_translation,
+            args.recover_stale_input,
+            args.operator_calibration is not None,
         )
-    if responsive_mode_valid and (
-        args.invert_translation == (args.operator_calibration is not None)
-    ):
-        return (
-            "responsive translation profile requires exactly one of "
-            "--invert-translation or --operator-calibration"
+        responsive_mode_valid = (
+            expanded_mode_valid
+            and args.expanded_translation_envelope
+            and args.responsive_translation_profile
+            and args.recover_stale_input
         )
+        if any(responsive_flags) and not responsive_mode_valid:
+            return (
+                "responsive translation profile requires "
+                "--responsive-translation-profile and --recover-stale-input "
+                "in expanded Kortex translation-only "
+                "hardware teleoperation"
+            )
+        if responsive_mode_valid and (
+            args.invert_translation == (args.operator_calibration is not None)
+        ):
+            return (
+                "responsive translation profile requires exactly one of "
+                "--invert-translation or --operator-calibration"
+            )
     if args.control_hz is not None and (
         not math.isfinite(args.control_hz) or args.control_hz <= 0.0
     ):
@@ -685,7 +729,9 @@ def _validate_kortex_args(
         validate_private_robot_ipv4(args.robot_ip)
     except ValueError as error:
         return str(error)
-    if args.responsive_translation_profile:
+    if _is_advanced_pico_teleop(args):
+        maximum_scale = ADVANCED_PICO_TELEOP_MAX_SCALE
+    elif args.responsive_translation_profile:
         maximum_scale = RESPONSIVE_TRANSLATION_MAX_SCALE
     elif args.translation_only:
         maximum_scale = MAX_TRANSLATION_ONLY_SCALE
@@ -699,7 +745,9 @@ def _validate_kortex_args(
             "for --backend kortex"
         )
     max_linear_speed = _resolve_max_linear_speed(args)
-    if _uses_calibrated_responsive_translation(args):
+    if _is_advanced_pico_teleop(args):
+        maximum_linear_speed = ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS
+    elif _uses_calibrated_responsive_translation(args):
         maximum_linear_speed = CALIBRATED_RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
     elif args.responsive_translation_profile:
         maximum_linear_speed = RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
@@ -718,16 +766,36 @@ def _validate_kortex_args(
     # Read-only inspection does not authorize motion, so workspace/lease gates
     # are intentionally scoped to the motion paths only.
     if not args.check_kortex:
+        if _is_advanced_pico_teleop(args) and (
+            args.workspace_min is not None
+            and args.workspace_max is not None
+            and (
+                not all(
+                    math.isfinite(value)
+                    for value in (*args.workspace_min, *args.workspace_max)
+                )
+                or any(
+                    lower >= upper
+                    for lower, upper in zip(
+                        args.workspace_min,
+                        args.workspace_max,
+                        strict=True,
+                    )
+                )
+            )
+        ):
+            return "advanced workspace requires strictly ordered finite XYZ axes"
         try:
             limits = _workspace_from_args(args)
         except ValueError as error:
             return str(error)
         if limits is None:
             return "--workspace-min and --workspace-max are required for Kortex motion"
-        try:
-            validate_workspace_span(limits, resolve_workspace_half_width_axis(args))
-        except ValueError as error:
-            return str(error)
+        if not _is_advanced_pico_teleop(args):
+            try:
+                validate_workspace_span(limits, resolve_workspace_half_width_axis(args))
+            except ValueError as error:
+                return str(error)
         if stop_after_workspace:
             return None
         if args.motion_lease is None:
@@ -743,10 +811,14 @@ def _validate_kortex_args(
         try:
             load_passing_preflight_report(
                 args.preflight_report,
-                expected_safety_limits=_preflight_motion_contract(
-                    args,
-                    limits,
-                    operator_calibration_sha256=operator_calibration_sha256,
+                expected_safety_limits=(
+                    None
+                    if _is_advanced_pico_teleop(args)
+                    else _preflight_motion_contract(
+                        args,
+                        limits,
+                        operator_calibration_sha256=operator_calibration_sha256,
+                    )
                 ),
                 expected_code_revision=expected_code_revision,
                 expected_calibration_sha256=operator_calibration_sha256,
@@ -1055,6 +1127,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _preflight_context(args, versions),
                 )
                 require_live_kortex_ready(live_report)
+                if _is_advanced_pico_teleop(args):
+                    if workspace_limits is None:
+                        raise RuntimeError("advanced workspace limits are unavailable")
+                    live_position = read_kortex_tool_position(readonly)
+                    if not all(
+                        lower <= coordinate <= upper
+                        for coordinate, lower, upper in zip(
+                            live_position,
+                            workspace_limits.minimum_xyz,
+                            workspace_limits.maximum_xyz,
+                            strict=True,
+                        )
+                    ):
+                        raise ValueError(
+                            "current Kortex tool position is outside configured workspace"
+                        )
             finally:
                 if not _close_resource(readonly, hardware=False, send_stop=False):
                     raise RuntimeError("read-only Kortex cleanup failed")
@@ -1070,16 +1158,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             connection = _create_kortex_connection(
                 KortexConfig(args.robot_ip, args.robot_user, password),
             )
-            backend = _create_kortex_backend(
-                connection,
-                max_linear_speed=_resolve_max_linear_speed(args),
-                max_angular_speed_deg=_resolve_max_angular_speed_deg(args),
-                workspace_limits=workspace_limits,
-                anchor_envelope=AnchorEnvelope(
+            backend_kwargs: dict[str, object] = {
+                "max_linear_speed": _resolve_max_linear_speed(args),
+                "max_angular_speed_deg": _resolve_max_angular_speed_deg(args),
+                "workspace_limits": workspace_limits,
+                "anchor_envelope": AnchorEnvelope(
                     resolve_anchor_translation_axis(args),
                     math.radians(FIRST_HARDWARE_PROFILE.anchor_rotation_deg),
-                ),
-                event_sink=event_sink,
+                ) if not _is_advanced_pico_teleop(args) else None,
+                "event_sink": event_sink,
+            }
+            if _is_advanced_pico_teleop(args):
+                backend_kwargs["advanced_translation"] = True
+            backend = _create_kortex_backend(
+                connection,
+                **backend_kwargs,
             )
         else:
             from .mujoco_backend import MuJoCoBackend
@@ -1122,6 +1215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     recovery_release_samples=(
                         3 if args.recover_stale_input else 1
                     ),
+                    gripper=args.gripper,
                 ),
                 source,
                 backend,

@@ -11,6 +11,7 @@ import pytest
 from kinova_teleop.preflight import (
     PreflightContext,
     load_passing_preflight_report,
+    read_kortex_tool_position,
     require_live_kortex_ready,
     run_input_preflight,
     run_kortex_readonly_preflight,
@@ -161,6 +162,56 @@ def test_readonly_preflight_reads_current_state_without_clear_or_servo_mode():
         "GetFirmwareVersion",
         "RefreshFeedback",
     ]
+
+
+def test_advanced_pico_live_pose_is_read_with_readonly_options_as_immutable_floats() -> None:
+    connection = RecordingConnection()
+
+    position = read_kortex_tool_position(connection)
+
+    assert position == (0.0, 0.0, 0.3)
+    assert isinstance(position, tuple)
+    assert all(type(value) is float for value in position)
+    assert connection.calls == ["RefreshFeedback"]
+
+
+@pytest.mark.parametrize(
+    "position",
+    (
+        (float("nan"), 0.0, 0.3),
+        ([0.0, 0.1], 0.0, 0.3),
+    ),
+)
+def test_advanced_pico_live_pose_rejects_nonfinite_or_malformed_feedback(
+    position: tuple[object, object, object],
+) -> None:
+    connection = RecordingConnection()
+    connection.base_cyclic = SimpleNamespace(
+        RefreshFeedback=lambda **_kwargs: SimpleNamespace(
+            base=SimpleNamespace(
+                tool_pose_x=position[0],
+                tool_pose_y=position[1],
+                tool_pose_z=position[2],
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="finite XYZ"):
+        read_kortex_tool_position(connection)
+
+
+def test_advanced_pico_live_pose_sanitizes_readonly_rpc_failures() -> None:
+    connection = RecordingConnection()
+    connection.base_cyclic = SimpleNamespace(
+        RefreshFeedback=lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("private endpoint detail")
+        )
+    )
+
+    with pytest.raises(ValueError, match="finite XYZ") as caught:
+        read_kortex_tool_position(connection)
+
+    assert "private endpoint" not in str(caught.value)
 
 
 def test_readonly_preflight_requires_l53_7dof_running_single_level() -> None:
