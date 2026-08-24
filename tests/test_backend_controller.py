@@ -585,8 +585,7 @@ def test_gripper_forwards_trigger_only_after_active_grip() -> None:
     backend = RecordingBackendWithGripper()
     controller = TeleopController(TeleopConfig(realtime=False, gripper=True), source, backend)
 
-    for _ in range(4):
-        controller.step_once()
+    diagnostics = [controller.step_once() for _ in range(4)]
 
     assert backend.events == [
         "step",
@@ -599,6 +598,12 @@ def test_gripper_forwards_trigger_only_after_active_grip() -> None:
         "step",
     ]
     assert backend.gripper_values == pytest.approx([0.598])
+    assert [item.gripper_target for item in diagnostics] == [
+        None,
+        None,
+        pytest.approx(0.598),
+        None,
+    ]
 
 
 @pytest.mark.parametrize(

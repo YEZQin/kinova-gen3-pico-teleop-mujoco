@@ -62,6 +62,7 @@ class StepDiagnostics:
     rotation_error: float
     clutch_state: ClutchState
     reason: str
+    gripper_target: float | None = None
 
 
 class TeleopController:
@@ -129,6 +130,7 @@ class TeleopController:
 
     def step_once(self) -> StepDiagnostics:
         sample = self.source.read()
+        gripper_target: float | None = None
         recoverable_stale_sample = (
             self.config.recover_stale_input
             and not sample.valid
@@ -209,6 +211,7 @@ class TeleopController:
                     gripper_position = self._gripper_mapping.map(
                         float(sample.trigger)
                     )
+                    gripper_target = gripper_position
                     if not self._command_gripper(gripper_position):
                         try:
                             self.backend.hold()
@@ -236,6 +239,7 @@ class TeleopController:
             rotation_error=result.rotation_error,
             clutch_state=mapping.clutch_state,
             reason=result.reason,
+            gripper_target=gripper_target,
         )
 
     def run(
@@ -251,7 +255,7 @@ class TeleopController:
 
         try:
             next_deadline = time.monotonic()
-            last_status: tuple[ClutchState, bool, bool, str] | None = None
+            last_status: tuple[ClutchState, bool, bool, str, float | None] | None = None
             while (
                 (max_steps is None or self.steps < max_steps)
                 and (should_continue is None or should_continue())
@@ -262,6 +266,7 @@ class TeleopController:
                     diagnostics.stale,
                     diagnostics.ik_converged,
                     diagnostics.reason,
+                    diagnostics.gripper_target,
                 )
                 if on_status is not None and status != last_status:
                     on_status(diagnostics)

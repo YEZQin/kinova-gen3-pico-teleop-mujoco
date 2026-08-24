@@ -235,6 +235,27 @@ def test_gripper_sends_position_mode_command():
     assert connection.base.gripper_options[-1].timeout_ms < 200
 
 
+def test_sent_gripper_position_is_written_to_evidence(tmp_path):
+    connection = _Connection(_feedback())
+    events_path = tmp_path / "gripper-events.jsonl"
+    logger = EvidenceLogger(events_path, run_id="gripper-001", monotonic_ns=lambda: 10)
+    backend = _backend(
+        connection,
+        event_sink=logger_event_sink(logger),
+    )
+    backend.begin_control()
+
+    assert backend.command_gripper(0.99) is True
+
+    records = [json.loads(line) for line in events_path.read_text().splitlines()]
+    gripper_records = [
+        record for record in records if record["kind"] == "gripper_commanded"
+    ]
+    assert len(gripper_records) == 1
+    assert gripper_records[0]["state"] == "MOVING"
+    assert gripper_records[0]["payload"] == {"position": 0.99}
+
+
 def test_gripper_is_rejected_before_begin_control():
     connection = _Connection(_feedback())
     backend = _backend(connection)

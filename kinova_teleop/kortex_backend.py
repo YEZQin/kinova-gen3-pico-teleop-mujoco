@@ -1000,6 +1000,12 @@ class KortexBackend:
             if latched_reason is None:
                 return False
             raise KortexSafetyError(latched_reason) from send_error
+        if sent:
+            self._emit(
+                "gripper_commanded",
+                "MOVING",
+                {"position": position},
+            )
         return True
 
     def close(self) -> None:

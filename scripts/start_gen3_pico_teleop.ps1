@@ -14,6 +14,8 @@ param(
     [Parameter(Mandatory=$true)][string]$LeaseOwner,
     [double]$GripperTriggerMin = 0.0,
     [double]$GripperTriggerMax = 1.0,
+    [switch]$InvertTranslation,
+    [double]$LinearGain = 2.0,
     [string]$PythonPath
 )
 
@@ -115,6 +117,8 @@ Assert-PositiveFinite $Scale 'Scale'
 Assert-PositiveFinite $MaxLinearSpeed 'MaxLinearSpeed'
 Assert-WorkspaceBounds $WorkspaceMin $WorkspaceMax
 Assert-GripperTriggerRange $GripperTriggerMin $GripperTriggerMax
+Assert-PositiveFinite $LinearGain 'LinearGain'
+if ($LinearGain -gt 2.0) { throw 'LinearGain must not exceed 2.0' }
 
 $pythonCandidate = $PythonPath
 if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
@@ -150,6 +154,7 @@ $motionArgs = @(
     '--gripper',
     '--gripper-trigger-min', $GripperTriggerMin.ToString('R', $invariantCulture),
     '--gripper-trigger-max', $GripperTriggerMax.ToString('R', $invariantCulture),
+    '--linear-gain', $LinearGain.ToString('R', $invariantCulture),
     '--control-hz', $controlHz.ToString('R', $invariantCulture),
     '--stale-timeout', $staleTimeout.ToString('R', $invariantCulture),
     '--scale', $Scale.ToString('R', $invariantCulture),
@@ -166,6 +171,9 @@ $motionArgs = @(
     '--operator-calibration', $calibration,
     '--evidence-jsonl', $evidence
 )
+if ($InvertTranslation) {
+    $motionArgs += '--invert-translation'
+}
 
 Remove-Item Env:KINOVA_PASSWORD -ErrorAction SilentlyContinue
 $validationArgs = $motionArgs + '--validate-motion-package'

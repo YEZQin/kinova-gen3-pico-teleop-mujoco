@@ -194,6 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="PICO Trigger value mapped to 99 percent gripper position",
     )
     parser.add_argument(
+        "--linear-gain",
+        type=float,
+        default=1.0,
+        help="advanced Kortex Cartesian position gain (maximum: 2.0)",
+    )
+    parser.add_argument(
         "--control-hz",
         type=float,
         default=None,
@@ -502,6 +508,10 @@ def check_input(
 
 def _validate_args(args: argparse.Namespace) -> str | None:
     advanced = _is_advanced_pico_teleop(args)
+    if not math.isfinite(args.linear_gain) or not 0.0 < args.linear_gain <= 2.0:
+        return "--linear-gain must be finite and in (0, 2]"
+    if not advanced and args.linear_gain != 1.0:
+        return "--linear-gain requires --advanced-pico-teleop"
     if (
         not math.isfinite(args.gripper_trigger_min)
         or not math.isfinite(args.gripper_trigger_max)
@@ -524,7 +534,6 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         and args.operator_calibration is not None
         and args.gripper
         and not args.expanded_translation_envelope
-        and not args.invert_translation
         and not args.check_kortex
         and not args.check_input
         and not args.check_xr
@@ -872,6 +881,8 @@ def _print_status(diagnostics: StepDiagnostics) -> None:
     ]
     if diagnostics.reason:
         fields.append(f"reason={diagnostics.reason}")
+    if diagnostics.gripper_target is not None:
+        fields.append(f"gripper_target={diagnostics.gripper_target:.3f}")
     print(f"status: {' '.join(fields)}", flush=True)
 
 
@@ -1202,6 +1213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
             if _is_advanced_pico_teleop(args):
                 backend_kwargs["advanced_translation"] = True
+                backend_kwargs["kp_linear"] = args.linear_gain
             backend = _create_kortex_backend(
                 connection,
                 **backend_kwargs,

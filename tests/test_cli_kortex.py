@@ -1563,7 +1563,12 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
 
     assert main(
         _advanced_pico_motion_argv()
-        + ["--gripper-trigger-min", "0.2", "--gripper-trigger-max", "0.7"]
+        + [
+            "--gripper-trigger-min", "0.2",
+            "--gripper-trigger-max", "0.7",
+            "--invert-translation",
+            "--linear-gain", "2.0",
+        ]
     ) == 0
 
     backend = created["backend"]
@@ -1572,11 +1577,57 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
     assert backend.kwargs["workspace_limits"].maximum_xyz == (0.6, 0.6, 0.6)
     assert backend.kwargs["anchor_envelope"] is None
     assert backend.kwargs["advanced_translation"] is True
+    assert backend.kwargs["kp_linear"] == 2.0
     controller_config = created["controller_config"]
     assert controller_config.translation_scale == 1.0
     assert controller_config.gripper is True
     assert controller_config.gripper_trigger_min == 0.2
     assert controller_config.gripper_trigger_max == 0.7
+    assert controller_config.invert_translation is True
+
+
+@pytest.mark.parametrize("gain", ("nan", "inf", "0", "2.01"))
+def test_advanced_linear_gain_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    gain: str,
+) -> None:
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(_advanced_pico_motion_argv() + ["--linear-gain", gain]) == 2
+    assert calls == []
+    assert "--linear-gain" in capsys.readouterr().err
+
+
+def test_linear_gain_override_requires_advanced_mode_before_hardware(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(["--linear-gain", "2.0"]) == 2
+    assert calls == []
+    assert "--linear-gain requires --advanced-pico-teleop" in capsys.readouterr().err
+
+
+def test_status_prints_mapped_gripper_target(capsys) -> None:
+    from kinova_teleop.pose_mapping import ClutchState
+    from kinova_teleop.teleop_controller import StepDiagnostics
+
+    main_module._print_status(
+        StepDiagnostics(
+            active=True,
+            stale=False,
+            ik_converged=True,
+            position_error=0.0,
+            rotation_error=0.0,
+            clutch_state=ClutchState.ACTIVE,
+            reason="",
+            gripper_target=0.99,
+        )
+    )
+
+    assert "gripper_target=0.990" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
