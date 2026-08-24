@@ -235,4 +235,3 @@ diff and secret scans, and independent correctness and hardware-safety review.
 No offline result is described as hardware validation. The first real gripper
 trial begins with no payload and a small Trigger value while physical Stop
 controls remain reachable.
-
