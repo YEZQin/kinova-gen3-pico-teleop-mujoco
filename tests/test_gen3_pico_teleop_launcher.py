@@ -126,12 +126,15 @@ def _launcher_call(
     lease_owner: str = "kinova-teleop",
     gripper_trigger_min: str = "0.0",
     gripper_trigger_max: str = "1.0",
-    invert_translation: str = "-InvertTranslation",
-    linear_gain: str = "2.0",
+    invert_translation: str = "",
+    linear_gain: str | None = None,
 ) -> str:
     resolved_lease = paths["lease"] if lease is None else lease
     resolved_report = paths["report"] if report is None else report
     resolved_calibration = paths["calibration"] if calibration is None else calibration
+    linear_gain_argument = (
+        "" if linear_gain is None else f"-LinearGain {linear_gain} "
+    )
     return (
         f"& {_ps_literal(LAUNCHER)} "
         f"-MotionLease {_ps_literal(resolved_lease)} "
@@ -142,7 +145,7 @@ def _launcher_call(
         f"-RunId '{run_id}' -LeaseOwner '{lease_owner}' "
         f"-GripperTriggerMin {gripper_trigger_min} "
         f"-GripperTriggerMax {gripper_trigger_max} "
-        f"{invert_translation} -LinearGain {linear_gain} "
+        f"{invert_translation} {linear_gain_argument}"
         f"-Scale {scale} -MaxLinearSpeed {max_linear_speed} "
         f"{enable_gripper} -PythonPath {_ps_literal(paths['python'])}"
     )
@@ -315,8 +318,8 @@ def test_fake_child_observes_exact_gated_arguments_and_child_only_password(
     assert _value_after(motion_args, "--max-linear-speed") == "0.05"
     assert _value_after(motion_args, "--gripper-trigger-min") == "0"
     assert _value_after(motion_args, "--gripper-trigger-max") == "1"
-    assert "--invert-translation" in motion_args
-    assert _value_after(motion_args, "--linear-gain") == "2"
+    assert "--invert-translation" not in motion_args
+    assert _value_after(motion_args, "--linear-gain") == "1"
     min_index = motion_args.index("--workspace-min")
     max_index = motion_args.index("--workspace-max")
     assert motion_args[min_index + 1 : min_index + 4] == ["0.1", "-0.3", "0.05"]
@@ -338,6 +341,21 @@ def test_fake_child_observes_exact_gated_arguments_and_child_only_password(
     ):
         assert capability_check in pico_program
     assert launcher_fixture["prompt"].read_text(encoding="utf-8") == "secure"
+
+
+def test_launcher_can_explicitly_enable_inversion_and_gain_two(
+    launcher_fixture: dict[str, Path],
+) -> None:
+    result = _run_launcher(
+        launcher_fixture,
+        invert_translation="-InvertTranslation",
+        linear_gain="2.0",
+    )
+
+    assert result.returncode == 0, result.stderr
+    motion_args = _records(launcher_fixture["log"])[-1]["args"]
+    assert "--invert-translation" in motion_args
+    assert _value_after(motion_args, "--linear-gain") == "2"
 
 
 def test_fake_child_failure_cleans_password_and_propagates_exact_exit(

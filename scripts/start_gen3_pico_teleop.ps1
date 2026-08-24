@@ -15,7 +15,7 @@ param(
     [double]$GripperTriggerMin = 0.0,
     [double]$GripperTriggerMax = 1.0,
     [switch]$InvertTranslation,
-    [double]$LinearGain = 2.0,
+    [double]$LinearGain = 1.0,
     [string]$PythonPath
 )
 

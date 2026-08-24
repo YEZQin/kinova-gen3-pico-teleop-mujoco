@@ -285,6 +285,60 @@ def test_gripper_deadband_and_rate_limit():
     assert len(connection.base.gripper_sent) == 2
 
 
+def test_same_gripper_target_is_refreshed_every_quarter_second(tmp_path):
+    connection = _Connection(_feedback())
+    clock = _Clock()
+    events_path = tmp_path / "gripper-refresh.jsonl"
+    logger = EvidenceLogger(events_path, run_id="gripper-refresh", monotonic_ns=lambda: 10)
+    backend = _backend(
+        connection,
+        monotonic=clock,
+        event_sink=logger_event_sink(logger),
+    )
+    backend.begin_control()
+
+    assert backend.command_gripper(0.99) is True
+    clock.now += 0.249
+    assert backend.command_gripper(0.99) is True
+    assert len(connection.base.gripper_sent) == 1
+
+    clock.now += 0.002
+    assert backend.command_gripper(0.99) is True
+    assert [
+        command.gripper.finger.entries[0].value
+        for command in connection.base.gripper_sent
+    ] == [0.99, 0.99]
+    records = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert [
+        record["payload"]["position"]
+        for record in records
+        if record["kind"] == "gripper_commanded"
+    ] == [0.99, 0.99]
+
+
+def test_changed_gripper_target_bypasses_refresh_interval_for_trigger_response():
+    connection = _Connection(_feedback())
+    clock = _Clock()
+    backend = _backend(connection, monotonic=clock)
+    backend.begin_control()
+
+    assert backend.command_gripper(0.50) is True
+    clock.now += 0.099
+    assert backend.command_gripper(0.99) is True
+    assert [
+        command.gripper.finger.entries[0].value
+        for command in connection.base.gripper_sent
+    ] == [0.50]
+
+    clock.now += 0.002
+    assert backend.command_gripper(0.99) is True
+
+    assert [
+        command.gripper.finger.entries[0].value
+        for command in connection.base.gripper_sent
+    ] == [0.50, 0.99]
+
+
 def test_gripper_value_is_clamped_to_unit_interval():
     connection = _Connection(_feedback())
     clock = _Clock()
