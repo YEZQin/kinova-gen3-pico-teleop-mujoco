@@ -94,11 +94,6 @@ class MappingConfig:
             self.translation_rotation
         )
         object.__setattr__(self, "translation_rotation", translation_rotation)
-        if translation_rotation is not None:
-            if self.invert_translation:
-                raise ValueError(
-                    "invert_translation cannot be combined with translation_rotation"
-                )
 
 
 @dataclass(frozen=True)

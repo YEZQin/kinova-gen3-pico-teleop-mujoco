@@ -162,12 +162,21 @@ def test_mapping_config_rejects_invalid_translation_rotation(
         MappingConfig(translation_rotation=translation_rotation)
 
 
-def test_mapping_config_rejects_inversion_with_translation_rotation() -> None:
-    with pytest.raises(ValueError):
-        MappingConfig(
+def test_inversion_is_applied_after_operator_translation_rotation() -> None:
+    ee = identity_pose((0.4, -0.2, 0.3))
+    target = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
             invert_translation=True,
             translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
-        )
+        ),
+        [0.881303368425, -0.042008923554, -0.470679958298],
+        ee,
+    )
+
+    direction = target.position - ee.position
+    direction /= np.linalg.norm(direction)
+    np.testing.assert_allclose(direction, [0.0, 1.0, 0.0], atol=1e-9)
 
 
 @pytest.mark.parametrize(

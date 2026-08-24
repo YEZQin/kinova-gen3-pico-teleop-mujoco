@@ -183,6 +183,42 @@ def test_controller_orchestrates_backend_clutch_lifecycle() -> None:
     assert source.close_calls == 1
 
 
+def test_controller_combines_operator_rotation_with_all_axis_inversion() -> None:
+    identity_rotation = (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    backend = RecordingBackend()
+    controller = TeleopController(
+        TeleopConfig(
+            realtime=False,
+            translation_scale=1.0,
+            orientation_enabled=False,
+            invert_translation=True,
+            translation_rotation=identity_rotation,
+        ),
+        ScriptedInput(
+            [
+                sample([0.0, 0.0, 0.0], 0.0, 1, 1.00),
+                sample([0.0, 0.0, 0.0], 1.0, 2, 1.01),
+                sample([0.01, 0.0, 0.0], 1.0, 3, 1.02),
+            ]
+        ),
+        backend,
+    )
+
+    controller.step_once()
+    controller.step_once()
+    controller.step_once()
+
+    assert len(backend.targets) == 1
+    delta = backend.targets[0].position - backend.pose.position
+    assert delta[1] > 0.0
+    assert delta[0] == pytest.approx(0.0)
+    assert delta[2] == pytest.approx(0.0)
+
+
 def test_unconfirmed_boundary_stop_error_remains_terminal() -> None:
     from kinova_teleop.kortex_backend import KortexSafetyError
 
