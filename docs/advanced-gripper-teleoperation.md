@@ -57,8 +57,9 @@ $teleopProfile = Get-Content -LiteralPath (Read-Host 'Path to teleop-profile.jso
   -MaxLinearSpeed 0.05 `
   -GripperTriggerMin 0.0 `
   -GripperTriggerMax 1.0 `
+  -GripperBinaryThreshold 0.9 `
   -LinearGain 1.5 `
-  -TranslationAxisGain ([double[]]@(2.0,1.0,1.0)) `
+  -TranslationAxisGain ([double[]]@(-2.0,1.0,1.0)) `
   -EnableGripper `
   -PythonPath .\.venv-kortex\Scripts\python.exe
 ```
@@ -69,17 +70,21 @@ Before a password prompt, the launcher validates the artifact-bound package and 
 
 在密码提示前，启动器验证绑定产物的包，并要求新鲜的 **PICO V2** 采样具备 Trigger 能力且 Grip 始终释放。密码被掩码且只提供给 Python 子进程。在子进程中精确输入一次 `MOVE`；确认前不得运动。
 
-Grip is the arm-motion clutch. Grip activation establishes an anchor frame only: it sends neither an arm motion command nor a gripper command, so it cannot create an arm jump or change the gripper. Proportional Trigger commands begin only on subsequent active samples. Then hold Grip to follow the controller. While Grip is held, the left index Trigger commands the Gen3 gripper proportionally: Trigger `0.0` requests open and Trigger `1.0` requests closed. Grip release holds the last/current gripper command and stops arm following; it is not permission to ignore any Stop or fault.
+Grip is the arm-motion clutch. Grip activation establishes an anchor frame only: it sends neither an arm motion command nor a gripper command, so it cannot create an arm jump or change the gripper. Gripper commands begin only on subsequent active samples. In the tuned binary profile, Trigger above `0.9` commands `0.99` closed; Trigger at or below `0.9` commands `0.01` open. Grip release holds the last/current gripper command and stops arm following; it is not permission to ignore any Stop or fault.
+
+The underlying proportional endpoints remain Trigger `0.0` for open and Trigger `1.0` for closed; the tuned hardware profile deliberately reduces them to the binary threshold above.
+
+Proportional Trigger commands begin only on subsequent active samples in the underlying mode; the tuned binary command is applied at the same post-anchor point.
 
 `GripperTriggerMin` and `GripperTriggerMax` calibrate the observed PICO Trigger travel. Values at or below the configured minimum map to gripper position `0.01`; values at or above the configured maximum map to `0.99`; values between them map linearly. Kortex receives normalized positions, not raw percentages.
 
-The hardware-observed fast preset uses no `InvertTranslation`, `LinearGain 1.5`, and `TranslationAxisGain @(2.0,1.0,1.0)`. `TranslationAxisGain` is applied after operator calibration; X therefore adjusts forward/back sensitivity without changing Y/Z. `MaxLinearSpeed` remains the unchanged hard velocity cap. An unchanged gripper position target is sent only once; a changed Trigger-derived target may be sent again after the Kortex gripper rate limit. Status output reports `gripper_target`; evidence records `gripper_commanded` only after an actual Kortex gripper RPC succeeds.
+The tuned preset uses no `InvertTranslation`, `LinearGain 1.5`, and `TranslationAxisGain @(-2.0,1.0,1.0)`. `TranslationAxisGain` is applied after operator calibration; negative X reverses and boosts forward/back without changing Y/Z. `MaxLinearSpeed` remains the unchanged hard velocity cap. A changed Trigger target starts a 1.25-second burst that reasserts the current gripper position every active control cycle, then deduplicates. Status output reports `gripper_target`; evidence records `gripper_commanded` only after an actual Kortex gripper RPC succeeds.
 
-Grip 是机械臂运动离合。激活 Grip 只建立锚点帧：它既不发送机械臂运动命令，也不发送夹爪命令，因此不会造成机械臂跳变或改变夹爪。比例 Trigger 命令只从后续的有效活动采样开始。随后持续按住 Grip 才跟随控制器。按住 Grip 时，左手食指 Trigger 按比例命令 Gen3 夹爪：Trigger `0.0` 请求张开，Trigger `1.0` 请求闭合。松开 Grip 会停止机械臂跟随并保持最后/当前夹爪命令；这不允许忽略任何 Stop 或故障。
+Grip 是机械臂运动离合。激活 Grip 只建立锚点帧：它既不发送机械臂运动命令，也不发送夹爪命令，因此不会造成机械臂跳变或改变夹爪。夹爪命令只从后续有效活动采样开始。调优二值模式下，Trigger 大于 `0.9` 命令 `0.99` 闭合；Trigger 小于等于 `0.9` 命令 `0.01` 张开。松开 Grip 会停止机械臂跟随并保持最后/当前夹爪命令；这不允许忽略任何 Stop 或故障。
 
 `GripperTriggerMin` 和 `GripperTriggerMax` 用于标定 PICO Trigger 的实测行程。小于等于最小值时映射到夹爪位置 `0.01`，大于等于最大值时映射到 `0.99`，中间线性插值。Kortex 接收归一化位置，而不是裸百分数。
 
-实机观察到的快速预设不使用 `InvertTranslation`，采用 `LinearGain 1.5` 与 `TranslationAxisGain @(2.0,1.0,1.0)`。`TranslationAxisGain` 在操作者校准后应用，因此 X 可单独调整前后灵敏度而不改变 Y/Z。`MaxLinearSpeed` 仍是未改变的速度硬上限。未变化的夹爪位置目标只发送一次；Trigger 产生的新目标可在 Kortex 夹爪限频后再次发送。终端状态显示 `gripper_target`；只有 Kortex 夹爪 RPC 实际成功后，evidence 才记录 `gripper_commanded`。
+调优预设不使用 `InvertTranslation`，采用 `LinearGain 1.5` 与 `TranslationAxisGain @(-2.0,1.0,1.0)`。`TranslationAxisGain` 在操作者校准后应用，负 X 会反转并增强前后而不改变 Y/Z。`MaxLinearSpeed` 仍是未改变的速度硬上限。Trigger 目标变化会启动 1.25 秒 burst，在 Grip 有效的每个控制周期重申当前夹爪位置，随后去重。终端状态显示 `gripper_target`；只有 Kortex 夹爪 RPC 实际成功后，evidence 才记录 `gripper_commanded`。
 
 For workspace handling, each requested Cartesian target is projected into the measured XYZ box by a coordinate-wise clamp: a coordinate below its minimum becomes that minimum, a coordinate above its maximum becomes that maximum, and a coordinate already inside is unchanged. The arm follows this projected target rather than treating the software boundary as an automatic exit. This projection neither enlarges the physically inspected workspace nor overrides Kinova limits, the physical E-stop, Web Stop, or the operator's responsibility to stop.
 

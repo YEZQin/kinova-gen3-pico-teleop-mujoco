@@ -685,6 +685,37 @@ def test_gripper_maps_configured_trigger_range_to_one_through_ninety_nine_percen
     assert backend.gripper_values == pytest.approx(expected)
 
 
+def test_binary_gripper_threshold_maps_above_point_nine_to_closed() -> None:
+    samples = [
+        replace(sample([0.0, 0.0, 0.0], 0.0, 1, 1.00), trigger=0.0),
+        replace(sample([0.0, 0.0, 0.0], 1.0, 2, 1.01), trigger=0.5),
+        replace(sample([0.01, 0.0, 0.0], 1.0, 3, 1.02), trigger=0.9),
+        replace(sample([0.02, 0.0, 0.0], 1.0, 4, 1.03), trigger=0.9001),
+        replace(sample([0.03, 0.0, 0.0], 1.0, 5, 1.04), trigger=0.4),
+    ]
+    backend = RecordingBackendWithGripper()
+    controller = TeleopController(
+        TeleopConfig(
+            realtime=False,
+            gripper=True,
+            gripper_binary_threshold=0.9,
+        ),
+        ScriptedInput(samples),
+        backend,
+    )
+
+    for _ in samples:
+        controller.step_once()
+
+    assert backend.gripper_values == pytest.approx([0.01, 0.99, 0.01])
+
+
+@pytest.mark.parametrize("threshold", (float("nan"), -0.01, 1.01))
+def test_binary_gripper_threshold_rejects_invalid_values(threshold: float) -> None:
+    with pytest.raises(ValueError, match="binary gripper threshold"):
+        TeleopConfig(gripper=True, gripper_binary_threshold=threshold)
+
+
 @pytest.mark.parametrize(
     ("trigger_min", "trigger_max"),
     (

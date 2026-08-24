@@ -99,10 +99,10 @@ class MappingConfig:
         if (
             axis_gain.shape != (3,)
             or not np.isfinite(axis_gain).all()
-            or not np.all(axis_gain > 0.0)
+            or not np.all(axis_gain != 0.0)
         ):
             raise ValueError(
-                "translation_axis_gain must contain three positive finite values"
+                "translation_axis_gain must contain three nonzero finite values"
             )
         object.__setattr__(
             self,

@@ -204,6 +204,7 @@ def _advanced_pico_motion_argv() -> list[str]:
         "--operator-calibration", "operator-axis.json",
         "--recover-stale-input",
         "--gripper",
+        "--gripper-binary-threshold", "0.9",
         "--workspace-min", "-0.6", "-0.6", "-0.04",
         "--workspace-max", "0.6", "0.6", "0.6",
         "--motion-lease", "fixture-motion.lock",
@@ -1568,7 +1569,7 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
             "--gripper-trigger-max", "0.7",
             "--invert-translation",
             "--linear-gain", "2.0",
-            "--translation-axis-gain", "2.0", "1.0", "1.0",
+            "--translation-axis-gain", "-2.0", "1.0", "1.0",
         ]
     ) == 0
 
@@ -1584,8 +1585,9 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
     assert controller_config.gripper is True
     assert controller_config.gripper_trigger_min == 0.2
     assert controller_config.gripper_trigger_max == 0.7
+    assert controller_config.gripper_binary_threshold == 0.9
     assert controller_config.invert_translation is True
-    assert controller_config.translation_axis_gain == (2.0, 1.0, 1.0)
+    assert controller_config.translation_axis_gain == (-2.0, 1.0, 1.0)
 
 
 @pytest.mark.parametrize(
@@ -1594,6 +1596,7 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
         ("nan", "1", "1"),
         ("0", "1", "1"),
         ("2.01", "1", "1"),
+        ("-2.01", "1", "1"),
     ),
 )
 def test_advanced_axis_gain_rejects_before_hardware_side_effects(
@@ -1690,6 +1693,21 @@ def test_advanced_gripper_trigger_range_rejects_before_hardware_side_effects(
     assert main(_advanced_pico_motion_argv() + arguments) == 2
     assert calls == []
     assert expected_error in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("threshold", ("nan", "-0.01", "1.01"))
+def test_advanced_binary_gripper_threshold_rejects_before_hardware(
+    monkeypatch,
+    capsys,
+    threshold: str,
+) -> None:
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+    argv = _advanced_pico_motion_argv()
+    argv[argv.index("--gripper-binary-threshold") + 1] = threshold
+
+    assert main(argv) == 2
+    assert calls == []
+    assert "--gripper-binary-threshold" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

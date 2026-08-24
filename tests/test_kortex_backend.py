@@ -271,21 +271,22 @@ def test_gripper_deadband_and_rate_limit():
     backend.begin_control()
 
     assert backend.command_gripper(0.5) is True
-    clock.now += kortex_backend_module.GRIPPER_MIN_INTERVAL / 2
+    clock.now += 0.019
+    assert backend.command_gripper(0.5) is True
+    clock.now += 0.002
+    assert backend.command_gripper(0.5) is True
+    clock.now += 0.019
     assert backend.command_gripper(0.9) is True
-    clock.now += kortex_backend_module.GRIPPER_MIN_INTERVAL
-    assert (
-        backend.command_gripper(
-            0.5 + kortex_backend_module.GRIPPER_DEADBAND / 2
-        )
-        is True
-    )
+    clock.now += 0.002
     assert backend.command_gripper(0.9) is True
 
-    assert len(connection.base.gripper_sent) == 2
+    assert [
+        command.gripper.finger.entries[0].value
+        for command in connection.base.gripper_sent
+    ] == [0.5, 0.5, 0.9]
 
 
-def test_same_gripper_position_target_is_sent_only_once(tmp_path):
+def test_gripper_target_burst_repeats_until_deadline(tmp_path):
     connection = _Connection(_feedback())
     clock = _Clock()
     events_path = tmp_path / "gripper-refresh.jsonl"
@@ -298,19 +299,41 @@ def test_same_gripper_position_target_is_sent_only_once(tmp_path):
     backend.begin_control()
 
     assert backend.command_gripper(0.99) is True
-    clock.now += 5.0
+    clock.now += 0.03
     assert backend.command_gripper(0.99) is True
-    assert len(connection.base.gripper_sent) == 1
+    clock.now += 1.19
+    assert backend.command_gripper(0.99) is True
+    clock.now += 0.04
+    assert backend.command_gripper(0.99) is True
     assert [
         command.gripper.finger.entries[0].value
         for command in connection.base.gripper_sent
-    ] == [0.99]
+    ] == [0.99, 0.99, 0.99]
     records = [json.loads(line) for line in events_path.read_text().splitlines()]
     assert [
         record["payload"]["position"]
         for record in records
         if record["kind"] == "gripper_commanded"
-    ] == [0.99]
+    ] == [0.99, 0.99, 0.99]
+
+
+def test_gripper_burst_stops_with_generation_and_restarts_after_rearm():
+    backend, connection, clock = _active_gripper_backend()
+    assert backend.command_gripper(0.5) is True
+    clock.now += 0.03
+    assert backend.command_gripper(0.5) is True
+    assert len(connection.base.gripper_sent) == 2
+
+    backend.hold()
+    clock.now += 0.03
+    assert backend.command_gripper(0.5) is False
+    assert len(connection.base.gripper_sent) == 2
+
+    backend.begin_control()
+    backend.current_pose()
+    clock.now += 0.03
+    assert backend.command_gripper(0.5) is True
+    assert len(connection.base.gripper_sent) == 3
 
 
 def test_changed_gripper_target_bypasses_refresh_interval_for_trigger_response():
@@ -320,7 +343,7 @@ def test_changed_gripper_target_bypasses_refresh_interval_for_trigger_response()
     backend.begin_control()
 
     assert backend.command_gripper(0.50) is True
-    clock.now += 0.099
+    clock.now += 0.019
     assert backend.command_gripper(0.99) is True
     assert [
         command.gripper.finger.entries[0].value
@@ -672,7 +695,7 @@ def test_gripper_rate_limit_starts_after_slow_rpc_succeeds() -> None:
     assert results == [True]
     assert backend.command_gripper(0.9) is True
     assert len(connection.base.gripper_sent) == 1
-    clock.now += 0.099
+    clock.now += 0.019
     assert backend.command_gripper(0.9) is True
     assert len(connection.base.gripper_sent) == 1
     clock.now += 0.002

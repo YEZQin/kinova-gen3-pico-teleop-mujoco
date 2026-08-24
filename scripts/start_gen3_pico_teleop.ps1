@@ -14,6 +14,7 @@ param(
     [Parameter(Mandatory=$true)][string]$LeaseOwner,
     [double]$GripperTriggerMin = 0.0,
     [double]$GripperTriggerMax = 1.0,
+    [double]$GripperBinaryThreshold = 0.9,
     [switch]$InvertTranslation,
     [double]$LinearGain = 1.0,
     [double[]]$TranslationAxisGain = @(1.0, 1.0, 1.0),
@@ -118,14 +119,28 @@ Assert-PositiveFinite $Scale 'Scale'
 Assert-PositiveFinite $MaxLinearSpeed 'MaxLinearSpeed'
 Assert-WorkspaceBounds $WorkspaceMin $WorkspaceMax
 Assert-GripperTriggerRange $GripperTriggerMin $GripperTriggerMax
+if (
+    [double]::IsNaN($GripperBinaryThreshold) -or
+    [double]::IsInfinity($GripperBinaryThreshold) -or
+    $GripperBinaryThreshold -lt 0.0 -or
+    $GripperBinaryThreshold -gt 1.0
+) {
+    throw 'GripperBinaryThreshold must be finite and within [0, 1]'
+}
 Assert-PositiveFinite $LinearGain 'LinearGain'
 if ($LinearGain -gt 2.0) { throw 'LinearGain must not exceed 2.0' }
 if ($TranslationAxisGain.Count -ne 3) {
     throw 'TranslationAxisGain must contain exactly three values'
 }
 foreach ($gain in $TranslationAxisGain) {
-    Assert-PositiveFinite $gain 'TranslationAxisGain'
-    if ($gain -gt 2.0) { throw 'TranslationAxisGain values must not exceed 2.0' }
+    if (
+        [double]::IsNaN($gain) -or
+        [double]::IsInfinity($gain) -or
+        $gain -eq 0.0 -or
+        [math]::Abs($gain) -gt 2.0
+    ) {
+        throw 'TranslationAxisGain values must be finite, nonzero, and have absolute value at most 2.0'
+    }
 }
 
 $pythonCandidate = $PythonPath
@@ -162,6 +177,7 @@ $motionArgs = @(
     '--gripper',
     '--gripper-trigger-min', $GripperTriggerMin.ToString('R', $invariantCulture),
     '--gripper-trigger-max', $GripperTriggerMax.ToString('R', $invariantCulture),
+    '--gripper-binary-threshold', $GripperBinaryThreshold.ToString('R', $invariantCulture),
     '--linear-gain', $LinearGain.ToString('R', $invariantCulture),
     '--translation-axis-gain'
 ) + @($TranslationAxisGain | ForEach-Object {

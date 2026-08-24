@@ -9,7 +9,11 @@ import time
 from collections.abc import Mapping
 
 from .backend import BackendResult, EndEffectorTargetBackend
-from .gripper_mapping import GripperTriggerMapping
+from .gripper_mapping import (
+    GRIPPER_POSITION_MAX,
+    GRIPPER_POSITION_MIN,
+    GripperTriggerMapping,
+)
 from .pose_mapping import (
     ClutchState,
     InputFault,
@@ -36,6 +40,7 @@ class TeleopConfig:
     gripper: bool = False
     gripper_trigger_min: float = 0.0
     gripper_trigger_max: float = 1.0
+    gripper_binary_threshold: float | None = None
     translation_axis_gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     def __post_init__(self) -> None:
@@ -48,6 +53,13 @@ class TeleopConfig:
             self.gripper_trigger_min,
             self.gripper_trigger_max,
         )
+        if self.gripper_binary_threshold is not None and (
+            not math.isfinite(self.gripper_binary_threshold)
+            or not 0.0 <= self.gripper_binary_threshold <= 1.0
+        ):
+            raise ValueError(
+                "binary gripper threshold must be finite and within [0, 1]"
+            )
 
 
 class TeleopSafetyError(RuntimeError):
@@ -210,9 +222,17 @@ class TeleopController:
                     self.mapper.rebase_active(sample, result.active_rebase_target)
                 if self.config.gripper and sample.valid:
                     assert callable(self._command_gripper)
-                    gripper_position = self._gripper_mapping.map(
-                        float(sample.trigger)
-                    )
+                    if self.config.gripper_binary_threshold is None:
+                        gripper_position = self._gripper_mapping.map(
+                            float(sample.trigger)
+                        )
+                    else:
+                        gripper_position = (
+                            GRIPPER_POSITION_MAX
+                            if sample.trigger
+                            > self.config.gripper_binary_threshold
+                            else GRIPPER_POSITION_MIN
+                        )
                     gripper_target = gripper_position
                     if not self._command_gripper(gripper_position):
                         try:

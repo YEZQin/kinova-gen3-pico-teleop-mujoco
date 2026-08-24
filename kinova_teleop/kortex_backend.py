@@ -37,7 +37,8 @@ FAULT_POLL_INTERVAL = 0.05
 STATIONARY_MAX_LINEAR_SPEED = 0.001
 STATIONARY_MAX_ANGULAR_SPEED_DEG = 0.5
 GRIPPER_DEADBAND = 0.02
-GRIPPER_MIN_INTERVAL = 0.1
+GRIPPER_MIN_INTERVAL = 0.02
+GRIPPER_BURST_DURATION = 1.25
 
 # Private test seam. Production callers cannot replace or disable the watchdog.
 _watchdog_thread_factory = threading.Thread
@@ -184,6 +185,8 @@ class KortexBackend:
         self._connection_closed = False
         self._gripper_last_value: float | None = None
         self._gripper_last_time: float | None = None
+        self._gripper_burst_deadline: float | None = None
+        self._gripper_force_next_command = False
 
         try:
             self._require_startup_ready()
@@ -468,6 +471,8 @@ class KortexBackend:
             self._deadline = None
             self._rearm_feedback_pending = True
             self._control_anchor = None
+            self._gripper_burst_deadline = None
+            self._gripper_force_next_command = True
         self._emit("control_started", "ARMED", {})
 
     def command_pose(self, target: Pose) -> BackendResult:
@@ -802,6 +807,8 @@ class KortexBackend:
         self._deadline = None
         self._feedback_requires_rearm = True
         self._rearm_feedback_pending = False
+        self._gripper_burst_deadline = None
+        self._gripper_force_next_command = False
         return token
 
     def _request_stop(self, *, force: bool) -> _StopToken:
@@ -969,8 +976,20 @@ class KortexBackend:
                 with self._state_lock:
                     if not self._state_allows_command_locked(generation):
                         return False
+                    sent_at = self._monotonic()
+                    target_changed = (
+                        self._gripper_force_next_command
+                        or self._gripper_last_value is None
+                        or abs(position - self._gripper_last_value)
+                        >= GRIPPER_DEADBAND
+                    )
+                    if target_changed:
+                        self._gripper_burst_deadline = (
+                            sent_at + GRIPPER_BURST_DURATION
+                        )
+                    self._gripper_force_next_command = False
                     self._gripper_last_value = position
-                    self._gripper_last_time = self._monotonic()
+                    self._gripper_last_time = sent_at
         finally:
             self._rpc_lock.release()
 
@@ -991,15 +1010,22 @@ class KortexBackend:
         return True
 
     def _gripper_command_due_locked(self, position: float, now: float) -> bool:
-        same_target = (
-            self._gripper_last_value is not None
-            and abs(position - self._gripper_last_value) < GRIPPER_DEADBAND
-        )
-        if same_target:
-            return False
-        return not (
+        if self._gripper_force_next_command:
+            return True
+        if (
             self._gripper_last_time is not None
             and now - self._gripper_last_time < GRIPPER_MIN_INTERVAL
+        ):
+            return False
+        target_changed = (
+            self._gripper_last_value is None
+            or abs(position - self._gripper_last_value) >= GRIPPER_DEADBAND
+        )
+        if target_changed:
+            return True
+        return (
+            self._gripper_burst_deadline is not None
+            and now < self._gripper_burst_deadline
         )
 
     def close(self) -> None:

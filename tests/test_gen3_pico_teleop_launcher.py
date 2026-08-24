@@ -126,6 +126,7 @@ def _launcher_call(
     lease_owner: str = "kinova-teleop",
     gripper_trigger_min: str = "0.0",
     gripper_trigger_max: str = "1.0",
+    gripper_binary_threshold: str = "0.9",
     invert_translation: str = "",
     linear_gain: str | None = None,
     translation_axis_gain: str = "([double[]]@(1.0,1.0,1.0))",
@@ -146,6 +147,7 @@ def _launcher_call(
         f"-RunId '{run_id}' -LeaseOwner '{lease_owner}' "
         f"-GripperTriggerMin {gripper_trigger_min} "
         f"-GripperTriggerMax {gripper_trigger_max} "
+        f"-GripperBinaryThreshold {gripper_binary_threshold} "
         f"{invert_translation} {linear_gain_argument}"
         f"-TranslationAxisGain {translation_axis_gain} "
         f"-Scale {scale} -MaxLinearSpeed {max_linear_speed} "
@@ -320,6 +322,7 @@ def test_fake_child_observes_exact_gated_arguments_and_child_only_password(
     assert _value_after(motion_args, "--max-linear-speed") == "0.05"
     assert _value_after(motion_args, "--gripper-trigger-min") == "0"
     assert _value_after(motion_args, "--gripper-trigger-max") == "1"
+    assert _value_after(motion_args, "--gripper-binary-threshold") == "0.9"
     assert "--invert-translation" not in motion_args
     assert _value_after(motion_args, "--linear-gain") == "1"
     axis_gain_index = motion_args.index("--translation-axis-gain")
@@ -354,12 +357,15 @@ def test_launcher_can_explicitly_enable_inversion_and_gain_two(
         launcher_fixture,
         invert_translation="-InvertTranslation",
         linear_gain="2.0",
+        translation_axis_gain="([double[]]@(-2.0,1.0,1.0))",
     )
 
     assert result.returncode == 0, result.stderr
     motion_args = _records(launcher_fixture["log"])[-1]["args"]
     assert "--invert-translation" in motion_args
     assert _value_after(motion_args, "--linear-gain") == "2"
+    axis_gain_index = motion_args.index("--translation-axis-gain")
+    assert motion_args[axis_gain_index + 1 : axis_gain_index + 4] == ["-2", "1", "1"]
 
 
 def test_fake_child_failure_cleans_password_and_propagates_exact_exit(
@@ -471,12 +477,22 @@ def test_each_launch_uses_a_new_absent_evidence_path(
             {"gripper_trigger_min": "0.8", "gripper_trigger_max": "0.2"},
             "reversed trigger range",
         ),
+        (
+            {"gripper_binary_threshold": "([double]::NaN)"},
+            "non-finite binary gripper threshold",
+        ),
+        ({"gripper_binary_threshold": "-0.01"}, "negative binary gripper threshold"),
+        ({"gripper_binary_threshold": "1.01"}, "binary gripper threshold above one"),
         ({"linear_gain": "0"}, "zero linear gain"),
         ({"linear_gain": "([double]::NaN)"}, "non-finite linear gain"),
         ({"linear_gain": "2.01"}, "linear gain above advanced limit"),
         (
             {"translation_axis_gain": "([double[]]@(2.01,1.0,1.0))"},
             "translation axis gain above advanced limit",
+        ),
+        (
+            {"translation_axis_gain": "([double[]]@(-2.01,1.0,1.0))"},
+            "negative translation axis gain beyond advanced limit",
         ),
         (
             {"translation_axis_gain": "([double[]]@(2.0,1.0))"},
