@@ -16,6 +16,7 @@ param(
     [double]$GripperTriggerMax = 1.0,
     [switch]$InvertTranslation,
     [double]$LinearGain = 1.0,
+    [double[]]$TranslationAxisGain = @(1.0, 1.0, 1.0),
     [string]$PythonPath
 )
 
@@ -119,6 +120,13 @@ Assert-WorkspaceBounds $WorkspaceMin $WorkspaceMax
 Assert-GripperTriggerRange $GripperTriggerMin $GripperTriggerMax
 Assert-PositiveFinite $LinearGain 'LinearGain'
 if ($LinearGain -gt 2.0) { throw 'LinearGain must not exceed 2.0' }
+if ($TranslationAxisGain.Count -ne 3) {
+    throw 'TranslationAxisGain must contain exactly three values'
+}
+foreach ($gain in $TranslationAxisGain) {
+    Assert-PositiveFinite $gain 'TranslationAxisGain'
+    if ($gain -gt 2.0) { throw 'TranslationAxisGain values must not exceed 2.0' }
+}
 
 $pythonCandidate = $PythonPath
 if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
@@ -155,6 +163,10 @@ $motionArgs = @(
     '--gripper-trigger-min', $GripperTriggerMin.ToString('R', $invariantCulture),
     '--gripper-trigger-max', $GripperTriggerMax.ToString('R', $invariantCulture),
     '--linear-gain', $LinearGain.ToString('R', $invariantCulture),
+    '--translation-axis-gain'
+) + @($TranslationAxisGain | ForEach-Object {
+    $_.ToString('R', $invariantCulture)
+}) + @(
     '--control-hz', $controlHz.ToString('R', $invariantCulture),
     '--stale-timeout', $staleTimeout.ToString('R', $invariantCulture),
     '--scale', $Scale.ToString('R', $invariantCulture),

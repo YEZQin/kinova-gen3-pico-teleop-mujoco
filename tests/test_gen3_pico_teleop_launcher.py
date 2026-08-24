@@ -128,6 +128,7 @@ def _launcher_call(
     gripper_trigger_max: str = "1.0",
     invert_translation: str = "",
     linear_gain: str | None = None,
+    translation_axis_gain: str = "([double[]]@(1.0,1.0,1.0))",
 ) -> str:
     resolved_lease = paths["lease"] if lease is None else lease
     resolved_report = paths["report"] if report is None else report
@@ -146,6 +147,7 @@ def _launcher_call(
         f"-GripperTriggerMin {gripper_trigger_min} "
         f"-GripperTriggerMax {gripper_trigger_max} "
         f"{invert_translation} {linear_gain_argument}"
+        f"-TranslationAxisGain {translation_axis_gain} "
         f"-Scale {scale} -MaxLinearSpeed {max_linear_speed} "
         f"{enable_gripper} -PythonPath {_ps_literal(paths['python'])}"
     )
@@ -320,6 +322,8 @@ def test_fake_child_observes_exact_gated_arguments_and_child_only_password(
     assert _value_after(motion_args, "--gripper-trigger-max") == "1"
     assert "--invert-translation" not in motion_args
     assert _value_after(motion_args, "--linear-gain") == "1"
+    axis_gain_index = motion_args.index("--translation-axis-gain")
+    assert motion_args[axis_gain_index + 1 : axis_gain_index + 4] == ["1", "1", "1"]
     min_index = motion_args.index("--workspace-min")
     max_index = motion_args.index("--workspace-max")
     assert motion_args[min_index + 1 : min_index + 4] == ["0.1", "-0.3", "0.05"]
@@ -470,6 +474,14 @@ def test_each_launch_uses_a_new_absent_evidence_path(
         ({"linear_gain": "0"}, "zero linear gain"),
         ({"linear_gain": "([double]::NaN)"}, "non-finite linear gain"),
         ({"linear_gain": "2.01"}, "linear gain above advanced limit"),
+        (
+            {"translation_axis_gain": "([double[]]@(2.01,1.0,1.0))"},
+            "translation axis gain above advanced limit",
+        ),
+        (
+            {"translation_axis_gain": "([double[]]@(2.0,1.0))"},
+            "short translation axis gain",
+        ),
     ),
 )
 def test_invalid_numeric_or_advanced_values_fail_before_any_python_child(

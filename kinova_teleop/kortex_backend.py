@@ -38,7 +38,6 @@ STATIONARY_MAX_LINEAR_SPEED = 0.001
 STATIONARY_MAX_ANGULAR_SPEED_DEG = 0.5
 GRIPPER_DEADBAND = 0.02
 GRIPPER_MIN_INTERVAL = 0.1
-GRIPPER_REFRESH_INTERVAL = 0.25
 
 # Private test seam. Production callers cannot replace or disable the watchdog.
 _watchdog_thread_factory = threading.Thread
@@ -992,16 +991,16 @@ class KortexBackend:
         return True
 
     def _gripper_command_due_locked(self, position: float, now: float) -> bool:
-        if self._gripper_last_time is None:
-            return True
-        elapsed = now - self._gripper_last_time
-        if elapsed < GRIPPER_MIN_INTERVAL:
-            return False
         same_target = (
             self._gripper_last_value is not None
             and abs(position - self._gripper_last_value) < GRIPPER_DEADBAND
         )
-        return not same_target or elapsed >= GRIPPER_REFRESH_INTERVAL
+        if same_target:
+            return False
+        return not (
+            self._gripper_last_time is not None
+            and now - self._gripper_last_time < GRIPPER_MIN_INTERVAL
+        )
 
     def close(self) -> None:
         emit_stop_request = False

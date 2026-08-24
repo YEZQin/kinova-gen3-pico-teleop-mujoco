@@ -1568,6 +1568,7 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
             "--gripper-trigger-max", "0.7",
             "--invert-translation",
             "--linear-gain", "2.0",
+            "--translation-axis-gain", "2.0", "1.0", "1.0",
         ]
     ) == 0
 
@@ -1584,6 +1585,41 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
     assert controller_config.gripper_trigger_min == 0.2
     assert controller_config.gripper_trigger_max == 0.7
     assert controller_config.invert_translation is True
+    assert controller_config.translation_axis_gain == (2.0, 1.0, 1.0)
+
+
+@pytest.mark.parametrize(
+    "axis_gain",
+    (
+        ("nan", "1", "1"),
+        ("0", "1", "1"),
+        ("2.01", "1", "1"),
+    ),
+)
+def test_advanced_axis_gain_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    axis_gain: tuple[str, str, str],
+) -> None:
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(
+        _advanced_pico_motion_argv()
+        + ["--translation-axis-gain", *axis_gain]
+    ) == 2
+    assert calls == []
+    assert "--translation-axis-gain" in capsys.readouterr().err
+
+
+def test_axis_gain_override_requires_advanced_mode_before_hardware(
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(["--translation-axis-gain", "2", "1", "1"]) == 2
+    assert calls == []
+    assert "--translation-axis-gain requires" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("gain", ("nan", "inf", "0", "2.01"))

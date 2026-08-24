@@ -146,6 +146,36 @@ def test_operator_calibration_maps_measured_directions(
     )
 
 
+def test_translation_axis_gain_boosts_calibrated_base_x_only() -> None:
+    ee = identity_pose((0.4, -0.2, 0.3))
+    raw_forward = [0.046927768817, 0.019483511776, 0.086128841179]
+    baseline = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+        ),
+        raw_forward,
+        ee,
+    )
+    boosted = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+            translation_axis_gain=(2.0, 1.0, 1.0),
+        ),
+        raw_forward,
+        ee,
+    )
+
+    baseline_delta = baseline.position - ee.position
+    boosted_delta = boosted.position - ee.position
+    np.testing.assert_allclose(
+        boosted_delta,
+        baseline_delta * np.array([2.0, 1.0, 1.0]),
+        atol=1e-9,
+    )
+
+
 @pytest.mark.parametrize(
     "translation_rotation",
     [

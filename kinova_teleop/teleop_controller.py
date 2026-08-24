@@ -36,6 +36,7 @@ class TeleopConfig:
     gripper: bool = False
     gripper_trigger_min: float = 0.0
     gripper_trigger_max: float = 1.0
+    translation_axis_gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -103,6 +104,7 @@ class TeleopController:
                 release_stability_samples=1,
                 stale_timeout=config.stale_timeout,
                 translation_rotation=config.translation_rotation,
+                translation_axis_gain=config.translation_axis_gain,
             ),
         )
         self.mapper.reset(backend.current_pose())

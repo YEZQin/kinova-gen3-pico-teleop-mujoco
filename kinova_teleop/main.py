@@ -200,6 +200,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="advanced Kortex Cartesian position gain (maximum: 2.0)",
     )
     parser.add_argument(
+        "--translation-axis-gain",
+        nargs=3,
+        type=float,
+        default=(1.0, 1.0, 1.0),
+        metavar=("X", "Y", "Z"),
+        help="advanced calibrated base-axis target gains (maximum: 2 per axis)",
+    )
+    parser.add_argument(
         "--control-hz",
         type=float,
         default=None,
@@ -508,6 +516,14 @@ def check_input(
 
 def _validate_args(args: argparse.Namespace) -> str | None:
     advanced = _is_advanced_pico_teleop(args)
+    axis_gain = tuple(float(value) for value in args.translation_axis_gain)
+    if not all(
+        math.isfinite(value) and 0.0 < value <= 2.0
+        for value in axis_gain
+    ):
+        return "--translation-axis-gain values must be finite and in (0, 2]"
+    if not advanced and axis_gain != (1.0, 1.0, 1.0):
+        return "--translation-axis-gain requires --advanced-pico-teleop"
     if not math.isfinite(args.linear_gain) or not 0.0 < args.linear_gain <= 2.0:
         return "--linear-gain must be finite and in (0, 2]"
     if not advanced and args.linear_gain != 1.0:
@@ -1262,6 +1278,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     gripper=args.gripper,
                     gripper_trigger_min=args.gripper_trigger_min,
                     gripper_trigger_max=args.gripper_trigger_max,
+                    translation_axis_gain=tuple(
+                        float(value) for value in args.translation_axis_gain
+                    ),
                 ),
                 source,
                 backend,

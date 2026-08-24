@@ -72,6 +72,7 @@ class MappingConfig:
     invert_translation: bool = False
     release_stability_samples: int = 1
     translation_rotation: tuple[tuple[float, float, float], ...] | None = None
+    translation_axis_gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     def __post_init__(self) -> None:
         thresholds = np.asarray(
@@ -94,6 +95,20 @@ class MappingConfig:
             self.translation_rotation
         )
         object.__setattr__(self, "translation_rotation", translation_rotation)
+        axis_gain = np.asarray(self.translation_axis_gain, dtype=np.float64)
+        if (
+            axis_gain.shape != (3,)
+            or not np.isfinite(axis_gain).all()
+            or not np.all(axis_gain > 0.0)
+        ):
+            raise ValueError(
+                "translation_axis_gain must contain three positive finite values"
+            )
+        object.__setattr__(
+            self,
+            "translation_axis_gain",
+            tuple(float(value) for value in axis_gain),
+        )
 
 
 @dataclass(frozen=True)
@@ -486,6 +501,7 @@ class RelativePoseMapper:
         delta = controller_pose.position - self._controller_reference.position
         if self.config.translation_rotation is not None:
             delta = np.asarray(self.config.translation_rotation) @ delta
+        delta = np.asarray(self.config.translation_axis_gain) * delta
         translation_sign = -1.0 if self.config.invert_translation else 1.0
         desired_position = self._ee_reference.position + (
             translation_sign
