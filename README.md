@@ -4,13 +4,13 @@
 
 This public walkthrough starts from clean Windows and ends at a deliberately guarded first motion workflow. It supports a **Kinova Gen3 L53, 7 DoF, firmware 2.8.0-5** with the **Kortex 2.8 / `kortex_api` 2.8.0.post5** stack, plus a PICO 4 or PICO 4 Ultra left controller. The default and recommended path is MuJoCo.
 
-> **Safety boundary.** This is not safety-rated, production-safe, unattended, or universally hardware-validated. Keep a reachable physical E-stop/Web Stop and a second observer for first motion. A returned Stop RPC is not proof of physical stationarity. The public first motion is translation-only: no vision control and no gripper writes. The final expanded/asymmetric profile is **offline verified and not hardware-validated**; do not claim otherwise.
+> **Safety boundary.** This is not safety-rated, production-safe, unattended, or universally hardware-validated. Keep a reachable physical E-stop/Web Stop and a second observer for first motion. A returned Stop RPC is not proof of physical stationarity. The public first motion is translation-only: no vision control and no gripper writes. The tuned advanced gripper profile has installation-local hardware observation on one Gen3 L53 / PICO 4 Ultra setup, but it is not universal hardware validation.
 
 ## What is connected
 
 `PICO left controller → Unity OpenXR Bridge → UDP 15031 discovery → Python admission/Grip clutch → MuJoCo (default) or explicitly gated Kortex Cartesian Twist`.
 
-Grip is a clutch: release below `0.8`, then press above `0.9` to create a new anchor. In guarded hardware mode, control is 40 Hz, stale timeout is at most `0.2 s`, angular cap is `2 deg/s`, and your selected linear cap must not exceed `0.02 m/s`. A stale, invalid, changed-source, watchdog, workspace, or RPC fault latches Stop; resolve it onsite before another run.
+Grip is a clutch: release below `0.8`, then press above `0.9` to create a new anchor. In the public first-motion hardware mode, control is 40 Hz, stale timeout is at most `0.2 s`, angular cap is `2 deg/s`, and the selected linear cap must not exceed `0.02 m/s`. The separately documented tuned profile permits up to `0.05 m/s`. A stale, invalid, changed-source, watchdog, workspace, or RPC fault latches Stop; resolve it onsite before another run.
 
 ## Before you begin
 
@@ -109,7 +109,7 @@ This command validates the package offline: it reads no password and makes no PI
 | Source/code-level | Source review, unit/integration contracts, manifest validation, and guarded admission logic are automated evidence. | They do not prove a headset, robot connection, physical stopping distance, or workspace is safe. |
 | Simulator | The deterministic 2000-step MuJoCo finite check is simulator evidence. | It does not prove Kortex compatibility or physical arm behavior. |
 | Hardware observed | A fresh local PICO gate, read-only T0, and recorded onsite trial are hardware observed only for that installation/session. | They do not generalize to another robot, code revision, or future unattended run. |
-| Release final profile | The final expanded/asymmetric profile is offline verified and not hardware-validated in this release. | It requires new onsite evidence before any hardware claim. |
+| Release final profile | The tuned advanced gripper profile has installation-local hardware observation at core control commit `b40eb57` and remains automatically checked/offline verified in this branch. | It remains not hardware-validated as a universal safety claim; every new robot, workspace, calibration, payload, or firmware needs fresh onsite evidence. |
 
 ## Onsite first motion: nine checks, launch, clutch, Stop
 
@@ -140,13 +140,13 @@ The launcher sequence above is the operational instruction, not a shell command 
 
 For a stale-input, UDP, source-change, workspace, watchdog, or Stop failure: keep hands clear, use physical Stop when indicated, do not relaunch after a latched fault, inspect cables/network/fixture, and repeat from the applicable gate. For PICO failure check headset app foreground state, left-controller tracking, trusted LAN/VLAN, VPN/AP isolation, and the narrow UDP 15031 rule. For Kortex failure, do not change firmware or SDK ad hoc: confirm the required wheel/firmware pair and repeat a fresh read-only T0.
 
-## Advanced PICO teleop with proportional gripper
+## Advanced PICO teleop with binary Trigger gripper
 
-The public first-motion lifecycle above remains translation-only and has no gripper writes. Only after completing it may an operator use the separate [advanced PICO gripper guide](docs/advanced-gripper-teleoperation.md). That guide requires fresh local package artifacts and bounds measured for the current robot; it does not change the physical E-stop, Web Stop, observer, or exact-`MOVE` controls.
+The public first-motion lifecycle above remains translation-only and has no gripper writes. Only after completing it may an operator use the separate [advanced PICO gripper guide](docs/advanced-gripper-teleoperation.md) and the preserved [hardware-observed b40 baseline](docs/hardware-observed-b40eb57.md). The tuned reusable launcher is `scripts/start_gen3_pico_tuned_session.ps1`: Grip clutches arm following, Trigger `>0.9` commands gripper closed, Trigger `<=0.9` commands open, and the observed translation preset is `Scale 1.0`, `MaxLinearSpeed 0.05`, `LinearGain 1.5`, `TranslationAxisGain @(-2,1,1)`. It still requires fresh calibration, read-only T0, local package artifacts, measured bounds for the current robot, physical E-stop/Web Stop, observer, and exact `MOVE`.
 
 ## Evidence, licenses, and development
 
-Read [docs/evidence-levels.md](docs/evidence-levels.md) before interpreting any result. It distinguishes automated/offline, installation-local PICO, read-only T0, and onsite observed evidence. The final expanded/asymmetric profile remains offline verified and not hardware-validated.
+Read [docs/evidence-levels.md](docs/evidence-levels.md) before interpreting any result. It distinguishes automated/offline, installation-local PICO, read-only T0, and onsite observed evidence. The tuned advanced profile is hardware-observed only for the recorded installation and remains not hardware-validated as a general safety claim.
 
 Project-owned source is MIT licensed ([LICENSE](LICENSE)). Kortex redistribution notices, the exact upstream identity, and PICO/Unity notice references are in [release/THIRD_PARTY_NOTICES.txt](release/THIRD_PARTY_NOTICES.txt). Do not redistribute SDKs, APKs, firmware, logs, private device data, or dependencies without checking their licenses.
 
@@ -158,4 +158,4 @@ For development-only checks (no hardware launcher):
 git diff --check
 ```
 
-Quick recap: clone → bootstrap the wheel → build/install the APK locally → open it → PICO gate → finite MuJoCo → calibrate → read-only T0 → measure/package locally → offline validate → nine physical checks → guarded launcher → release/press Grip → exact `MOVE` → Stop and investigate every fault.
+Quick recap: clone → bootstrap the wheel → build/install the APK locally → open it → PICO gate → finite MuJoCo → calibrate → read-only T0 → measure/package locally → offline validate → nine physical checks → guarded launcher → release/press Grip → exact `MOVE` → Stop and investigate every fault. For repeated tuned gripper teleop, use `scripts/start_gen3_pico_tuned_session.ps1` with fresh local bounds and calibration.

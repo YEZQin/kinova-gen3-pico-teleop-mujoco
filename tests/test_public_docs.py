@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 README_PATHS = (ROOT / "README.md", ROOT / "README_CN.md")
 ADVANCED_GUIDE = ROOT / "docs" / "advanced-gripper-teleoperation.md"
+HARDWARE_BASELINE = ROOT / "docs" / "hardware-observed-b40eb57.md"
 LIFECYCLE = (
     "clone", "bootstrap", "apk-install", "pico-gate", "mujoco-finite",
     "calibration", "t0", "local-package", "offline-validation",
@@ -106,8 +107,10 @@ def test_advanced_gripper_guide_documents_the_guarded_parameterized_contract() -
         "clamp",
         "physical E-stop",
         "Web Stop",
-        "not hardware-observed",
-        "not hardware-validated",
+        "hardware-observed on one Gen3 L53 / PICO 4 Ultra installation",
+        "not universal hardware validation",
+        "start_gen3_pico_tuned_session.ps1",
+        "hardware-observed-b40eb57.md",
     ):
         assert required in document, required
 
@@ -123,17 +126,48 @@ def test_advanced_gripper_guide_documents_the_guarded_parameterized_contract() -
         "recoverable stale input, workspace boundary projection/contact, and shutdown/cleanup",
         "send no automatic gripper command and hold the current gripper position",
         "No automatic open occurs in any of these cases",
-        "For the first gripper trial, use no payload, begin with a small Trigger value, and keep the physical E-stop and Web Stop reachable.",
-        "首次夹爪试验必须空载，从较小的 Trigger 值开始，并保持实体 E-stop 与 Web Stop 可达。",
+        "For the first gripper trial, keep the gripper empty, begin at `Trigger <= 0.9`, and cross the `0.9` threshold deliberately while keeping the physical E-stop and Web Stop reachable.",
+        "首次夹爪试验保持夹爪空载，从 `Trigger <= 0.9` 开始，再有意识地越过 `0.9` 阈值，同时保持实体 E-stop 与 Web Stop 可达。",
     ):
         assert required in document, required
 
     forbidden = (
         r"D:[\\/]", r"C:[\\/]Users", r"KINOVA_PASSWORD\s*=",
-        r"download[^\n]*apk", r"hardware-observed evidence",
+        r"download[^\n]*apk",
     )
     for pattern in forbidden:
         assert re.search(pattern, document, flags=re.IGNORECASE) is None, pattern
+
+
+def test_hardware_observed_baseline_preserves_identity_and_aggregate_only() -> None:
+    document = HARDWARE_BASELINE.read_text(encoding="utf-8")
+    for required in (
+        "b40eb57f382068153299041ffefe30542778b541",
+        "Gen3 L53",
+        "PICO 4 Ultra",
+        "Python `3.11.15`",
+        "155.172 s",
+        "1,216 `moving`",
+        "414 successful `gripper_commanded`",
+        "targets only `0.01` and `0.99`",
+        "raw evidence stream",
+        "intentionally excluded from Git",
+    ):
+        assert required in document, required
+    for pattern in (r"D:[\\/]", r"C:[\\/]Users", r"192\.168\.1\.10", r"run-[0-9a-f]{16,}"):
+        assert re.search(pattern, document, flags=re.IGNORECASE) is None, pattern
+
+
+def test_tuned_publication_files_do_not_bake_in_a_lab_private_ipv4() -> None:
+    documents = (
+        ADVANCED_GUIDE.read_text(encoding="utf-8"),
+        HARDWARE_BASELINE.read_text(encoding="utf-8"),
+        (ROOT / "scripts" / "start_gen3_pico_tuned_session.ps1").read_text(encoding="utf-8"),
+    )
+    private_ipv4 = re.compile(
+        r"\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b"
+    )
+    assert all(private_ipv4.search(document) is None for document in documents)
 
 
 def test_bootstrap_is_gated_by_the_release_asset_state() -> None:
@@ -308,8 +342,9 @@ def test_evidence_licenses_and_final_profile_limit_are_explicit() -> None:
         assert "evidence" in document
         assert "v0.2.0-rc.1" in document
         assert "offline verified" in document
-        assert "not hardware-validated" in document
-    assert "final expanded" in evidence and "offline verified" in evidence
+        assert "not universal hardware validation" in document or "不能作为通用安全层面的 hardware-validated" in document
+    assert "tuned advanced gripper profile" in evidence and "b40eb57" in evidence
+    assert "offline verified" in evidence and "not hardware-validated" in evidence
     assert "kinova kortex api sdk" in notices and "pico openxr sdk" in notices
 
 

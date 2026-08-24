@@ -1,4 +1,4 @@
-# Advanced PICO teleoperation with a proportional gripper / 高级 PICO 比例夹爪遥操
+# Advanced PICO teleoperation with a binary Trigger gripper / 高级 PICO 二值 Trigger 夹爪遥操
 
 This is a separate, opt-in profile for an operator who has already completed the public [zero-to-first-motion workflow](../README.md) or [中文公开首动流程](../README_CN.md). The public lifecycle and its generated launcher remain translation-only with no gripper writes. This guide adds a parameterized launcher; it does not replace any public prerequisite, package gate, onsite checklist, or Stop procedure.
 
@@ -6,13 +6,13 @@ This is a separate, opt-in profile for an operator who has already completed the
 
 ## Evidence and safety boundary / 证据与安全边界
 
-The advanced profile is documented and automatically checked, but is **not hardware-observed** and **not hardware-validated**. It is not a claim of safe physical operation. Keep the physical E-stop and Web Stop reachable, retain the second observer and all nine onsite checks, keep people clear, and investigate every latched fault before a new attempt. Kinova firmware limits and all operator controls remain in force.
+The tuned binary gripper profile was hardware-observed on one Gen3 L53 / PICO 4 Ultra installation at core control commit `b40eb57`; see [the preserved baseline note](hardware-observed-b40eb57.md). That observation is installation-local evidence only: it is **not safety-rated**, **not production-safe**, and **not universal hardware validation**. Keep the physical E-stop and Web Stop reachable, retain the second observer and all nine onsite checks, keep people clear, and investigate every latched fault before a new attempt. Kinova firmware limits and all operator controls remain in force.
 
-该高级模式已有文档与自动化检查，但**尚未完成硬件现场观察**，也**未完成硬件验证**；这不代表可安全进行实体运行。必须保持实体 E-stop 与 Web Stop 可达，保留第二观察员和全部九项现场检查，让人员远离，并在每个锁存故障后调查原因才可再次尝试。Kinova 固件限制及全部操作者控制始终有效。
+调优后的二值夹爪模式已在一套 Gen3 L53 / PICO 4 Ultra 安装上以核心控制提交 `b40eb57` 进行现场观察；见[保留的基线记录](hardware-observed-b40eb57.md)。该观察仅是安装级证据：它**不是安全认证**、**不是生产安全声明**，也**不是通用硬件验证**。必须保持实体 E-stop 与 Web Stop 可达，保留第二观察员和全部九项现场检查，让人员远离，并在每个锁存故障后调查原因才可再次尝试。Kinova 固件限制及全部操作者控制始终有效。
 
-For the first gripper trial, use no payload, begin with a small Trigger value, and keep the physical E-stop and Web Stop reachable.
+For the first gripper trial, keep the gripper empty, begin at `Trigger <= 0.9`, and cross the `0.9` threshold deliberately while keeping the physical E-stop and Web Stop reachable.
 
-首次夹爪试验必须空载，从较小的 Trigger 值开始，并保持实体 E-stop 与 Web Stop 可达。
+首次夹爪试验保持夹爪空载，从 `Trigger <= 0.9` 开始，再有意识地越过 `0.9` 阈值，同时保持实体 E-stop 与 Web Stop 可达。
 
 ## Prerequisites and measured inputs / 前置条件与实测输入
 
@@ -20,17 +20,13 @@ Use artifacts produced afresh for this exact robot, calibration, package, and se
 
 使用为当前机器人、校准、包和会话新鲜生成的产物。不得复用其他机器人的 lease、预检报告、校准或边界。完成公开 T0 与实体检查后，围绕当前 TCP 位姿测量包含端点的绝对 XYZ 盒；每个数值必须有限，且每个最小值必须严格小于对应最大值。
 
-Enter the artifact paths and the measured values when prompted. The variables keep the launch command bound to the operator's local artifacts rather than reusable example paths.
+The recommended reproducible path is the tuned session launcher below. It creates a fresh `sessions/<run>/local-config` directory, copies the current operator calibration into it, runs read-only T0, generates a fresh local package, then starts the tuned advanced launcher. This avoids stale `local-config` overwrite failures while keeping every artifact local.
 
-在提示时输入产物路径和实测数值。变量使启动命令绑定到操作者本地的产物，而不是复用示例路径。
+推荐使用下方调优会话启动器。它会创建新的 `sessions/<run>/local-config` 目录，把当前操作者校准复制进去，执行只读 T0，生成新的本地包，然后启动调优高级遥操。这样可避免旧 `local-config` 覆盖失败，同时所有产物仍保留在本地。
 
 ```powershell
-$robotHost = Read-Host 'Private IPv4 address of this Gen3'
-$robotUser = Read-Host 'Kortex user name for this Gen3'
-$motionLease = Read-Host 'Path to the fresh local motion-lease artifact'
-$preflightReport = Read-Host 'Path to the fresh local reviewed preflight report'
 $operatorCalibration = Read-Host 'Path to the captured operator calibration'
-$teleopProfile = Get-Content -LiteralPath (Read-Host 'Path to teleop-profile.json') -Raw | ConvertFrom-Json
+$robotHost = Read-Host 'Private IPv4 address of this Gen3'
 
 [double[]]$workspaceMin = @(
   [double](Read-Host 'Measured absolute X minimum (m)'),
@@ -43,26 +39,29 @@ $teleopProfile = Get-Content -LiteralPath (Read-Host 'Path to teleop-profile.jso
   [double](Read-Host 'Measured absolute Z maximum (m)')
 )
 
-& .\scripts\start_gen3_pico_teleop.ps1 `
+& .\scripts\start_gen3_pico_tuned_session.ps1 `
   -RobotHost $robotHost `
-  -RobotUser $robotUser `
-  -MotionLease $motionLease `
-  -PreflightReport $preflightReport `
+  -RobotUser admin `
   -OperatorCalibration $operatorCalibration `
-  -RunId $teleopProfile.run_id `
-  -LeaseOwner $teleopProfile.lease_owner `
   -WorkspaceMin $workspaceMin `
   -WorkspaceMax $workspaceMax `
+  -LeaseOwner operator `
   -Scale 1.0 `
   -MaxLinearSpeed 0.05 `
-  -GripperTriggerMin 0.0 `
-  -GripperTriggerMax 1.0 `
-  -GripperBinaryThreshold 0.9 `
   -LinearGain 1.5 `
   -TranslationAxisGain ([double[]]@(-2.0,1.0,1.0)) `
-  -EnableGripper `
+  -GripperBinaryThreshold 0.9 `
+  -ConfirmPhysicalChecks `
   -PythonPath .\.venv-kortex\Scripts\python.exe
 ```
+
+If you already have a fresh motion lease, reviewed preflight report, teleop profile, and calibration in the same reviewed local package, you may instead call `scripts/start_gen3_pico_teleop.ps1` directly with the same tuned parameters. The session launcher is preferred for repeatable runs because it prevents accidental reuse or overwrite of stale local artifacts.
+
+若已拥有同一已复核本地包中的新鲜 motion lease、reviewed preflight report、teleop profile 和校准，也可以用相同调优参数直接调用 `scripts/start_gen3_pico_teleop.ps1`。为便于反复复现，优先使用会话启动器，因为它能避免误复用或覆盖旧本地产物。
+
+The equivalent direct low-level call must remain artifact-bound with `-MotionLease`, `-PreflightReport`, `-OperatorCalibration`, `-RunId`, `-LeaseOwner`, `-WorkspaceMin`, `-WorkspaceMax`, and `-EnableGripper`, plus the same `-Scale 1.0`, `-MaxLinearSpeed 0.05`, `-LinearGain 1.5`, `-TranslationAxisGain ([double[]]@(-2.0,1.0,1.0))`, and `-GripperBinaryThreshold 0.9` settings. Do not add `-InvertTranslation` to this observed preset.
+
+等价的低层直接调用仍必须绑定 `-MotionLease`、`-PreflightReport`、`-OperatorCalibration`、`-RunId`、`-LeaseOwner`、`-WorkspaceMin`、`-WorkspaceMax` 和 `-EnableGripper` 等本地产物，并使用相同的 `-Scale 1.0`、`-MaxLinearSpeed 0.05`、`-LinearGain 1.5`、`-TranslationAxisGain ([double[]]@(-2.0,1.0,1.0))` 与 `-GripperBinaryThreshold 0.9` 设置。不要在该已观察预设中额外加入 `-InvertTranslation`。
 
 ## Operator semantics / 操作语义
 

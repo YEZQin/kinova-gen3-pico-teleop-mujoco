@@ -30,4 +30,4 @@ Stop after T0. Present the observation to the onsite operator, recheck all physi
 
 Use only a trusted private IPv4 route to TCP port 10000. Never put a credential on a command line or in a profile. A Stop return is not proof of physical stationarity. Keep a physical E-stop/Web Stop and a second observer. After Grip release, stale input, any source change, watchdog, workspace, RPC, or unexpected motion, use the onsite safety process; do not relaunch a latched fault.
 
-Evidence terminology and the explicit limitation for the final expanded/asymmetric profile are in [evidence levels](evidence-levels.md). That profile is offline verified and not hardware-validated.
+Evidence terminology and the explicit limitation for the tuned advanced gripper profile are in [evidence levels](evidence-levels.md). That profile has one installation-local onsite observation at core control commit `b40eb57`, remains offline verified in this branch, and is not hardware-validated as a universal safety claim.
