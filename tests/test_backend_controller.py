@@ -598,7 +598,73 @@ def test_gripper_forwards_trigger_only_after_active_grip() -> None:
         "hold",
         "step",
     ]
-    assert backend.gripper_values == [0.6]
+    assert backend.gripper_values == pytest.approx([0.598])
+
+
+@pytest.mark.parametrize(
+    ("trigger_min", "trigger_max", "triggers", "expected"),
+    (
+        (0.0, 1.0, (0.0, 0.5, 1.0), (0.01, 0.50, 0.99)),
+        (0.2, 0.6, (0.2, 0.4, 0.6), (0.01, 0.50, 0.99)),
+        (0.2, 0.6, (0.0, 0.4, 1.0), (0.01, 0.50, 0.99)),
+    ),
+)
+def test_gripper_maps_configured_trigger_range_to_one_through_ninety_nine_percent(
+    trigger_min: float,
+    trigger_max: float,
+    triggers: tuple[float, float, float],
+    expected: tuple[float, float, float],
+) -> None:
+    samples = [
+        replace(sample([0.0, 0.0, 0.0], 0.0, 1, 1.00), trigger=0.0),
+        replace(sample([0.0, 0.0, 0.0], 1.0, 2, 1.01), trigger=triggers[0]),
+    ]
+    samples.extend(
+        replace(
+            sample([0.01 * index, 0.0, 0.0], 1.0, index + 2, 1.01 + 0.01 * index),
+            trigger=trigger,
+        )
+        for index, trigger in enumerate(triggers, start=1)
+    )
+    backend = RecordingBackendWithGripper()
+    controller = TeleopController(
+        TeleopConfig(
+            realtime=False,
+            gripper=True,
+            gripper_trigger_min=trigger_min,
+            gripper_trigger_max=trigger_max,
+        ),
+        ScriptedInput(samples),
+        backend,
+    )
+
+    for _ in samples:
+        controller.step_once()
+
+    assert backend.gripper_values == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("trigger_min", "trigger_max"),
+    (
+        (float("nan"), 1.0),
+        (0.0, float("inf")),
+        (-0.01, 1.0),
+        (0.0, 1.01),
+        (0.5, 0.5),
+        (0.8, 0.2),
+    ),
+)
+def test_gripper_rejects_invalid_trigger_calibration(
+    trigger_min: float,
+    trigger_max: float,
+) -> None:
+    with pytest.raises(ValueError, match="gripper trigger range"):
+        TeleopConfig(
+            gripper=True,
+            gripper_trigger_min=trigger_min,
+            gripper_trigger_max=trigger_max,
+        )
 
 
 def test_gripper_enabled_requires_backend_support() -> None:
@@ -644,7 +710,7 @@ def test_release_stale_and_reclutch_do_not_send_automatic_open() -> None:
     )
     while controller.steps < len(samples):
         controller.step_once()
-    assert controller.backend.gripper_values == [0.7, 0.4]
+    assert controller.backend.gripper_values == pytest.approx([0.696, 0.402])
 
 
 def test_nonfinite_or_unavailable_trigger_stops_before_pose_or_gripper_write() -> None:
@@ -685,7 +751,7 @@ def test_gripper_rejection_holds_and_stops_before_backend_step() -> None:
     with pytest.raises(TeleopSafetyError, match="gripper command"):
         controller.step_once()
 
-    assert backend.gripper_values == [0.3]
+    assert backend.gripper_values == pytest.approx([0.304])
     assert backend.events == [
         "step",
         "begin_control",

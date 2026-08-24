@@ -12,6 +12,8 @@ param(
     [Parameter(Mandatory=$true)][switch]$EnableGripper,
     [Parameter(Mandatory=$true)][string]$RunId,
     [Parameter(Mandatory=$true)][string]$LeaseOwner,
+    [double]$GripperTriggerMin = 0.0,
+    [double]$GripperTriggerMax = 1.0,
     [string]$PythonPath
 )
 
@@ -81,6 +83,20 @@ function Assert-WorkspaceBounds([double[]]$Minimum, [double[]]$Maximum) {
     }
 }
 
+function Assert-GripperTriggerRange([double]$Minimum, [double]$Maximum) {
+    if (
+        [double]::IsNaN($Minimum) -or
+        [double]::IsInfinity($Minimum) -or
+        [double]::IsNaN($Maximum) -or
+        [double]::IsInfinity($Maximum) -or
+        $Minimum -lt 0.0 -or
+        $Maximum -gt 1.0 -or
+        $Minimum -ge $Maximum
+    ) {
+        throw 'GripperTriggerMin and GripperTriggerMax must be finite, ordered, and within [0, 1]'
+    }
+}
+
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $startupHookGate = Resolve-RequiredFile (Join-Path $PSScriptRoot 'assert_no_untracked_python_startup_hooks.ps1') 'PythonStartupHookGate'
 & $startupHookGate -ProjectRoot $projectRoot
@@ -98,6 +114,7 @@ if (-not $EnableGripper) { throw 'EnableGripper is required for advanced PICO te
 Assert-PositiveFinite $Scale 'Scale'
 Assert-PositiveFinite $MaxLinearSpeed 'MaxLinearSpeed'
 Assert-WorkspaceBounds $WorkspaceMin $WorkspaceMax
+Assert-GripperTriggerRange $GripperTriggerMin $GripperTriggerMax
 
 $pythonCandidate = $PythonPath
 if ([string]::IsNullOrWhiteSpace($pythonCandidate)) {
@@ -131,6 +148,8 @@ $motionArgs = @(
     '--responsive-translation-profile',
     '--recover-stale-input',
     '--gripper',
+    '--gripper-trigger-min', $GripperTriggerMin.ToString('R', $invariantCulture),
+    '--gripper-trigger-max', $GripperTriggerMax.ToString('R', $invariantCulture),
     '--control-hz', $controlHz.ToString('R', $invariantCulture),
     '--stale-timeout', $staleTimeout.ToString('R', $invariantCulture),
     '--scale', $Scale.ToString('R', $invariantCulture),

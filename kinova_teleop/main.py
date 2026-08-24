@@ -182,6 +182,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--gripper-trigger-min",
+        type=float,
+        default=0.0,
+        help="PICO Trigger value mapped to 1 percent gripper position",
+    )
+    parser.add_argument(
+        "--gripper-trigger-max",
+        type=float,
+        default=1.0,
+        help="PICO Trigger value mapped to 99 percent gripper position",
+    )
+    parser.add_argument(
         "--control-hz",
         type=float,
         default=None,
@@ -490,6 +502,14 @@ def check_input(
 
 def _validate_args(args: argparse.Namespace) -> str | None:
     advanced = _is_advanced_pico_teleop(args)
+    if (
+        not math.isfinite(args.gripper_trigger_min)
+        or not math.isfinite(args.gripper_trigger_max)
+        or args.gripper_trigger_min < 0.0
+        or args.gripper_trigger_max > 1.0
+        or args.gripper_trigger_min >= args.gripper_trigger_max
+    ):
+        return "gripper trigger range must be finite, ordered, and within [0, 1]"
     if args.gripper and not advanced:
         return "--gripper requires --advanced-pico-teleop"
     if advanced and args.evidence_jsonl is None:
@@ -1228,6 +1248,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         3 if args.recover_stale_input else 1
                     ),
                     gripper=args.gripper,
+                    gripper_trigger_min=args.gripper_trigger_min,
+                    gripper_trigger_max=args.gripper_trigger_max,
                 ),
                 source,
                 backend,

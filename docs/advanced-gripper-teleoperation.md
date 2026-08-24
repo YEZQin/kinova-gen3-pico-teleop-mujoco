@@ -55,6 +55,8 @@ $teleopProfile = Get-Content -LiteralPath (Read-Host 'Path to teleop-profile.jso
   -WorkspaceMax $workspaceMax `
   -Scale 1.0 `
   -MaxLinearSpeed 0.05 `
+  -GripperTriggerMin 0.0 `
+  -GripperTriggerMax 1.0 `
   -EnableGripper `
   -PythonPath .\.venv-kortex\Scripts\python.exe
 ```
@@ -67,7 +69,11 @@ Before a password prompt, the launcher validates the artifact-bound package and 
 
 Grip is the arm-motion clutch. Grip activation establishes an anchor frame only: it sends neither an arm motion command nor a gripper command, so it cannot create an arm jump or change the gripper. Proportional Trigger commands begin only on subsequent active samples. Then hold Grip to follow the controller. While Grip is held, the left index Trigger commands the Gen3 gripper proportionally: Trigger `0.0` requests open and Trigger `1.0` requests closed. Grip release holds the last/current gripper command and stops arm following; it is not permission to ignore any Stop or fault.
 
+`GripperTriggerMin` and `GripperTriggerMax` calibrate the observed PICO Trigger travel. Values at or below the configured minimum map to gripper position `0.01`; values at or above the configured maximum map to `0.99`; values between them map linearly. Kortex receives normalized positions, not raw percentages.
+
 Grip 是机械臂运动离合。激活 Grip 只建立锚点帧：它既不发送机械臂运动命令，也不发送夹爪命令，因此不会造成机械臂跳变或改变夹爪。比例 Trigger 命令只从后续的有效活动采样开始。随后持续按住 Grip 才跟随控制器。按住 Grip 时，左手食指 Trigger 按比例命令 Gen3 夹爪：Trigger `0.0` 请求张开，Trigger `1.0` 请求闭合。松开 Grip 会停止机械臂跟随并保持最后/当前夹爪命令；这不允许忽略任何 Stop 或故障。
+
+`GripperTriggerMin` 和 `GripperTriggerMax` 用于标定 PICO Trigger 的实测行程。小于等于最小值时映射到夹爪位置 `0.01`，大于等于最大值时映射到 `0.99`，中间线性插值。Kortex 接收归一化位置，而不是裸百分数。
 
 For workspace handling, each requested Cartesian target is projected into the measured XYZ box by a coordinate-wise clamp: a coordinate below its minimum becomes that minimum, a coordinate above its maximum becomes that maximum, and a coordinate already inside is unchanged. The arm follows this projected target rather than treating the software boundary as an automatic exit. This projection neither enlarges the physically inspected workspace nor overrides Kinova limits, the physical E-stop, Web Stop, or the operator's responsibility to stop.
 

@@ -9,6 +9,7 @@ import time
 from collections.abc import Mapping
 
 from .backend import BackendResult, EndEffectorTargetBackend
+from .gripper_mapping import GripperTriggerMapping
 from .pose_mapping import (
     ClutchState,
     InputFault,
@@ -33,12 +34,18 @@ class TeleopConfig:
     recovery_release_samples: int = 1
     translation_rotation: tuple[tuple[float, float, float], ...] | None = None
     gripper: bool = False
+    gripper_trigger_min: float = 0.0
+    gripper_trigger_max: float = 1.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "translation_rotation",
             normalize_translation_rotation(self.translation_rotation),
+        )
+        GripperTriggerMapping(
+            self.gripper_trigger_min,
+            self.gripper_trigger_max,
         )
 
 
@@ -82,6 +89,10 @@ class TeleopController:
         self.source = source
         self.backend = backend
         self._command_gripper = getattr(backend, "command_gripper", None)
+        self._gripper_mapping = GripperTriggerMapping(
+            config.gripper_trigger_min,
+            config.gripper_trigger_max,
+        )
         self.event_sink = event_sink
         self.mapper = RelativePoseMapper(
             MappingConfig(
@@ -195,7 +206,10 @@ class TeleopController:
                     self.mapper.rebase_active(sample, result.active_rebase_target)
                 if self.config.gripper and sample.valid:
                     assert callable(self._command_gripper)
-                    if not self._command_gripper(float(sample.trigger)):
+                    gripper_position = self._gripper_mapping.map(
+                        float(sample.trigger)
+                    )
+                    if not self._command_gripper(gripper_position):
                         try:
                             self.backend.hold()
                         except BaseException as error:

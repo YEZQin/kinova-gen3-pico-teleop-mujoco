@@ -1561,7 +1561,10 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
         raising=False,
     )
 
-    assert main(_advanced_pico_motion_argv()) == 0
+    assert main(
+        _advanced_pico_motion_argv()
+        + ["--gripper-trigger-min", "0.2", "--gripper-trigger-max", "0.7"]
+    ) == 0
 
     backend = created["backend"]
     assert backend.kwargs["max_linear_speed"] == 0.05
@@ -1572,6 +1575,34 @@ def test_advanced_pico_teleop_accepts_gripper_scale_speed_and_large_workspace(
     controller_config = created["controller_config"]
     assert controller_config.translation_scale == 1.0
     assert controller_config.gripper is True
+    assert controller_config.gripper_trigger_min == 0.2
+    assert controller_config.gripper_trigger_max == 0.7
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_error"),
+    (
+        (["--gripper-trigger-min", "nan"], "gripper trigger range"),
+        (["--gripper-trigger-max", "inf"], "gripper trigger range"),
+        (["--gripper-trigger-min", "-0.01"], "gripper trigger range"),
+        (["--gripper-trigger-max", "1.01"], "gripper trigger range"),
+        (
+            ["--gripper-trigger-min", "0.7", "--gripper-trigger-max", "0.2"],
+            "gripper trigger range",
+        ),
+    ),
+)
+def test_advanced_gripper_trigger_range_rejects_before_hardware_side_effects(
+    monkeypatch,
+    capsys,
+    arguments: list[str],
+    expected_error: str,
+) -> None:
+    calls = _forbid_advanced_hardware_side_effects(monkeypatch)
+
+    assert main(_advanced_pico_motion_argv() + arguments) == 2
+    assert calls == []
+    assert expected_error in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
