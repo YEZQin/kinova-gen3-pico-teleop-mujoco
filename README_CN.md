@@ -159,3 +159,54 @@ git diff --check
 ```
 
 简要顺序：clone → bootstrap wheel → 本地构建/安装 APK → 打开 APK → PICO gate → MuJoCo finite → calibration → read-only T0 → 本地测量/package → offline validation → 九项实体检查 → guarded launcher → release/press Grip → 精确 `MOVE` → Stop 并调查所有故障。反复复现调优夹爪遥操时，使用 `scripts/start_gen3_pico_tuned_session.ps1` 并传入新鲜本地边界和校准。
+
+## 本机重复启动（同一已验证安装）
+
+本节用于已经完成一次安装、PICO 操作者轴校准和现场扫掠空间检查的电脑。核心控制参数在 `b40eb57` 对应的一套 Gen3 L53 / PICO 4 Ultra 安装上完成过现场观察；当前重复启动脚本经过离线自动化验证。换机器人、末端工具、负载、固件、校准或工作区时，必须重新测量并输入对应值。
+
+首次在新电脑使用时先按前文完成 bootstrap、本地构建/安装 PICO Bridge APK，并生成一次校准文件：
+
+```powershell
+.\scripts\capture_pico_operator_calibration.ps1 -OutputPath local-config\operator-axes.json
+```
+
+以后每次运行前，将机器人和 PICO 接入同一受信任网络，打开 PICO Bridge，唤醒左手柄并保持 Grip 松开。进入本仓库根目录后执行：
+
+```powershell
+git switch codex/public-gen3-pico-hardware-teleop
+git pull --ff-only
+
+$robotHost = Read-Host '当前 Gen3 的私有 IPv4 地址'
+
+[double[]]$workspaceMin = @(
+  [double](Read-Host '当前安装的绝对 X 最小值（m）'),
+  [double](Read-Host '当前安装的绝对 Y 最小值（m）'),
+  [double](Read-Host '当前安装的绝对 Z 最小值（m）')
+)
+[double[]]$workspaceMax = @(
+  [double](Read-Host '当前安装的绝对 X 最大值（m）'),
+  [double](Read-Host '当前安装的绝对 Y 最大值（m）'),
+  [double](Read-Host '当前安装的绝对 Z 最大值（m）')
+)
+
+& .\scripts\start_gen3_pico_tuned_session.ps1 `
+  -RobotHost $robotHost `
+  -RobotUser admin `
+  -OperatorCalibration .\local-config\operator-axes.json `
+  -WorkspaceMin $workspaceMin `
+  -WorkspaceMax $workspaceMax `
+  -ConfirmPhysicalChecks
+```
+
+该入口默认使用本次调优参数：`Scale 1.0`、`MaxLinearSpeed 0.05`、`LinearGain 1.5`、`TranslationAxisGain @(-2,1,1)`，以及夹爪二值阈值 `0.9`。如需调整，可在同一命令中显式加入对应参数。
+
+终端操作顺序：
+
+1. 在 `Kinova password for read-only T0 only` 提示处输入本机 Kortex 密码。
+2. T0 和 PICO 输入检查期间持续保持 Grip 松开。
+3. 在运动子进程的密码提示处再次输入 Kortex 密码。
+4. 输入精确的 `MOVE` 后，才允许按下 Grip。
+5. 按住 Grip 时移动左手柄即可控制末端；Trigger `> 0.9` 命令夹爪闭合到 `0.99`，Trigger `<= 0.9` 命令夹爪张开到 `0.01`。
+6. 松开 Grip 会停止机械臂跟随并保持当前夹爪命令；使用 `Ctrl+C` 结束程序。
+
+脚本每次都会创建新的 `sessions\gen3-pico-tuned-...\local-config`，因此可以反复运行，不会覆盖旧的会话包或配置目录。

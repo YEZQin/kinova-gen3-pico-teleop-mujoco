@@ -353,3 +353,33 @@ def test_packaging_metadata_points_to_public_handoff() -> None:
     assert "guarded Kortex hardware teleoperation" in metadata
     for name in ('Repository', 'Documentation', 'Issues', 'Releases'):
         assert f'{name} =' in metadata
+
+
+def test_chinese_readme_ends_with_repeatable_local_run_instructions() -> None:
+    heading = "## 本机重复启动（同一已验证安装）"
+    for path in README_PATHS:
+        document = path.read_text(encoding="utf-8")
+        section = document[document.index(heading) :]
+
+        for required in (
+            "git pull --ff-only",
+            "$robotHost = Read-Host",
+            "$workspaceMin",
+            "$workspaceMax",
+            "start_gen3_pico_tuned_session.ps1",
+            "-RobotHost $robotHost",
+            "-OperatorCalibration .\\local-config\\operator-axes.json",
+            "-ConfirmPhysicalChecks",
+            "Scale 1.0",
+            "MaxLinearSpeed 0.05",
+            "LinearGain 1.5",
+            "TranslationAxisGain @(-2,1,1)",
+            "Trigger `> 0.9`",
+            "Trigger `<= 0.9`",
+            "sessions\\gen3-pico-tuned-",
+        ):
+            assert required in section, f"{path.name}: {required}"
+
+        assert document.rstrip().endswith(
+            "旧的会话包或配置目录。"
+        )
