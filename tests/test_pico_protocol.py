@@ -31,15 +31,55 @@ def frame(**overrides) -> PicoControllerFrame:
 
 
 def test_protocol_constants_and_exact_layout() -> None:
-    payload = encode_pico_packet(frame())
+    payload = encode_pico_packet(frame(trigger=0.25))
     assert PICO_DISCOVER == b"KINOVA_DISCOVER_V1"
     assert PICO_READY == b"KINOVA_READY_V1"
-    assert PICO_PACKET_SIZE == 56
-    assert len(payload) == 56
+    assert PICO_PACKET_SIZE == 60
+    assert len(payload) == 60
     assert payload[:8] == b"KINVPICO"
-    assert payload[8] == 1
+    assert payload[8] == 2
     assert struct.unpack_from("<I", payload, 12)[0] == 42
     assert struct.unpack_from("<Q", payload, 16)[0] == 1_234_567
+    assert struct.unpack_from("<f", payload, 52)[0] == pytest.approx(0.75)
+    assert struct.unpack_from("<f", payload, 56)[0] == pytest.approx(0.25)
+
+
+def test_decode_accepts_legacy_v1_packet_with_zero_trigger() -> None:
+    v2_payload = encode_pico_packet(frame())
+    v1_payload = (
+        v2_payload[:8] + b"\x01" + v2_payload[9:56]
+    )
+    assert len(v1_payload) == 56
+
+    decoded = decode_pico_packet(
+        v1_payload,
+        received_at=2.0,
+        source=("10.0.0.9", 999),
+    )
+
+    assert decoded.tracked
+    assert decoded.protocol_version == 1
+    assert decoded.grip == pytest.approx(0.75)
+    assert decoded.trigger == 0.0
+
+
+def test_decode_rejects_version_size_mismatch() -> None:
+    v2_payload = encode_pico_packet(frame())
+    v1_sized_with_v2_version = v2_payload[:56]
+    with pytest.raises(ValueError, match="version"):
+        decode_pico_packet(
+            v1_sized_with_v2_version,
+            received_at=1.0,
+            source=("127.0.0.1", 1),
+        )
+
+    v2_sized_with_v1_version = v2_payload[:8] + b"\x01" + v2_payload[9:]
+    with pytest.raises(ValueError, match="version"):
+        decode_pico_packet(
+            v2_sized_with_v1_version,
+            received_at=1.0,
+            source=("127.0.0.1", 1),
+        )
 
 
 def test_round_trip_preserves_controller_values_and_receive_metadata() -> None:
@@ -49,6 +89,7 @@ def test_round_trip_preserves_controller_values_and_receive_metadata() -> None:
         source=("10.0.0.3", 4567),
     )
     assert decoded.sequence == 42
+    assert decoded.protocol_version == 2
     assert decoded.tracked
     assert decoded.position == pytest.approx((0.1, 1.2, -0.3))
     assert decoded.quaternion_xyzw == pytest.approx((0.0, 0.0, 0.0, 1.0))
@@ -60,9 +101,9 @@ def test_round_trip_preserves_controller_values_and_receive_metadata() -> None:
 @pytest.mark.parametrize(
     ("mutator", "message"),
     [
-        (lambda data: data[:-1], "56 bytes"),
+        (lambda data: data[:-1], "60 bytes"),
         (lambda data: b"BADMAGIC" + data[8:], "magic"),
-        (lambda data: data[:8] + b"\x02" + data[9:], "version"),
+        (lambda data: data[:8] + b"\x03" + data[9:], "version"),
         (lambda data: data[:10] + b"\x01\x00" + data[12:], "reserved"),
         (lambda data: data[:9] + b"\x80" + data[10:], "flags"),
     ],
@@ -84,6 +125,9 @@ def test_decode_rejects_invalid_envelope(mutator, message: str) -> None:
         {"grip": math.inf},
         {"grip": -0.01},
         {"grip": 1.01},
+        {"trigger": math.inf},
+        {"trigger": -0.01},
+        {"trigger": 1.01},
     ],
 )
 def test_encode_rejects_invalid_numeric_values(overrides) -> None:
@@ -109,6 +153,7 @@ def test_untracked_frame_encodes_neutral_controller_payload() -> None:
     [
         (24, math.nan, "non-finite"),
         (52, 1.01, "grip"),
+        (56, 1.01, "trigger"),
         (36, 0.0, "quaternion"),
     ],
 )

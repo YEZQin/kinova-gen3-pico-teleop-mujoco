@@ -1,244 +1,212 @@
-# PICO 左手柄遥操作 Kinova Gen3（仅 MuJoCo）
+# PICO-to-Kinova Gen3 guarded teleoperation
 
-本项目在 **Windows 原生 Python** 中接收 PICO 左手柄位姿，通过局域网
-UDP 自动发现链路控制 MuJoCo 中的 Kinova Gen3 7DoF 模型。首次构建并安装
-PICO 应用、之后日常启动分别使用：
+[中文说明](README_CN.md) | [Evidence levels](docs/evidence-levels.md) | [PICO detail](docs/pico-udp-quickstart.md) | [Kortex detail](docs/kortex-hardware-quickstart.md) | [Advanced PICO gripper teleoperation](docs/advanced-gripper-teleoperation.md)
 
-```powershell
-$unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
-.\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
-.\scripts\start_pico_udp_teleop.ps1
-```
+This public walkthrough starts from clean Windows and ends at a deliberately guarded first motion workflow. It supports a **Kinova Gen3 L53, 7 DoF, firmware 2.8.0-5** with the **Kortex 2.8 / `kortex_api` 2.8.0.post5** stack, plus a PICO 4 or PICO 4 Ultra left controller. The default and recommended path is MuJoCo.
 
-> **安全边界：** 当前实现只控制
-> `kinova_gen3_mujoco/teleop_scene.xml` 仿真，不连接、初始化或命令任何
-> Kinova 实体机器人。仓库没有 Kortex 后端。
+> **Safety boundary.** This is not safety-rated, production-safe, unattended, or universally hardware-validated. Keep a reachable physical E-stop/Web Stop and a second observer for first motion. A returned Stop RPC is not proof of physical stationarity. The public first motion is translation-only: no vision control and no gripper writes. The tuned advanced gripper profile has installation-local hardware observation on one Gen3 L53 / PICO 4 Ultra setup, but it is not universal hardware validation.
 
-详细的首次配置、PICO 手动启动、健康检查和排障步骤见
-[PICO UDP 快速开始](docs/pico-udp-quickstart.md)。
+## What is connected
 
-## 推荐链路和操作语义
+`PICO left controller → Unity OpenXR Bridge → UDP 15031 discovery → Python admission/Grip clutch → MuJoCo (default) or explicitly gated Kortex Cartesian Twist`.
 
-```text
-PICO 左手柄
-  -> PICO Unity OpenXR bridge
-  -> UDP 15031 自动 DISCOVER/READY（不配置固定 Windows IP）
-  -> PicoUdpInput
-  -> Grip 安全离合与相对 6DoF 映射
-  -> EndEffectorTargetBackend
-  -> MuJoCoBackend
-  -> Kinova Gen3 MJCF 仿真
-```
+Grip is a clutch: release below `0.8`, then press above `0.9` to create a new anchor. In the public first-motion hardware mode, control is 40 Hz, stale timeout is at most `0.2 s`, angular cap is `2 deg/s`, and the selected linear cap must not exceed `0.02 m/s`. The separately documented tuned profile permits up to `0.05 m/s`. A stale, invalid, changed-source, watchdog, workspace, or RPC fault latches Stop; resolve it onsite before another run.
 
-- 只读取左手柄；Trigger、摇杆、A/B/X/Y 和夹爪均不使用。
-- 启动或链路恢复后必须先把 Grip 松到 `< 0.8`，再按到 `> 0.9` 才能运动。
-- 按下时捕获手柄和仿真末端当前位姿，因此激活瞬间不跳变。
-- 持续按住时映射完整相对 6DoF：平移默认缩放 `0.5`，相对旋转为 1:1。
-- 松开 Grip 后保持最后目标；重新摆放手柄、再按下可从新参考位姿继续。
-- 无效包、倒序/重复包、未跟踪或超过 `0.2 s` 的陈旧输入都会解除离合并
-  保持目标。恢复后不能沿用仍按住的 Grip，必须再次松开再按下。
+## Before you begin
 
-## 要求和固定版本
+Use native Windows 10/11 PowerShell 5.1+ (not WSL), Git, CPython **3.11.x**, and Android platform tools/ADB for USB installation. To build the required APK locally, install Unity `2022.3.62f3c1` with Android Build Support, SDK/NDK, and OpenJDK. The bridge project obtains PICO OpenXR SDK commit `3aa3e62bff41df618529eeb60ff02c29a515dafe` from its [official source](https://github.com/Pico-Developer/PICO-Unity-OpenXR-SDK/tree/3aa3e62bff41df618529eeb60ff02c29a515dafe); review its [official license](https://github.com/Pico-Developer/PICO-Unity-OpenXR-SDK/blob/3aa3e62bff41df618529eeb60ff02c29a515dafe/LICENSE.md) before use.
 
-- Windows 10/11、PowerShell 5.1 或更高版本。
-- Windows 原生 Python `>=3.10`；推荐仓库根目录的 `.venv`。
-- Unity `2022.3.62f3c1`，包含 Android Build Support、SDK/NDK 和 OpenJDK。
-- PICO Unity OpenXR SDK 固定在提交
-  `3aa3e62bff41df618529eeb60ff02c29a515dafe`（release 1.4.0）。
-- PICO OS `5.13.0` 或更高版本；已验证目标为 A9210、Android 14。
-- PICO 和 Windows 位于允许 UDP 广播/单播互通的同一 LAN/VLAN。
-- 可选 ADB 默认路径为 `C:\adb\adb.exe`；没有 ADB 也可在头显中手动启动。
+<!-- RELEASE-ASSET-STATE: published -->
 
-推荐路径不需要 WSL、XRoboToolkit PC Service 或
-`xrobotoolkit_sdk`。
+The Kortex wheel is the only binary declared in [release/public-release-assets.json](release/public-release-assets.json); bootstrap hash-checks that `v0.2.0-rc.1` asset before use. **APK intentionally not redistributed due to PICO SDK terms; build locally.** Neither the APK nor PICO SDK binaries are GitHub release assets. The PICO terms are proprietary, not an OSI-approved license.
 
-## Windows Python 环境
+Put the headset and PC on the same trusted LAN/VLAN. Do not set fixed PICO addresses. Permit only inbound UDP `15031` for Python on that trusted profile if Windows Firewall asks; do not add broad rules, expose the port to public networks, use `adb tcpip`, `adb connect`, or ADB reverse. The scripts never create a firewall rule.
 
-在仓库根目录运行：
+## Ordered zero-to-run commands
+
+Run these from a new PowerShell window. Replace only the clearly local variables with values measured on **your** robot. Do not copy another robot's workspace, calibration, report, lease, or evidence files.
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+# LIFECYCLE: clone
+git clone --branch codex/public-gen3-pico-hardware-teleop https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco.git kinova-gen3-pico-teleop
+Set-Location .\kinova-gen3-pico-teleop
 ```
 
-先验证 MuJoCo、Gen3 模型和控制安全性：
+If you cannot use Git, download the ZIP from that same publication branch and extract it to a new short local directory. Do not copy a development workspace. The named branch/tag and release are publication targets; verify they exist before relying on them.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m kinova_teleop.main `
-  --dry-run --headless --steps 5000
+# LIFECYCLE: bootstrap
+.\scripts\bootstrap_public_teleop.ps1
 ```
 
-成功的 dry-run 以此行结束：
-
-```text
-completed steps=5000 finite_state=true
-```
-
-## 构建、安装和日常启动
-
-首次构建/安装：
+Bootstrap validates the tracked release manifest, downloads and verifies only the Kortex wheel, creates `.venv-kortex`, installs the wheel before the project, pins protobuf 3.20.0, and performs import/offline checks. It never downloads or installs an APK, contacts a robot, retains credentials, or alters firewall rules.
 
 ```powershell
+# LIFECYCLE: apk-install
 $unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
 .\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
 ```
 
-脚本先运行 Unity EditMode 测试，再构建 ARM64/IL2CPP APK，复制到被 Git
-忽略的 `artifacts/kinova-pico-udp-bridge.apk`，最后只向已授权的 USB
-设备安装。若连接了多个已授权设备，请显式指定：
+This tracked script obtains the pinned SDK from official upstream through Unity, builds the APK locally, and installs only the newly built regular artifact. `-Install` requires exactly one authorized ADB device; omit it to build without touching a device. Never upload or redistribute the resulting APK unless you independently obtain redistribution permission.
+
+Open **Kinova PICO Bridge** on the headset. If ADB cannot start it, start it from the headset library; do not change network topology to make ADB work.
 
 ```powershell
-.\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install `
-  -DeviceSerial YOUR_PICO_SERIAL
+# LIFECYCLE: pico-gate
+.\.venv-kortex\Scripts\python.exe -m kinova_teleop.main --input pico-udp --check-input --samples 10 --check-timeout 15
 ```
 
-日常使用：
+Move the tracked left controller and fully release Grip during this gate. It must report fresh samples and a release. This gate opens no robot connection.
 
 ```powershell
-.\scripts\start_pico_udp_teleop.ps1
+# LIFECYCLE: mujoco-finite
+.\.venv-kortex\Scripts\python.exe -m kinova_teleop.main --dry-run --headless --steps 2000
 ```
 
-脚本在检测到唯一 PICO USB 设备时自动启动
-`com.yezqin.kinovapicobridge`，随后要求 20 个新鲜、tracked 的样本和至少
-一次 Grip `< 0.8`，门禁通过后才打开 MuJoCo Viewer。若 ADB 不可用，请在
-PICO 应用库中手动打开 **Kinova PICO Bridge**，再运行：
+Continue only when output contains `finite_state=true`. This deterministic check is simulation evidence, not hardware evidence.
 
 ```powershell
-.\scripts\start_pico_udp_teleop.ps1 -ManualPicoStart
+# LIFECYCLE: calibration
+.\scripts\capture_pico_operator_calibration.ps1 -OutputPath local-config\operator-axes.json
 ```
 
-关闭 Viewer 或按 `Ctrl+C` 退出。程序会释放 UDP 和 MuJoCo 资源。
-
-## 输入健康检查和比例调节
-
-只检查 100 个 PICO 数据样本而不加载 MuJoCo：
+Follow neutral/right/neutral/up/neutral/forward prompts with Grip released. Confirm the resulting local calibration maps right, up, and forward as instructed. It uses PICO UDP only and never connects to Kortex.
 
 ```powershell
-.\.venv\Scripts\python.exe -m kinova_teleop.main `
-  --input pico-udp --check-input --samples 100 --check-timeout 60
+# LIFECYCLE: t0
+$robotIp = Read-Host 'Private IPv4 address of this Gen3'
+$robotUser = Read-Host 'Kortex user name for this Gen3'
+.\scripts\prepare_gen3_hardware.ps1 -RobotIp $robotIp -RobotUser $robotUser -Output local-config\t0.json
 ```
 
-每行会显示 `left position`、`quat_xyzw`、`grip` 和递增的
-`timestamp_ns`。移动、旋转左手柄并按下/松开 Grip 时，对应数值应变化；
-四元数应保持有限且归一化。输入检查必须看到一次 Grip `< 0.8` 才会成功。
+The last command uses a masked password prompt for a read-only current-session T0 observation and then clears the child credential. `admin` may be a device's user name; it is never a password. Confirm L53/7 DoF, firmware `2.8.0-5`, ready/manual-control state, and finite TCP pose. Stop here if any observation differs.
 
-若仿真末端平移过大，降低比例：
+Measure and physically inspect the complete swept volume around **your measured T0 TCP pose**. Choose tight, inclusive absolute XYZ bounds that contain it; never reuse broad or somebody else's bounds.
 
 ```powershell
-.\scripts\start_pico_udp_teleop.ps1 -Scale 0.25
+# LIFECYCLE: local-package
+$workspaceMin = @(<your-measured-x-min-m>, <your-measured-y-min-m>, <your-measured-z-min-m>)
+$workspaceMax = @(<your-measured-x-max-m>, <your-measured-y-max-m>, <your-measured-z-max-m>)
+$owner = Read-Host 'Responsible operator identifier'
+.\.venv-kortex\Scripts\python.exe -m kinova_teleop.public_hardware_setup package --t0 local-config\t0.json --calibration local-config\operator-axes.json --workspace-min $workspaceMin --workspace-max $workspaceMax --linear-speed 0.005 --owner $owner --output-dir local-config --workspace-clear --physical-estop-reachable --teach-pendant-stop-reachable --second-observer-present --cable-slack-checked --device-fixture-checked --speed-level-checked --workspace-bounds-checked --load-tcp-checked
 ```
 
-`-Scale` 只缩放平移；姿态仍使用完整相对旋转。
-
-## 网络、跟踪和安全排障
-
-- 首次出现 Windows 防火墙提示时，只在受信任的专用网络允许 Python。
-  Windows 必须允许 Python 接收 UDP `15031`。
-- PICO 与 PC 必须在同一 LAN/VLAN；关闭会拦截局域网的 VPN，避免访客
-  Wi-Fi、AP/client isolation 或不同 VLAN。
-- 不配置 PICO/PC 固定 IP：PICO 广播 `KINOVA_DISCOVER_V1`，Windows 在
-  UDP `15031` 回应 `KINOVA_READY_V1`，随后锁定第一个有效数据源。
-- 超时通常表示应用未启动、左手柄休眠/未跟踪、防火墙阻止 UDP 或网络隔离。
-- 若 PICO 仍停留在旧版 controller bridge 或系统手柄/HandDialog，ADB
-  启动意图可能被当前 VR 应用拦截。退出旧应用并关闭系统对话框，在头显中
-  手动打开 **Kinova PICO Bridge**，然后重新运行
-  `.\scripts\start_pico_udp_teleop.ps1 -ManualPicoStart`。
-- `Grip release` 错误表示检查期间没有观察到 `< 0.8`；完全松开 Grip 后重试。
-- `stale=true`、`untracked`、非法/倒序数据或网络断开都会保持最后目标；
-  链路恢复后先松开再按下 Grip。
-- 支持的日常恢复流程是：结束当前 Windows 控制进程并退出头显应用；下次重新
-  打开两端后，从 Grip 完全松开的新会话开始。不要把“应用重启后继续保持
-  Grip 按下并无缝接管上一会话”作为操作流程。
-- UDP `15031` 已被占用时，退出占用进程后重试；程序不会切换随机端口。
-
-脚本不会自动创建永久防火墙规则，也不会使用 ADB Reverse、`adb tcpip`
-或 `adb connect`。
-
-## 模型和后端边界
-
-本项目固定使用 `kinova_gen3_mujoco/` 中的 Gen3 7DoF MJCF。
-旧工作区中的 `kinova/kinova.urdf` 实际描述 JACO2 J2S6S200，不得作为
-Gen3 模型使用。
-
-`EndEffectorTargetBackend` 把控制逻辑与 `MuJoCoBackend` 分离，但这不是
-实体机器人实现。未来若开发 RobotBackend/Kortex 后端，必须作为独立项目
-完成明确授权、工作空间及速度/加速度限制、急停、网络看门狗、模式切换和
-真机验证；当前仓库没有该能力。
-
-## XRoboToolkit 兼容入口（非推荐）
-
-`--input xrobotoolkit` 仅为旧环境保留。它依赖 WSL、XRoboToolkit PC
-Service 和 `xrobotoolkit_sdk`，不属于本项目推荐或验收路径。新部署请使用
-默认的 Windows 原生 `pico-udp` 链路。
-
-## 开发验证
+The package generator is offline: it accepts no password and opens no Kortex connection. It creates new local artifacts only after all nine physical-check flags are true. Do not overwrite a prior package; correct the condition and use a new local checkout/configuration when necessary.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m kinova_teleop.main `
-  --dry-run --headless --steps 5000
+# LIFECYCLE: offline-validation
+$profile = Get-Content local-config\teleop-profile.json -Raw | ConvertFrom-Json
+$profileRoot = Split-Path -Parent (Resolve-Path local-config\teleop-profile.json)
+& .\.venv-kortex\Scripts\python.exe -m kinova_teleop.main --backend kortex --enable-hardware --input pico-udp --robot-ip $profile.robot_ip --robot-user $profile.robot_user --workspace-min $profile.workspace_min_m --workspace-max $profile.workspace_max_m --max-linear-speed $profile.max_linear_speed_m_s --max-angular-speed-deg 2 --translation-only --expanded-translation-envelope --responsive-translation-profile --recover-stale-input --stale-timeout 0.2 --control-hz 40 --scale 0.8 --operator-calibration (Join-Path $profileRoot $profile.calibration) --motion-lease (Join-Path $profileRoot $profile.motion_lease) --preflight-report (Join-Path $profileRoot $profile.preflight_report) --run-id $profile.run_id --lease-owner $profile.lease_owner --validate-motion-package
+```
+
+This command validates the package offline: it reads no password and makes no PICO or Kortex connection. Do not proceed to the next section unless it succeeds.
+
+## Evidence matrix
+
+| Evidence level | Public claim | Boundary |
+| --- | --- | --- |
+| Source/code-level | Source review, unit/integration contracts, manifest validation, and guarded admission logic are automated evidence. | They do not prove a headset, robot connection, physical stopping distance, or workspace is safe. |
+| Simulator | The deterministic 2000-step MuJoCo finite check is simulator evidence. | It does not prove Kortex compatibility or physical arm behavior. |
+| Hardware observed | A fresh local PICO gate, read-only T0, and recorded onsite trial are hardware observed only for that installation/session. | They do not generalize to another robot, code revision, or future unattended run. |
+| Release final profile | The tuned advanced gripper profile has installation-local hardware observation at core control commit `b40eb57` and remains automatically checked/offline verified in this branch. | It remains not hardware-validated as a universal safety claim; every new robot, workspace, calibration, payload, or firmware needs fresh onsite evidence. |
+
+## Onsite first motion: nine checks, launch, clutch, Stop
+
+Before the launcher may proceed, physically verify all nine conditions represented by the package command: clear workspace; E-stop reachable; teach-pendant/Web Stop reachable; second observer; cable slack; device/fixture; speed level; inspected bounds; load/TCP. Recheck them after T0 and after any interruption. Position the arm safely, keep Grip released, and test only one translation axis at a time at millimetre scale.
+
+<!-- LIFECYCLE: physical-checklist -->
+
+### Operator checklist before launching
+
+<!-- LAUNCHER-OPERATOR-SEQUENCE: grip-release -> HARDWARE-READY -> masked-password -> MOVE -> grip-clutch -> stop -->
+
+1. Confirm all nine onsite checks above and keep the physical E-stop/Web Stop reachable.
+2. Keep PICO Grip fully released (`< 0.8`) while the launcher validates the package and PICO input.
+3. In the launcher, type `HARDWARE-READY` only after those checks still hold; enter the masked password when prompted.
+4. In the Python process, type exactly `MOVE`; only then press Grip (`> 0.9`) once to clutch and anchor.
+5. Stop by releasing Grip. For unexpected motion, use `Ctrl+C`, Web Stop, or the physical E-stop; do not relaunch a latched fault.
+
+```powershell
+# LIFECYCLE: hardware-launcher
+.\scripts\start_generated_gen3_teleop.ps1 -Profile local-config\teleop-profile.json -PythonPath .\.venv-kortex\Scripts\python.exe
+```
+
+<!-- LIFECYCLE: grip-release -->
+<!-- LIFECYCLE: move -->
+<!-- LIFECYCLE: stop-troubleshooting -->
+
+The launcher sequence above is the operational instruction, not a shell command to simulate. Press Grip above `0.9` once to anchor; that first press must not jump. Move one axis a few millimetres, observe direction and speed, then release Grip. Gripper writes and vision control are intentionally unavailable in this first-run path.
+
+For a stale-input, UDP, source-change, workspace, watchdog, or Stop failure: keep hands clear, use physical Stop when indicated, do not relaunch after a latched fault, inspect cables/network/fixture, and repeat from the applicable gate. For PICO failure check headset app foreground state, left-controller tracking, trusted LAN/VLAN, VPN/AP isolation, and the narrow UDP 15031 rule. For Kortex failure, do not change firmware or SDK ad hoc: confirm the required wheel/firmware pair and repeat a fresh read-only T0.
+
+## Advanced PICO teleop with binary Trigger gripper
+
+The public first-motion lifecycle above remains translation-only and has no gripper writes. Only after completing it may an operator use the separate [advanced PICO gripper guide](docs/advanced-gripper-teleoperation.md) and the preserved [hardware-observed b40 baseline](docs/hardware-observed-b40eb57.md). The tuned reusable launcher is `scripts/start_gen3_pico_tuned_session.ps1`: Grip clutches arm following, Trigger `>0.9` commands gripper closed, Trigger `<=0.9` commands open, and the observed translation preset is `Scale 1.0`, `MaxLinearSpeed 0.05`, `LinearGain 1.5`, `TranslationAxisGain @(-2,1,1)`. It still requires fresh calibration, read-only T0, local package artifacts, measured bounds for the current robot, physical E-stop/Web Stop, observer, and exact `MOVE`.
+
+## Evidence, licenses, and development
+
+Read [docs/evidence-levels.md](docs/evidence-levels.md) before interpreting any result. It distinguishes automated/offline, installation-local PICO, read-only T0, and onsite observed evidence. The tuned advanced profile is hardware-observed only for the recorded installation and remains not hardware-validated as a general safety claim.
+
+Project-owned source is MIT licensed ([LICENSE](LICENSE)). Kortex redistribution notices, the exact upstream identity, and PICO/Unity notice references are in [release/THIRD_PARTY_NOTICES.txt](release/THIRD_PARTY_NOTICES.txt). Do not redistribute SDKs, APKs, firmware, logs, private device data, or dependencies without checking their licenses.
+
+For development-only checks (no hardware launcher):
+
+```powershell
+.\.venv-kortex\Scripts\python.exe -m pytest -q
+.\.venv-kortex\Scripts\python.exe -m kinova_teleop.main --dry-run --headless --steps 2000
 git diff --check
 ```
 
-生成的 Unity `Library/`、`Temp/`、`Logs/`、`UserSettings/`、APK 和
-`artifacts/` 均不应提交。
-## 已有本地环境：直接启动并控制 Kinova Gen3
+Quick recap: clone → bootstrap the wheel → build/install the APK locally → open it → PICO gate → finite MuJoCo → calibrate → read-only T0 → measure/package locally → offline validate → nine physical checks → guarded launcher → release/press Grip → exact `MOVE` → Stop and investigate every fault. For repeated tuned gripper teleop, use `scripts/start_gen3_pico_tuned_session.ps1` with fresh local bounds and calibration.
 
-以下命令均从仓库根目录的 **Windows PowerShell** 运行。该项目仅在 Windows 原生 Python
-中工作；不需要 WSL、XRoboToolkit PC Service，也不使用固定 IP。PICO 和 PC 必须在允许 UDP
-广播/单播的同一 LAN/VLAN 上，Windows 仅需允许 Python 接收 UDP `15031`。
+## 本机重复启动（同一已验证安装）
 
-如当前环境尚未安装项目依赖，先执行一次：
+本节用于已经完成一次安装、PICO 操作者轴校准和现场扫掠空间检查的电脑。核心控制参数在 `b40eb57` 对应的一套 Gen3 L53 / PICO 4 Ultra 安装上完成过现场观察；当前重复启动脚本经过离线自动化验证。换机器人、末端工具、负载、固件、校准或工作区时，必须重新测量并输入对应值。
+
+首次在新电脑使用时先按前文完成 bootstrap、本地构建/安装 PICO Bridge APK，并生成一次校准文件：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\scripts\capture_pico_operator_calibration.ps1 -OutputPath local-config\operator-axes.json
 ```
 
-首次构建并安装 PICO APK 前，将 `$unityPath` 改为本机安装的 **Unity 2022.3.62f3c1**
-`Unity.exe` 路径；连接并授权唯一的 PICO USB 设备后执行：
+以后每次运行前，将机器人和 PICO 接入同一受信任网络，打开 PICO Bridge，唤醒左手柄并保持 Grip 松开。进入本仓库根目录后执行：
 
 ```powershell
-$unityPath = 'C:\Program Files\Unity\Hub\Editor\2022.3.62f3c1\Editor\Unity.exe'
-.\scripts\build_pico_udp_bridge.ps1 -UnityPath $unityPath -Install
+git switch codex/public-gen3-pico-hardware-teleop
+git pull --ff-only
+
+$robotHost = Read-Host '当前 Gen3 的私有 IPv4 地址'
+
+[double[]]$workspaceMin = @(
+  [double](Read-Host '当前安装的绝对 X 最小值（m）'),
+  [double](Read-Host '当前安装的绝对 Y 最小值（m）'),
+  [double](Read-Host '当前安装的绝对 Z 最小值（m）')
+)
+[double[]]$workspaceMax = @(
+  [double](Read-Host '当前安装的绝对 X 最大值（m）'),
+  [double](Read-Host '当前安装的绝对 Y 最大值（m）'),
+  [double](Read-Host '当前安装的绝对 Z 最大值（m）')
+)
+
+& .\scripts\start_gen3_pico_tuned_session.ps1 `
+  -RobotHost $robotHost `
+  -RobotUser admin `
+  -OperatorCalibration .\local-config\operator-axes.json `
+  -WorkspaceMin $workspaceMin `
+  -WorkspaceMax $workspaceMax `
+  -ConfirmPhysicalChecks
 ```
 
-日常使用时，左手柄唤醒并处于 tracked 状态后，先**完全松开左手 Grip**，再启动：
+该入口默认使用本次调优参数：`Scale 1.0`、`MaxLinearSpeed 0.05`、`LinearGain 1.5`、`TranslationAxisGain @(-2,1,1)`，以及夹爪二值阈值 `0.9`。如需调整，可在同一命令中显式加入对应参数。
 
-```powershell
-.\scripts\start_pico_udp_teleop.ps1
-```
+终端操作顺序：
 
-脚本会在 ADB 可用且只发现一个已授权 PICO USB 设备时自动启动 `Kinova PICO Bridge`，随后进行
-UDP 输入预检，确认至少一次 Grip `< 0.8` 后才打开 MuJoCo Viewer。若没有 ADB、自动启动被 VR
-前台应用拦截，或你已在头显中手动打开应用，请使用手动回退：
+1. 在 `Kinova password for read-only T0 only` 提示处输入本机 Kortex 密码。
+2. T0 和 PICO 输入检查期间持续保持 Grip 松开。
+3. 在运动子进程的密码提示处再次输入 Kortex 密码。
+4. 输入精确的 `MOVE` 后，才允许按下 Grip。
+5. 按住 Grip 时移动左手柄即可控制末端；Trigger `> 0.9` 命令夹爪闭合到 `0.99`，Trigger `<= 0.9` 命令夹爪张开到 `0.01`。
+6. 松开 Grip 会停止机械臂跟随并保持当前夹爪命令；使用 `Ctrl+C` 结束程序。
 
-```powershell
-.\scripts\start_pico_udp_teleop.ps1 -ManualPicoStart
-```
-
-只检查输入而不加载 MuJoCo：
-
-```powershell
-.\.venv\Scripts\python.exe -m kinova_teleop.main `
-  --input pico-udp --check-input --samples 100 --check-timeout 60
-```
-
-平移幅度过大时调小比例（姿态仍为完整的相对 6DoF 旋转）：
-
-```powershell
-.\scripts\start_pico_udp_teleop.ps1 -Scale 0.25
-```
-
-控制期间始终使用**左手 Grip**：启动、断链或应用重启后必须先释放到 `< 0.8`，再按下到 `> 0.9`；
-不能保持按住 Grip 跨会话接管。关闭 MuJoCo Viewer 或按 `Ctrl+C` 即可停止，程序会释放 UDP 和
-MuJoCo 资源。
-
-即使日常口头称其为“机械臂 URDF”，本控制实现实际加载的是
-`kinova_gen3_mujoco/teleop_scene.xml`：其中为 MuJoCo 生成/整理的 Kinova Gen3 7DoF **MJCF**
-模型。它不是旧目录 `kinova/kinova.urdf` 所描述的 JACO2 J2S6S200，后者不得作为 Gen3 使用。
-本仓库仅控制该 MuJoCo 仿真，绝不连接、初始化或命令任何实体 Kinova 机器人。
+脚本每次都会创建新的 `sessions\gen3-pico-tuned-...\local-config`，因此可以反复运行，不会覆盖旧的会话包或配置目录。

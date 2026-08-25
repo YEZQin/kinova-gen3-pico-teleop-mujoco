@@ -4,15 +4,57 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from importlib.machinery import PathFinder
+import json
 import math
+import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import time
+from typing import Any
 
-from .backend import MuJoCoBackend
 from .pico_udp_input import PicoUdpInput
+from .evidence_log import EvidenceLogger, logger_event_sink
+from .fixed_trajectory import FixedTrajectoryRunner, load_trajectory
+from .hardware_profile import (
+    ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS,
+    ADVANCED_PICO_TELEOP_MAX_SCALE,
+    CALIBRATED_RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS,
+    CALIBRATED_RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
+    EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
+    FIRST_HARDWARE_PROFILE,
+    MAX_TRANSLATION_ONLY_SCALE,
+    RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS,
+    RESPONSIVE_TRANSLATION_MAX_SCALE,
+    RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
+    validate_kortex_runtime,
+    validate_private_robot_ipv4,
+    validate_workspace_span,
+)
+from .hardware_admission import (
+    confirm_move,
+    verify_released_now,
+    wait_for_fresh_released_input,
+)
+from .motion_lease import validate_motion_lease
+from .operator_calibration import load_operator_axis_calibration
+from .preflight import (
+    PreflightContext,
+    load_passing_preflight_report,
+    read_kortex_tool_position,
+    require_live_kortex_ready,
+    run_kortex_readonly_preflight,
+)
 from .teleop_controller import StepDiagnostics, TeleopConfig, TeleopController
-from .xr_input import DryRunXrInput, SdkXrInput, XrInputSource
+from .workspace import AnchorEnvelope, WorkspaceLimits
+from .xr_input import (
+    ContinuousInputBuffer,
+    DryRunXrInput,
+    SdkXrInput,
+    XrInputSource,
+)
 
 
 DEFAULT_MODEL = (
@@ -21,11 +63,57 @@ DEFAULT_MODEL = (
     / "teleop_scene.xml"
 )
 
+DEFAULT_MUJOCO_CONTROL_HZ = 100.0
+DEFAULT_KORTEX_ROBOT_IP = "192.168.1.10"
+DEFAULT_KORTEX_ROBOT_USER = "admin"
+DEFAULT_MUJOCO_TRANSLATION_SCALE = 0.5
+DEFAULT_MUJOCO_STALE_TIMEOUT = 0.2
+DEFAULT_MOTION_RUN_ID = "gen3-first-hardware"
+DEFAULT_MOTION_OWNER = "kinova-teleop"
+_FULL_GIT_REVISION = re.compile(r"[0-9a-f]{40}")
+_PYTHON_STARTUP_HOOKS = ("sitecustomize", "usercustomize")
+
+
+class _BackendDefaultsParser(argparse.ArgumentParser):
+    """Resolve legacy MuJoCo presentation defaults after backend selection."""
+
+    def parse_known_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> tuple[argparse.Namespace, list[str]]:
+        parsed, extras = super().parse_known_args(args, namespace)
+        if parsed.backend == "mujoco" and parsed.scale is None:
+            parsed = argparse.Namespace(
+                **(
+                    vars(parsed)
+                    | {"scale": DEFAULT_MUJOCO_TRANSLATION_SCALE}
+                ),
+            )
+        return parsed, extras
+
+
+def _create_kortex_connection(config: Any, *, read_only: bool = False) -> Any:
+    """Construct the optional Kortex transport after the hardware gate passes."""
+
+    from .kortex_transport import KortexConnection
+
+    return KortexConnection(config).connect(send_stop_on_failure=not read_only)
+
+
+def _create_kortex_backend(connection: Any, **kwargs: Any) -> Any:
+    """Construct the optional Kortex backend after the hardware gate passes."""
+
+    from .kortex_backend import KortexBackend
+
+    return KortexBackend(connection, **kwargs)
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _BackendDefaultsParser(
         description=(
-            "Use the PICO left controller to command a Kinova Gen3 arm in MuJoCo."
+            "Use the PICO left controller to command a Kinova Gen3 arm in "
+            "MuJoCo or, with explicit hardware gating, over Kortex."
         ),
     )
     parser.add_argument(
@@ -43,20 +131,104 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scale",
         type=float,
-        default=0.5,
-        help="controller-to-robot translation scale (default: 0.5)",
+        default=None,
+        help="controller-to-robot translation scale (backend-specific default)",
+    )
+    parser.add_argument(
+        "--translation-only",
+        action="store_true",
+        help="map controller translation while holding the anchored tool orientation",
+    )
+    parser.add_argument(
+        "--expanded-translation-envelope",
+        action="store_true",
+        help=(
+            "permit a 50 mm per-axis Grip anchor envelope only for explicit "
+            "Kortex translation-only hardware teleoperation"
+        ),
+    )
+    parser.add_argument(
+        "--responsive-translation-profile",
+        action="store_true",
+        help=(
+            "permit scale 0.8 and 0.01 m/s only for the explicit expanded "
+            "Kortex translation-only hardware profile"
+        ),
+    )
+    parser.add_argument(
+        "--invert-translation",
+        action="store_true",
+        help="reverse all three relative translation axes in the responsive profile",
+    )
+    parser.add_argument(
+        "--operator-calibration",
+        type=Path,
+        help="validated PICO right/up/forward calibration for responsive translation",
+    )
+    parser.add_argument(
+        "--recover-stale-input",
+        action="store_true",
+        help=(
+            "Stop on stale PICO input, then require stable released input and "
+            "a new Grip anchor instead of exiting"
+        ),
+    )
+    parser.add_argument(
+        "--advanced-pico-teleop",
+        action="store_true",
+        help=(
+            "enable parameterized PICO Kortex translation teleoperation with "
+            "workspace projection and required proportional gripper control"
+        ),
+    )
+    parser.add_argument(
+        "--gripper-trigger-min",
+        type=float,
+        default=0.0,
+        help="PICO Trigger value mapped to 1 percent gripper position",
+    )
+    parser.add_argument(
+        "--gripper-trigger-max",
+        type=float,
+        default=1.0,
+        help="PICO Trigger value mapped to 99 percent gripper position",
+    )
+    parser.add_argument(
+        "--gripper-binary-threshold",
+        type=float,
+        default=None,
+        help="advanced binary gripper threshold; above closes, otherwise opens",
+    )
+    parser.add_argument(
+        "--linear-gain",
+        type=float,
+        default=1.0,
+        help="advanced Kortex Cartesian position gain (maximum: 2.0)",
+    )
+    parser.add_argument(
+        "--translation-axis-gain",
+        nargs=3,
+        type=float,
+        default=(1.0, 1.0, 1.0),
+        metavar=("X", "Y", "Z"),
+        help="advanced calibrated base-axis target gains (maximum: 2 per axis)",
     )
     parser.add_argument(
         "--control-hz",
         type=float,
-        default=100.0,
-        help="teleoperation update rate (default: 100)",
+        default=None,
+        help=(
+            "teleoperation update rate "
+            f"(default: {DEFAULT_MUJOCO_CONTROL_HZ:g} for MuJoCo, "
+            f"{FIRST_HARDWARE_PROFILE.control_hz:g} for Kortex; "
+            f"Kortex maximum: {FIRST_HARDWARE_PROFILE.control_hz:g})"
+        ),
     )
     parser.add_argument(
         "--stale-timeout",
         type=float,
-        default=0.2,
-        help="seconds before unchanged XR timestamps release the clutch (default: 0.2)",
+        default=None,
+        help="seconds before unchanged XR timestamps release the clutch (backend-specific default)",
     )
     parser.add_argument(
         "--dry-run",
@@ -65,9 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--input",
-        choices=("pico-udp", "xrobotoolkit"),
+        choices=("pico-udp", "xrobotoolkit", "none"),
         default="pico-udp",
-        help="controller input source (default: pico-udp)",
+        help="controller input source (default: pico-udp; none for fixed trajectory)",
     )
     parser.add_argument(
         "--pico-host",
@@ -91,6 +263,26 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--check-kortex",
+        action="store_true",
+        help="run read-only Kortex state/feedback preflight and exit",
+    )
+    parser.add_argument(
+        "--preflight-json",
+        type=Path,
+        help="write the read-only preflight report to this JSON path",
+    )
+    parser.add_argument(
+        "--preflight-report",
+        type=Path,
+        help="supervisor-reviewed passing preflight JSON required for Kortex motion",
+    )
+    parser.add_argument(
+        "--validate-motion-package",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--check-timeout",
         type=float,
         default=15.0,
@@ -109,22 +301,163 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--samples",
         type=int,
-        help="stop --check-xr after this many samples",
+        help="stop --check-input after this many samples",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("mujoco", "kortex"),
+        default="mujoco",
+        help="teleoperation backend (default: mujoco)",
+    )
+    parser.add_argument(
+        "--enable-hardware",
+        action="store_true",
+        help="allow an explicitly selected Kortex hardware backend",
+    )
+    parser.add_argument(
+        "--robot-ip",
+        default=DEFAULT_KORTEX_ROBOT_IP,
+        help=f"Kortex robot address (default: {DEFAULT_KORTEX_ROBOT_IP})",
+    )
+    parser.add_argument(
+        "--robot-user",
+        default=DEFAULT_KORTEX_ROBOT_USER,
+        help=f"Kortex username (default: {DEFAULT_KORTEX_ROBOT_USER})",
+    )
+    parser.add_argument(
+        "--max-linear-speed",
+        type=float,
+        default=None,
+        help=(
+            "Kortex linear-speed limit in m/s "
+            "(legacy maximum: 0.005; advanced maximum: 0.05)"
+        ),
+    )
+    parser.add_argument(
+        "--max-angular-speed-deg",
+        type=float,
+        default=None,
+        help="Kortex angular-speed limit in deg/s (maximum: 2)",
+    )
+    parser.add_argument(
+        "--gripper",
+        action="store_true",
+        help="enable proportional Trigger gripper control in advanced PICO Kortex teleop",
+    )
+    parser.add_argument("--workspace-min", nargs=3, type=float, metavar=("X", "Y", "Z"), help="explicit workspace minimum XYZ (m)")
+    parser.add_argument("--workspace-max", nargs=3, type=float, metavar=("X", "Y", "Z"), help="explicit workspace maximum XYZ (m)")
+    parser.add_argument("--motion-lease", type=Path, help="supervisor-issued motion lease JSON")
+    parser.add_argument("--run-id", default=DEFAULT_MOTION_RUN_ID, help="run id expected in the motion lease")
+    parser.add_argument("--lease-owner", default=DEFAULT_MOTION_OWNER, help="owner expected in the motion lease")
+    parser.add_argument("--fixed-trajectory", type=Path, help="validated relative trajectory JSON")
+    parser.add_argument("--evidence-jsonl", type=Path, help="append-only trial event JSONL path")
     return parser
+
+
+def resolve_control_hz(args: argparse.Namespace) -> float:
+    if args.control_hz is not None:
+        return float(args.control_hz)
+    if args.backend == "kortex":
+        return FIRST_HARDWARE_PROFILE.control_hz
+    return DEFAULT_MUJOCO_CONTROL_HZ
+
+
+def resolve_translation_scale(args: argparse.Namespace) -> float:
+    """Resolve the backend-specific controller-to-robot translation scale."""
+
+    if args.scale is not None:
+        return float(args.scale)
+    if _is_advanced_pico_teleop(args):
+        return ADVANCED_PICO_TELEOP_MAX_SCALE
+    if args.backend == "kortex":
+        return FIRST_HARDWARE_PROFILE.translation_scale
+    return DEFAULT_MUJOCO_TRANSLATION_SCALE
+
+
+def resolve_anchor_translation_axis(
+    args: argparse.Namespace,
+) -> tuple[float, float, float]:
+    if args.expanded_translation_envelope:
+        return EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M
+    return FIRST_HARDWARE_PROFILE.anchor_translation_axis_m
+
+
+def resolve_workspace_half_width_axis(
+    args: argparse.Namespace,
+) -> tuple[float, float, float]:
+    """Resolve absolute bounds independently from the per-Grip anchor."""
+
+    if _uses_calibrated_responsive_translation(args):
+        return CALIBRATED_RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M
+    if args.responsive_translation_profile:
+        return RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M
+    return resolve_anchor_translation_axis(args)
+
+
+def _uses_calibrated_responsive_translation(args: argparse.Namespace) -> bool:
+    """Whether responsive limits are backed by the strict operator calibration."""
+
+    return args.responsive_translation_profile and args.operator_calibration is not None
+
+
+def _is_advanced_pico_teleop(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "advanced_pico_teleop", False))
+
+
+def _resolve_stale_timeout(args: argparse.Namespace) -> float:
+    if args.stale_timeout is not None:
+        return float(args.stale_timeout)
+    if args.backend == "kortex":
+        return FIRST_HARDWARE_PROFILE.stale_timeout_s
+    return DEFAULT_MUJOCO_STALE_TIMEOUT
+
+
+def _resolve_max_linear_speed(args: argparse.Namespace) -> float:
+    if args.max_linear_speed is not None:
+        return float(args.max_linear_speed)
+    if _is_advanced_pico_teleop(args):
+        return ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS
+    return FIRST_HARDWARE_PROFILE.max_linear_speed_mps
+
+
+def _resolve_max_angular_speed_deg(args: argparse.Namespace) -> float:
+    if args.max_angular_speed_deg is not None:
+        return float(args.max_angular_speed_deg)
+    return FIRST_HARDWARE_PROFILE.max_angular_speed_deg_s
 
 
 def create_input(args: argparse.Namespace) -> XrInputSource:
     """Construct the selected input without requiring a fixed PICO address."""
+    control_hz = resolve_control_hz(args)
+    if args.input == "none":
+        raise RuntimeError("input source is disabled for fixed trajectory mode")
     if args.dry_run:
-        return DryRunXrInput(control_hz=args.control_hz)
+        return DryRunXrInput(control_hz=control_hz)
     if args.input == "pico-udp":
-        return PicoUdpInput(
+        return create_pico_udp_input(
             host=args.pico_host,
             port=args.pico_port,
-            stale_after=args.stale_timeout,
+            stale_timeout=_resolve_stale_timeout(args),
+            allow_stale_source_handoff=not args.recover_stale_input,
         )
     return SdkXrInput()
+
+
+def create_pico_udp_input(
+    *,
+    host: str = "0.0.0.0",
+    port: int = 15031,
+    stale_timeout: float = DEFAULT_MUJOCO_STALE_TIMEOUT,
+    allow_stale_source_handoff: bool = False,
+) -> XrInputSource:
+    """Create the continuously buffered PICO input used by non-robot tools."""
+
+    pico_kwargs: dict[str, object] = {}
+    if not allow_stale_source_handoff:
+        pico_kwargs["allow_stale_source_handoff"] = False
+    return ContinuousInputBuffer(
+        PicoUdpInput(host=host, port=port, stale_after=stale_timeout, **pico_kwargs)
+    )
 
 
 def check_input(
@@ -161,7 +494,8 @@ def check_input(
             )
             print(
                 f"left position=[{values}] quat_xyzw=[{quaternion}] "
-                f"grip={sample.grip:.3f} timestamp_ns={sample.timestamp_ns}",
+                f"grip={sample.grip:.3f} trigger={sample.trigger:.3f} "
+                f"timestamp_ns={sample.timestamp_ns}",
                 flush=True,
             )
             last_timestamp = sample.timestamp_ns
@@ -187,17 +521,120 @@ def check_input(
 
 
 def _validate_args(args: argparse.Namespace) -> str | None:
-    if not math.isfinite(args.control_hz) or args.control_hz <= 0.0:
+    advanced = _is_advanced_pico_teleop(args)
+    if args.gripper and not advanced:
+        return "--gripper requires --advanced-pico-teleop"
+    if args.gripper_binary_threshold is not None and (
+        not math.isfinite(args.gripper_binary_threshold)
+        or not 0.0 <= args.gripper_binary_threshold <= 1.0
+    ):
+        return "--gripper-binary-threshold must be finite and within [0, 1]"
+    if args.gripper_binary_threshold is not None and not advanced:
+        return "--gripper-binary-threshold requires --advanced-pico-teleop"
+    axis_gain = tuple(float(value) for value in args.translation_axis_gain)
+    if not all(
+        math.isfinite(value) and 0.0 < abs(value) <= 2.0
+        for value in axis_gain
+    ):
+        return (
+            "--translation-axis-gain values must be nonzero, finite, "
+            "and have absolute value at most 2"
+        )
+    if not advanced and axis_gain != (1.0, 1.0, 1.0):
+        return "--translation-axis-gain requires --advanced-pico-teleop"
+    if not math.isfinite(args.linear_gain) or not 0.0 < args.linear_gain <= 2.0:
+        return "--linear-gain must be finite and in (0, 2]"
+    if not advanced and args.linear_gain != 1.0:
+        return "--linear-gain requires --advanced-pico-teleop"
+    if (
+        not math.isfinite(args.gripper_trigger_min)
+        or not math.isfinite(args.gripper_trigger_max)
+        or args.gripper_trigger_min < 0.0
+        or args.gripper_trigger_max > 1.0
+        or args.gripper_trigger_min >= args.gripper_trigger_max
+    ):
+        return "gripper trigger range must be finite, ordered, and within [0, 1]"
+    if advanced and args.evidence_jsonl is None:
+        return "--evidence-jsonl is required for --advanced-pico-teleop"
+    advanced_mode_valid = (
+        args.backend == "kortex"
+        and args.enable_hardware
+        and args.input == "pico-udp"
+        and args.translation_only
+        and args.responsive_translation_profile
+        and args.recover_stale_input
+        and args.operator_calibration is not None
+        and args.gripper
+        and args.gripper_binary_threshold is not None
+        and not args.expanded_translation_envelope
+        and not args.check_kortex
+        and not args.check_input
+        and not args.check_xr
+        and args.fixed_trajectory is None
+    )
+    if advanced and not advanced_mode_valid:
+        return (
+            "advanced PICO profile requires Kortex hardware, PICO UDP, "
+            "translation-only, responsive profile, stale recovery, operator "
+            "calibration, and --gripper"
+        )
+    expanded_mode_valid = (
+        args.backend == "kortex"
+        and args.enable_hardware
+        and args.translation_only
+        and not args.check_kortex
+        and not args.check_input
+        and not args.check_xr
+        and args.input != "none"
+        and args.fixed_trajectory is None
+    )
+    if args.expanded_translation_envelope and not expanded_mode_valid:
+        return (
+            "--expanded-translation-envelope requires Kortex "
+            "translation-only hardware teleoperation"
+        )
+    if not advanced:
+        responsive_flags = (
+            args.responsive_translation_profile,
+            args.invert_translation,
+            args.recover_stale_input,
+            args.operator_calibration is not None,
+        )
+        responsive_mode_valid = (
+            expanded_mode_valid
+            and args.expanded_translation_envelope
+            and args.responsive_translation_profile
+            and args.recover_stale_input
+        )
+        if any(responsive_flags) and not responsive_mode_valid:
+            return (
+                "responsive translation profile requires "
+                "--responsive-translation-profile and --recover-stale-input "
+                "in expanded Kortex translation-only "
+                "hardware teleoperation"
+            )
+        if responsive_mode_valid and (
+            args.invert_translation == (args.operator_calibration is not None)
+        ):
+            return (
+                "responsive translation profile requires exactly one of "
+                "--invert-translation or --operator-calibration"
+            )
+    if args.control_hz is not None and (
+        not math.isfinite(args.control_hz) or args.control_hz <= 0.0
+    ):
         return "--control-hz must be positive"
-    if not math.isfinite(args.scale) or args.scale <= 0.0:
+    if not math.isfinite(resolve_translation_scale(args)) or resolve_translation_scale(args) <= 0.0:
         return "--scale must be positive"
-    if not math.isfinite(args.stale_timeout) or args.stale_timeout <= 0.0:
+    if not math.isfinite(_resolve_stale_timeout(args)) or _resolve_stale_timeout(args) <= 0.0:
         return "--stale-timeout must be positive"
     if not 1 <= args.pico_port <= 65535:
         return "--pico-port must be between 1 and 65535"
     if not math.isfinite(args.check_timeout) or args.check_timeout <= 0.0:
         return "--check-timeout must be positive"
-    if args.headless and (args.steps is None or args.steps <= 0):
+    if args.backend != "kortex" and args.headless and (
+        args.steps is None or args.steps <= 0
+    ):
         return "--headless requires a positive --steps"
     if args.steps is not None and args.steps <= 0:
         return "--steps must be positive"
@@ -207,6 +644,264 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         return "--check-input requires a positive --samples"
     if args.samples is not None and not (args.check_input or args.check_xr):
         return "--samples is only valid with --check-input"
+    if args.check_kortex and args.backend != "kortex":
+        return "--check-kortex requires --backend kortex"
+    if args.preflight_json is not None and not args.check_kortex:
+        return "--preflight-json requires --check-kortex"
+    if args.preflight_report is not None and args.check_kortex:
+        return "--preflight-report cannot be combined with --check-kortex"
+    if args.preflight_report is not None and args.backend != "kortex":
+        return "--preflight-report requires --backend kortex"
+    if args.validate_motion_package and (
+        args.backend != "kortex"
+        or not args.enable_hardware
+        or args.check_input
+        or args.check_xr
+        or args.check_kortex
+    ):
+        return "--validate-motion-package requires Kortex motion arguments"
+    if args.check_kortex and args.fixed_trajectory:
+        return "--check-kortex cannot be combined with --fixed-trajectory"
+    if args.fixed_trajectory and args.input != "none":
+        return "--fixed-trajectory requires --input none"
+    if args.fixed_trajectory and not args.backend == "kortex":
+        return "--fixed-trajectory requires --backend kortex"
+    return None
+
+
+def _workspace_from_args(args: argparse.Namespace) -> WorkspaceLimits | None:
+    if args.workspace_min is None or args.workspace_max is None:
+        return None
+    return WorkspaceLimits(tuple(args.workspace_min), tuple(args.workspace_max))
+
+
+def _preflight_motion_contract(
+    args: argparse.Namespace,
+    limits: WorkspaceLimits,
+    *,
+    operator_calibration_sha256: str | None = None,
+) -> dict[str, object]:
+    """Produce the exact reviewed limits required for this motion launch."""
+
+    contract: dict[str, object] = {
+        "workspace_min_m": list(limits.minimum_xyz),
+        "workspace_max_m": list(limits.maximum_xyz),
+        "max_linear_speed_m_s": _resolve_max_linear_speed(args),
+        "translation_scale": resolve_translation_scale(args),
+        "translation_only": args.translation_only,
+        "expanded_translation_envelope": args.expanded_translation_envelope,
+        "responsive_translation_profile": args.responsive_translation_profile,
+        "operator_axis_calibration": args.operator_calibration is not None,
+        "recover_stale_input": args.recover_stale_input,
+        "stale_timeout_s": _resolve_stale_timeout(args),
+        "control_hz": resolve_control_hz(args),
+        "max_angular_speed_deg_s": _resolve_max_angular_speed_deg(args),
+        "anchor_translation_axis_m": list(resolve_anchor_translation_axis(args)),
+        "anchor_rotation_deg": FIRST_HARDWARE_PROFILE.anchor_rotation_deg,
+    }
+    if args.operator_calibration is not None:
+        contract["operator_calibration_sha256"] = operator_calibration_sha256
+    return contract
+
+
+def _current_clean_code_revision() -> str:
+    """Return the exact tracked-clean Git revision for motion admission."""
+
+    project = Path(__file__).resolve().parents[1]
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        startup_hook_paths = []
+        for module_name in _PYTHON_STARTUP_HOOKS:
+            spec = PathFinder.find_spec(module_name, [str(project)])
+            if spec is not None and spec.origin not in (None, "built-in", "frozen"):
+                startup_hook_paths.append(
+                    Path(spec.origin).relative_to(project).as_posix()
+                )
+        tracked_paths: set[str] = set()
+        if startup_hook_paths:
+            tracked_startup_hooks = subprocess.run(
+                ["git", "ls-files", "--cached", "-z", "--", *startup_hook_paths],
+                cwd=project,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+            tracked_paths = {
+                path.replace("\\", "/").casefold()
+                for path in tracked_startup_hooks.stdout.split("\0")
+                if path
+            }
+        revision_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("cannot establish the running code revision") from error
+    if status.stdout.strip():
+        raise ValueError("tracked worktree must be clean for Kortex motion")
+    untracked_hooks = [
+        path for path in startup_hook_paths if path.casefold() not in tracked_paths
+    ]
+    if untracked_hooks:
+        raise ValueError(
+            f"untracked Python startup hook: {untracked_hooks[0]}"
+        )
+    revision = revision_result.stdout.strip().lower()
+    if _FULL_GIT_REVISION.fullmatch(revision) is None:
+        raise ValueError("running code revision is invalid")
+    return revision
+
+
+def _validate_kortex_args(
+    args: argparse.Namespace,
+    password: str | None,
+    *,
+    check_password: bool = True,
+    operator_calibration_sha256: str | None = None,
+    expected_code_revision: str | None = None,
+    stop_after_workspace: bool = False,
+) -> str | None:
+    """Validate hardware gates in their fail-closed order before SDK import."""
+
+    if not args.enable_hardware:
+        return "--backend kortex requires --enable-hardware"
+    if args.dry_run:
+        return "--dry-run cannot be used with --backend kortex"
+    if args.check_kortex and args.fixed_trajectory:
+        return "--check-kortex cannot be combined with --fixed-trajectory"
+    if args.fixed_trajectory and args.input != "none":
+        return "--fixed-trajectory requires --input none"
+    if _resolve_stale_timeout(args) > FIRST_HARDWARE_PROFILE.stale_timeout_s:
+        return "--stale-timeout must not exceed 0.2 for --backend kortex"
+    if not args.robot_ip.strip():
+        return "--robot-ip must not be empty"
+    if not args.robot_user.strip():
+        return "--robot-user must not be empty"
+    try:
+        validate_private_robot_ipv4(args.robot_ip)
+    except ValueError as error:
+        return str(error)
+    if _is_advanced_pico_teleop(args):
+        maximum_scale = ADVANCED_PICO_TELEOP_MAX_SCALE
+    elif args.responsive_translation_profile:
+        maximum_scale = RESPONSIVE_TRANSLATION_MAX_SCALE
+    elif args.translation_only:
+        maximum_scale = MAX_TRANSLATION_ONLY_SCALE
+    else:
+        maximum_scale = FIRST_HARDWARE_PROFILE.translation_scale
+    if resolve_translation_scale(args) > maximum_scale:
+        return f"--scale must not exceed {maximum_scale:g} for --backend kortex"
+    if resolve_control_hz(args) > FIRST_HARDWARE_PROFILE.control_hz:
+        return (
+            f"--control-hz must not exceed {FIRST_HARDWARE_PROFILE.control_hz:g} "
+            "for --backend kortex"
+        )
+    max_linear_speed = _resolve_max_linear_speed(args)
+    if _is_advanced_pico_teleop(args):
+        maximum_linear_speed = ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS
+    elif _uses_calibrated_responsive_translation(args):
+        maximum_linear_speed = CALIBRATED_RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
+    elif args.responsive_translation_profile:
+        maximum_linear_speed = RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS
+    else:
+        maximum_linear_speed = FIRST_HARDWARE_PROFILE.max_linear_speed_mps
+    if not math.isfinite(max_linear_speed) or not (
+        0.0 < max_linear_speed <= maximum_linear_speed
+    ):
+        return f"--max-linear-speed must be in (0, {maximum_linear_speed:g}]"
+    max_angular_speed_deg = _resolve_max_angular_speed_deg(args)
+    if not math.isfinite(max_angular_speed_deg) or not (
+        0.0 < max_angular_speed_deg <= FIRST_HARDWARE_PROFILE.max_angular_speed_deg_s
+    ):
+        return "--max-angular-speed-deg must be in (0, 2]"
+
+    # Read-only inspection does not authorize motion, so workspace/lease gates
+    # are intentionally scoped to the motion paths only.
+    if not args.check_kortex:
+        if _is_advanced_pico_teleop(args) and (
+            args.workspace_min is not None
+            and args.workspace_max is not None
+            and (
+                not all(
+                    math.isfinite(value)
+                    for value in (*args.workspace_min, *args.workspace_max)
+                )
+                or any(
+                    lower >= upper
+                    for lower, upper in zip(
+                        args.workspace_min,
+                        args.workspace_max,
+                        strict=True,
+                    )
+                )
+            )
+        ):
+            return "advanced workspace requires strictly ordered finite XYZ axes"
+        try:
+            limits = _workspace_from_args(args)
+        except ValueError as error:
+            return str(error)
+        if limits is None:
+            return "--workspace-min and --workspace-max are required for Kortex motion"
+        if not _is_advanced_pico_teleop(args):
+            try:
+                validate_workspace_span(limits, resolve_workspace_half_width_axis(args))
+            except ValueError as error:
+                return str(error)
+        if stop_after_workspace:
+            return None
+        if args.motion_lease is None:
+            return "--motion-lease is required for Kortex motion"
+        try:
+            validate_motion_lease(args.motion_lease, args.run_id, args.lease_owner)
+        except (OSError, ValueError) as error:
+            return f"invalid motion lease: {error}"
+        if args.preflight_report is None:
+            return "--preflight-report is required for Kortex motion"
+        if args.evidence_jsonl is not None and os.path.lexists(args.evidence_jsonl):
+            return f"evidence path must be absent before Kortex motion: {args.evidence_jsonl}"
+        try:
+            load_passing_preflight_report(
+                args.preflight_report,
+                expected_safety_limits=(
+                    None
+                    if _is_advanced_pico_teleop(args)
+                    else _preflight_motion_contract(
+                        args,
+                        limits,
+                        operator_calibration_sha256=operator_calibration_sha256,
+                    )
+                ),
+                expected_code_revision=expected_code_revision,
+                expected_calibration_sha256=operator_calibration_sha256,
+                expected_transport_identity={
+                    "kind": "tcp",
+                    "host": args.robot_ip,
+                    "port": 10000,
+                    "robot_user": args.robot_user,
+                },
+            )
+        except (OSError, ValueError) as error:
+            return f"invalid preflight report: {error}"
+        if args.fixed_trajectory is not None:
+            try:
+                load_trajectory(args.fixed_trajectory)
+            except (OSError, ValueError) as error:
+                return f"invalid fixed trajectory: {error}"
+    if check_password and not password:
+        return "KINOVA_PASSWORD must be set for --backend kortex"
     return None
 
 
@@ -219,7 +914,153 @@ def _print_status(diagnostics: StepDiagnostics) -> None:
     ]
     if diagnostics.reason:
         fields.append(f"reason={diagnostics.reason}")
+    if diagnostics.gripper_target is not None:
+        fields.append(f"gripper_target={diagnostics.gripper_target:.3f}")
     print(f"status: {' '.join(fields)}", flush=True)
+
+
+def _approve_fixed_segment(segment: Any, index: int) -> bool:
+    """Require a fresh exact MOVE confirmation before each fixed segment."""
+
+    try:
+        confirmation = input(
+            f"Type MOVE to authorize fixed segment {index + 1} "
+            f"({segment.name}): "
+        )
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return False
+    return confirmation == "MOVE"
+
+
+def _preflight_context(
+    args: argparse.Namespace,
+    versions: Any | None = None,
+) -> PreflightContext:
+    limits = _workspace_from_args(args)
+    limit_mapping: dict[str, object] = {
+        "max_linear_speed": _resolve_max_linear_speed(args),
+        "max_angular_speed_deg": _resolve_max_angular_speed_deg(args),
+    }
+    if limits is not None:
+        limit_mapping["workspace_min"] = list(limits.minimum_xyz)
+        limit_mapping["workspace_max"] = list(limits.maximum_xyz)
+    return PreflightContext(
+        code_revision="working-tree",
+        dirty_worktree=False,
+        runtime={"python": getattr(versions, "python", sys.version.split()[0])},
+        driver={"name": "kortex", "version": getattr(versions, "kortex_api", "unknown")},
+        firmware={"version": "read-only-unverified"},
+        transport={"kind": "tcp", "host": args.robot_ip, "port": 10000},
+        calibration=({"name": "reported-by-kortex", "sha256": "read-only-unverified"},),
+        safety_limits=limit_mapping,
+        # Physical checks are an onsite operator concern; read-only inspection
+        # must remain failed-closed until an operator records every check.
+        physical_checks={
+            "workspace_clear": False,
+            "physical_estop_reachable": False,
+            "teach_pendant_stop_reachable": False,
+            "second_observer_present": False,
+            "cable_slack_checked": False,
+            "device_fixture_checked": False,
+            "speed_level_checked": False,
+            "workspace_bounds_checked": False,
+            "load_tcp_checked": False,
+        },
+    )
+
+
+def _run_kortex_readonly_check(args: argparse.Namespace, password: str) -> int:
+    """Connect only after exact CONNECT and perform no motion setup."""
+
+    try:
+        confirmation = input("Type CONNECT to run read-only Kortex preflight: ")
+    except KeyboardInterrupt:
+        print("stopped by user", file=sys.stderr)
+        return 130
+    except Exception:
+        print("error: Kortex confirmation failed", file=sys.stderr)
+        return 2
+    if confirmation != "CONNECT":
+        print("error: read-only Kortex preflight was not confirmed", file=sys.stderr)
+        return 2
+    connection = None
+    exit_code = 2
+    try:
+        from .kortex_transport import KortexConfig
+
+        connection = _create_kortex_connection(
+            KortexConfig(args.robot_ip, args.robot_user, password),
+            read_only=True,
+        )
+        report = run_kortex_readonly_preflight(connection, _preflight_context(args))
+        if args.preflight_json is not None:
+            args.preflight_json.parent.mkdir(parents=True, exist_ok=True)
+            args.preflight_json.write_text(
+                json.dumps(report.to_mapping(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        # A read-only RPC probe can succeed while the physical checklist is
+        # intentionally unconfirmed; only a motion mode may gate on `passed`.
+        exit_code = 0
+    except Exception as error:
+        print(f"error: Kortex read-only preflight failed ({type(error).__name__})", file=sys.stderr)
+    finally:
+        if connection is not None:
+            if not _close_resource(connection, hardware=False, send_stop=False):
+                exit_code = 2
+    return exit_code
+
+
+def _close_resource(
+    resource: Any,
+    *,
+    hardware: bool,
+    send_stop: bool | None = None,
+) -> bool:
+    """Attempt one close operation and report whether it completed safely."""
+
+    try:
+        result = resource.close() if send_stop is None else resource.close(send_stop=send_stop)
+    except BaseException:
+        message = (
+            "error: Kortex cleanup failed; motion stop may be unconfirmed"
+            if hardware
+            else "error: cleanup failed"
+        )
+        print(message, file=sys.stderr)
+        return False
+    if result is False:
+        message = (
+            "error: Kortex cleanup failed; motion stop may be unconfirmed"
+            if hardware
+            else "error: cleanup failed"
+        )
+        print(message, file=sys.stderr)
+        return False
+    return True
+
+
+def _cleanup_resources(
+    controller: Any,
+    source: Any,
+    backend: Any,
+    connection: Any,
+    *,
+    hardware: bool,
+) -> bool:
+    """Close every remaining resource, preferring the aggregate controller."""
+
+    if controller is not None and _close_resource(controller, hardware=hardware):
+        return True
+
+    resources = (backend, connection, source)
+    succeeded = True
+    for resource in resources:
+        if resource is not None:
+            succeeded = _close_resource(resource, hardware=hardware) and succeeded
+    return succeeded
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -240,51 +1081,273 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
+    password: str | None = None
+    calibration = None
+    if args.backend == "kortex":
+        # Reject malformed endpoints, speeds, mode combinations, and workspace
+        # spans before opening even a local calibration/report/lease artifact.
+        error = _validate_kortex_args(
+            args,
+            None,
+            check_password=False,
+            stop_after_workspace=True,
+        )
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        if args.operator_calibration is not None:
+            try:
+                calibration = load_operator_axis_calibration(
+                    args.operator_calibration,
+                )
+            except (OSError, ValueError) as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+        code_revision: str | None = None
+        try:
+            code_revision = _current_clean_code_revision()
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        # Fail closed on every non-secret package gate before looking up the
+        # password, constructing controller input, prompting MOVE, or opening
+        # any Kortex connection.
+        calibration_sha256 = (
+            calibration.source_sha256 if calibration is not None else None
+        )
+        error = _validate_kortex_args(
+            args,
+            None,
+            check_password=False,
+            operator_calibration_sha256=calibration_sha256,
+            expected_code_revision=code_revision,
+        )
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        if args.validate_motion_package:
+            try:
+                validate_kortex_runtime()
+            except (OSError, RuntimeError, ValueError) as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+            print("offline motion package validation passed", flush=True)
+            return 0
+        password = os.getenv("KINOVA_PASSWORD")
+        error = _validate_kortex_args(
+            args,
+            password,
+            operator_calibration_sha256=calibration_sha256,
+            expected_code_revision=code_revision,
+        )
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        if args.check_kortex:
+            return _run_kortex_readonly_check(args, password)
+
+    control_hz = resolve_control_hz(args)
     source = None
+    connection = None
     backend = None
     controller = None
+    evidence_logger = None
+    event_sink = None
+    exit_code = 2
+    completion: str | None = None
     try:
-        source = create_input(args)
-        backend = MuJoCoBackend(args.model, control_hz=args.control_hz)
-        controller = TeleopController(
-            TeleopConfig(
-                control_hz=args.control_hz,
-                realtime=not args.headless,
-                translation_scale=args.scale,
-                stale_timeout=args.stale_timeout,
-            ),
-            source,
-            backend,
-        )
-        if args.headless:
-            controller.run(max_steps=args.steps, on_status=_print_status)
-        else:
-            viewer = backend.launch_viewer()
-            controller.run(
-                max_steps=args.steps,
-                should_continue=viewer.is_running,
-                on_step=viewer.sync,
-                on_status=_print_status,
+        if args.fixed_trajectory is None and args.backend != "kortex":
+            source = create_input(args)
+        if args.backend == "kortex":
+            from .kortex_transport import KortexConfig
+
+            workspace_limits = _workspace_from_args(args)
+            if args.evidence_jsonl is not None:
+                evidence_logger = EvidenceLogger(
+                    args.evidence_jsonl,
+                    run_id=args.run_id,
+                    require_absent=True,
+                )
+            event_sink = logger_event_sink(evidence_logger) if evidence_logger is not None else None
+
+            # Nothing that can transmit motion is constructed until runtime
+            # compatibility and current-session robot state are admitted.  A
+            # live PICO teleoperation path additionally requires stable
+            # released input before and after confirmation.  The read-only
+            # connection is never reused for motion.
+            versions = validate_kortex_runtime()
+            if args.fixed_trajectory is None:
+                source = create_input(args)
+                admission_kwargs: dict[str, object] = {
+                    "sample_count": 10,
+                    "timeout_s": args.check_timeout,
+                }
+                if _is_advanced_pico_teleop(args):
+                    admission_kwargs["require_trigger"] = True
+                admitted = wait_for_fresh_released_input(
+                    source,
+                    **admission_kwargs,
+                )
+            readonly = _create_kortex_connection(
+                KortexConfig(args.robot_ip, args.robot_user, password),
+                read_only=True,
             )
-        finite = backend.state_is_finite()
-        print(
-            f"completed steps={controller.steps} finite_state={str(finite).lower()}",
-        )
-        return 0 if finite else 2
+            try:
+                live_report = run_kortex_readonly_preflight(
+                    readonly,
+                    _preflight_context(args, versions),
+                )
+                require_live_kortex_ready(live_report)
+                if _is_advanced_pico_teleop(args):
+                    if workspace_limits is None:
+                        raise RuntimeError("advanced workspace limits are unavailable")
+                    live_position = read_kortex_tool_position(readonly)
+                    if not all(
+                        lower <= coordinate <= upper
+                        for coordinate, lower, upper in zip(
+                            live_position,
+                            workspace_limits.minimum_xyz,
+                            workspace_limits.maximum_xyz,
+                            strict=True,
+                        )
+                    ):
+                        raise ValueError(
+                            "current Kortex tool position is outside configured workspace"
+                        )
+            finally:
+                if not _close_resource(readonly, hardware=False, send_stop=False):
+                    raise RuntimeError("read-only Kortex cleanup failed")
+            confirm_move()
+            if source is not None:
+                recheck_kwargs: dict[str, object] = {
+                    "after_timestamp_ns": admitted.last_timestamp_ns,
+                    "admission": admitted,
+                    "timeout_s": 0.5,
+                }
+                if _is_advanced_pico_teleop(args):
+                    recheck_kwargs["require_trigger"] = True
+                verify_released_now(
+                    source,
+                    **recheck_kwargs,
+                )
+
+            connection = _create_kortex_connection(
+                KortexConfig(args.robot_ip, args.robot_user, password),
+            )
+            backend_kwargs: dict[str, object] = {
+                "max_linear_speed": _resolve_max_linear_speed(args),
+                "max_angular_speed_deg": _resolve_max_angular_speed_deg(args),
+                "workspace_limits": workspace_limits,
+                "anchor_envelope": AnchorEnvelope(
+                    resolve_anchor_translation_axis(args),
+                    math.radians(FIRST_HARDWARE_PROFILE.anchor_rotation_deg),
+                ) if not _is_advanced_pico_teleop(args) else None,
+                "event_sink": event_sink,
+            }
+            if _is_advanced_pico_teleop(args):
+                backend_kwargs["advanced_translation"] = True
+                backend_kwargs["kp_linear"] = args.linear_gain
+            backend = _create_kortex_backend(
+                connection,
+                **backend_kwargs,
+            )
+        else:
+            from .mujoco_backend import MuJoCoBackend
+
+            backend = MuJoCoBackend(args.model, control_hz=control_hz)
+
+        if args.fixed_trajectory is not None:
+            spec = load_trajectory(args.fixed_trajectory)
+            result = FixedTrajectoryRunner(
+                backend,
+                control_hz=spec.control_hz,
+                approve_segment=_approve_fixed_segment,
+                event_sink=event_sink if args.backend == "kortex" else None,
+            ).run(spec)
+            exit_code = 0 if result.completed else 2
+            completion = (
+                f"completed fixed_segments={result.completed_segments}/{result.total_segments}"
+            )
+        else:
+            controller_kwargs: dict[str, object] = {}
+            if event_sink is not None:
+                controller_kwargs["event_sink"] = event_sink
+            controller = TeleopController(
+                TeleopConfig(
+                    control_hz=control_hz,
+                    # Hardware must always run against the wall clock; free-running
+                    # a headless loop against a real arm floods the robot with RPCs.
+                    realtime=args.backend == "kortex" or not args.headless,
+                    translation_scale=resolve_translation_scale(args),
+                    orientation_enabled=not args.translation_only,
+                    stale_timeout=_resolve_stale_timeout(args),
+                    fatal_input_faults=args.backend == "kortex",
+                    invert_translation=args.invert_translation,
+                    translation_rotation=(
+                        calibration.translation_rotation
+                        if calibration is not None
+                        else None
+                    ),
+                    recover_stale_input=args.recover_stale_input,
+                    recovery_release_samples=(
+                        3 if args.recover_stale_input else 1
+                    ),
+                    gripper=args.gripper,
+                    gripper_trigger_min=args.gripper_trigger_min,
+                    gripper_trigger_max=args.gripper_trigger_max,
+                    gripper_binary_threshold=args.gripper_binary_threshold,
+                    translation_axis_gain=tuple(
+                        float(value) for value in args.translation_axis_gain
+                    ),
+                ),
+                source,
+                backend,
+                **controller_kwargs,
+            )
+            if args.backend == "kortex" or args.headless:
+                controller.run(max_steps=args.steps, on_status=_print_status)
+            else:
+                viewer = backend.launch_viewer()
+                controller.run(
+                    max_steps=args.steps,
+                    should_continue=viewer.is_running,
+                    on_step=viewer.sync,
+                    on_status=_print_status,
+                )
+            if args.backend == "mujoco":
+                finite = backend.state_is_finite()
+                exit_code = 0 if finite else 2
+                completion = (
+                    f"completed steps={controller.steps} "
+                    f"finite_state={str(finite).lower()}"
+                )
+            else:
+                exit_code = 0
+                completion = f"completed steps={controller.steps}"
     except KeyboardInterrupt:
         print("stopped by user", file=sys.stderr)
-        return 130
+        exit_code = 130
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        exit_code = 2
     finally:
-        if controller is not None:
-            controller.close()
-        else:
-            if source is not None:
-                source.close()
-            if backend is not None:
-                backend.close()
+        cleanup_succeeded = _cleanup_resources(
+            controller,
+            source,
+            backend,
+            connection,
+            hardware=args.backend == "kortex",
+        )
+        # A failed close is fatal for every backend; Ctrl+C keeps 130 so the
+        # interruption stays visible in the exit status.
+        if not cleanup_succeeded and exit_code != 130:
+            exit_code = 2
+
+    # Never print a completion line when cleanup failed: for hardware that
+    # would contradict a possible "motion stop may be unconfirmed" error.
+    if completion is not None and cleanup_succeeded and exit_code in (0, 130):
+        print(completion)
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -1,0 +1,177 @@
+import pytest
+
+from kinova_teleop.hardware_profile import (
+    ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS,
+    ADVANCED_PICO_TELEOP_MAX_SCALE,
+    EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M,
+    FIRST_HARDWARE_PROFILE,
+    MAX_TRANSLATION_ONLY_SCALE,
+    RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS,
+    RESPONSIVE_TRANSLATION_MAX_SCALE,
+    RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M,
+    validate_kortex_runtime,
+    validate_private_robot_ipv4,
+    validate_workspace_span,
+)
+from kinova_teleop.main import (
+    _resolve_max_linear_speed,
+    build_parser,
+    resolve_anchor_translation_axis,
+    resolve_control_hz,
+    resolve_translation_scale,
+)
+from kinova_teleop.workspace import WorkspaceLimits
+
+
+def test_first_hardware_profile_is_the_approved_envelope() -> None:
+    profile = FIRST_HARDWARE_PROFILE
+    assert profile.control_hz == 40.0
+    assert profile.translation_scale == 0.25
+    assert profile.stale_timeout_s == 0.2
+    assert profile.max_linear_speed_mps == 0.005
+    assert profile.max_angular_speed_deg_s == 2.0
+    assert profile.anchor_translation_axis_m == (0.02, 0.02, 0.02)
+    assert profile.anchor_rotation_deg == 5.0
+    assert MAX_TRANSLATION_ONLY_SCALE == 0.5
+    assert RESPONSIVE_TRANSLATION_MAX_SCALE == 0.8
+    assert RESPONSIVE_TRANSLATION_MAX_LINEAR_SPEED_MPS == 0.01
+    assert RESPONSIVE_TRANSLATION_WORKSPACE_HALF_WIDTH_AXIS_M == (0.1, 0.1, 0.1)
+
+
+def test_backend_specific_defaults_preserve_mujoco() -> None:
+    parser = build_parser()
+    mujoco = parser.parse_args([])
+    kortex = parser.parse_args(["--backend", "kortex"])
+    assert resolve_control_hz(mujoco) == 100.0
+    assert resolve_translation_scale(mujoco) == 0.5
+    assert resolve_control_hz(kortex) == 40.0
+    assert resolve_translation_scale(kortex) == 0.25
+
+
+def test_advanced_pico_profile_has_exact_scale_and_speed_defaults() -> None:
+    args = build_parser().parse_args(
+        ["--backend", "kortex", "--advanced-pico-teleop"]
+    )
+
+    assert ADVANCED_PICO_TELEOP_MAX_SCALE == 1.0
+    assert ADVANCED_PICO_TELEOP_MAX_LINEAR_SPEED_MPS == 0.05
+    assert resolve_translation_scale(args) == 1.0
+    assert _resolve_max_linear_speed(args) == 0.05
+
+
+def test_runtime_gate_requires_the_tested_sdk_stack() -> None:
+    versions = {"kortex-api": "2.8.0.post5", "protobuf": "3.20.0"}
+    observed = validate_kortex_runtime(
+        python_version=(3, 11, 15),
+        distribution_version=versions.__getitem__,
+    )
+    assert observed.kortex_api == "2.8.0.post5"
+    with pytest.raises(RuntimeError, match="protobuf 3.20.0"):
+        validate_kortex_runtime(
+            python_version=(3, 11, 15),
+            distribution_version=lambda name: "5.0.0" if name == "protobuf" else "2.8.0.post5",
+        )
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "8.8.8.8",
+        "127.0.0.1",
+        "169.254.1.1",
+        "192.0.2.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "240.0.0.1",
+        "255.255.255.255",
+        "::1",
+        "robot.local",
+    ],
+)
+def test_robot_endpoint_rejects_non_rfc1918_ipv4(host: str) -> None:
+    with pytest.raises(ValueError, match="private IPv4"):
+        validate_private_robot_ipv4(host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "10.0.0.1",
+        "10.255.255.254",
+        "172.16.0.1",
+        "172.31.255.254",
+        "192.168.0.1",
+        "192.168.255.254",
+    ],
+)
+def test_robot_endpoint_accepts_only_rfc1918_ipv4(host: str) -> None:
+    assert validate_private_robot_ipv4(host) is None
+
+
+def test_first_hardware_workspace_cannot_exceed_four_centimetres_per_axis() -> None:
+    limits = WorkspaceLimits(
+        (0.10, -0.20, 0.30),
+        (0.140001, -0.16, 0.34),
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"span must not exceed per-axis maxima \[0.04, 0.04, 0.04\] m",
+    ):
+        validate_workspace_span(limits)
+
+
+def test_expanded_translation_envelope_is_explicit_and_defaults_stay_small() -> None:
+    parser = build_parser()
+    default = parser.parse_args(["--backend", "kortex"])
+    expanded = parser.parse_args(
+        [
+            "--backend",
+            "kortex",
+            "--enable-hardware",
+            "--translation-only",
+            "--expanded-translation-envelope",
+        ]
+    )
+    assert EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M == (0.05, 0.05, 0.05)
+    assert resolve_anchor_translation_axis(default) == (0.02, 0.02, 0.02)
+    assert resolve_anchor_translation_axis(expanded) == (0.05, 0.05, 0.05)
+
+
+def test_expanded_workspace_accepts_exact_ten_centimetres_only() -> None:
+    exact = WorkspaceLimits((0.0, 0.0, 0.0), (0.10, 0.10, 0.10))
+    validate_workspace_span(exact, EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M)
+    over = WorkspaceLimits((0.0, 0.0, 0.0), (0.100001, 0.10, 0.10))
+    with pytest.raises(
+        ValueError,
+        match=r"span must not exceed per-axis maxima \[0.1, 0.1, 0.1\] m",
+    ):
+        validate_workspace_span(over, EXPANDED_TRANSLATION_ONLY_ANCHOR_AXIS_M)
+
+
+def test_responsive_workspace_accepts_exact_asymmetric_spans_only() -> None:
+    exact = WorkspaceLimits(
+        (0.143218601, -0.670251882, 0.017065614),
+        (1.343218601, 0.529748118, 0.657065614),
+    )
+    validate_workspace_span(
+        exact,
+        (0.6, 0.6, 0.32),
+    )
+
+    for maximum_xyz in (
+        (1.343219601, 0.529748118, 0.657065614),
+        (1.343218601, 0.529749118, 0.657065614),
+        (1.343218601, 0.529748118, 0.657066614),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=r"workspace span must not exceed per-axis maxima \[1.2, 1.2, 0.64\] m",
+        ):
+            validate_workspace_span(
+                WorkspaceLimits(
+                    (0.143218601, -0.670251882, 0.017065614),
+                    maximum_xyz,
+                ),
+                (0.6, 0.6, 0.32),
+            )

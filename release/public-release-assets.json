@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "release": "v0.2.0-rc.1",
+  "assets": [
+    {
+      "name": "kortex_api-2.8.0.post5-py3-none-any.whl",
+      "sha256": "5796425d48f0ab70c56ce9ecf06b8ab91f0b951319266e5d4c0b179cdb9e99cf",
+      "size_bytes": 161265,
+      "download_url": "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/releases/download/v0.2.0-rc.1/kortex_api-2.8.0.post5-py3-none-any.whl"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hardware-trial.local/schema/event-v1.schema.json",
+  "title": "Hardware Trial Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "monotonic_ns",
+    "kind",
+    "state",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "monotonic_ns": {"type": "integer", "minimum": 0},
+    "kind": {
+      "enum": [
+        "connected",
+        "preflight_passed",
+        "lease_acquired",
+        "armed",
+        "control_started",
+        "moving",
+        "input_release",
+        "input_stale",
+        "command_rejected",
+        "workspace_rejected",
+        "workspace_clamped",
+        "anchor_rejected",
+        "host_stop_requested",
+        "stop_rpc_returned",
+        "controller_cancel_confirmed",
+        "stop_unconfirmed",
+        "motion_command_completed",
+        "device_stationary_confirmed",
+        "physical_stop_observed",
+        "no_motion_verified",
+        "protective_stop",
+        "intervention",
+        "timeout",
+        "faulted",
+        "cleanup_completed",
+        "attachment_registered",
+        "completed"
+      ]
+    },
+    "state": {
+      "enum": [
+        "DISCONNECTED",
+        "CONNECTED_READ_ONLY",
+        "PREFLIGHT_PASSED",
+        "ARMED",
+        "MOVING",
+        "STOPPING",
+        "FAULTED",
+        "COMPLETED"
+      ]
+    },
+    "payload": {"type": "object"}
+  }
+}

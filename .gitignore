@@ -9,6 +9,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest-tmp/
+/.pytest-*/
 .coverage
 htmlcov/
 build/
@@ -19,6 +20,15 @@ setting.ini
 logs/
 /artifacts/
 *.apk
+/downloads/
+/local-config/
+/local-sessions/
+/sessions/
+/results/
+/onsite-gripper-*/
+/coverage-preflight.json
+.venv-kortex/
+*.whl
 pico_unity_bridge/Library/
 /pico_unity_bridge/Builds/
 /pico_unity_bridge/MemoryCaptures/

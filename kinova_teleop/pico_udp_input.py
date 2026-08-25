@@ -38,6 +38,7 @@ class PicoUdpInput:
         host: str = "0.0.0.0",
         port: int = 15031,
         stale_after: float = 0.2,
+        allow_stale_source_handoff: bool = True,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not math.isfinite(stale_after) or stale_after <= 0.0:
@@ -48,6 +49,7 @@ class PicoUdpInput:
             else PicoUdpReceiver(host, port, monotonic=monotonic)
         )
         self._stale_after = float(stale_after)
+        self._allow_stale_source_handoff = bool(allow_stale_source_handoff)
         self._clock = monotonic
         self._active_source: tuple[str, int] | None = None
         self._last_sequence: int | None = None
@@ -71,6 +73,7 @@ class PicoUdpInput:
         if emit_stale_boundary:
             self._stale_boundary_reported = True
         had_invalid = emit_stale_boundary
+        source_changed = False
 
         for _ in range(_MAX_DRAIN_ATTEMPTS):
             try:
@@ -95,16 +98,25 @@ class PicoUdpInput:
                 recovering_from_stale=recovering_from_stale,
             ):
                 had_invalid = True
+                source_changed = source_changed or self._last_error == "source changed"
         else:
             self._last_error = "receiver drain limit reached"
             had_invalid = True
 
         now = self._clock()
         stale = self._is_stale(now)
+        invalid_reason = "stream is stale" if emit_stale_boundary else ""
+        if source_changed:
+            self._last_error = "source changed"
         if stale and not self._last_error:
             self._last_error = "stream is stale"
         if had_invalid or stale or self._last_valid is None:
-            return self._inactive_sample(now)
+            sample_reason = (
+                "source changed"
+                if source_changed
+                else invalid_reason or self._last_error
+            )
+            return self._inactive_sample(now, sample_reason)
         return self._sample_from(self._last_valid)
 
     def health(self) -> PicoStreamHealth:
@@ -131,18 +143,39 @@ class PicoUdpInput:
     ) -> bool:
         session_boundary = False
         if self._active_source is not None and frame.source != self._active_source:
+            if not self._allow_stale_source_handoff:
+                self._foreign += 1
+                self._last_error = "source changed"
+                return False
+            same_device = frame.source[0] == self._active_source[0]
             if (
                 not recovering_from_stale
-                and frame.source[0] != self._active_source[0]
+                and not same_device
             ):
                 self._foreign += 1
-                return True
-            session_boundary = not recovering_from_stale
+                self._last_error = "source changed"
+                return False
+            session_boundary = same_device
             self._clear_session()
 
         if not frame.tracked:
+            # Advance the sequence for in-order untracked frames from the
+            # locked source so packets that did arrive (but were rejected as
+            # untracked) are not later misreported as network drops.
+            if (
+                self._active_source is not None
+                and frame.source == self._active_source
+                and self._last_sequence is not None
+                and sequence_is_newer(frame.sequence, self._last_sequence)
+            ):
+                self._dropped += (
+                    sequence_delta(frame.sequence, self._last_sequence) - 1
+                )
+                self._last_sequence = frame.sequence
             self._rejected += 1
-            self._last_error = "controller is untracked"
+            self._last_error = (
+                "source changed" if session_boundary else "controller is untracked"
+            )
             return False
 
         if self._last_sequence is not None:
@@ -170,7 +203,7 @@ class PicoUdpInput:
         self._last_sequence = frame.sequence
         self._last_valid = frame
         self._accepted += 1
-        self._last_error = ""
+        self._last_error = "source changed" if session_boundary else ""
         self._stale_boundary_reported = False
         return not session_boundary
 
@@ -183,7 +216,7 @@ class PicoUdpInput:
         return self._last_valid is None or now - self._last_valid.received_at > self._stale_after
 
     @staticmethod
-    def _inactive_sample(now: float) -> ControllerSample:
+    def _inactive_sample(now: float, invalid_reason: str) -> ControllerSample:
         return ControllerSample(
             position=np.zeros(3, dtype=np.float64),
             quaternion_xyzw=np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
@@ -191,6 +224,9 @@ class PicoUdpInput:
             timestamp_ns=0,
             received_monotonic=now,
             valid=False,
+            trigger=0.0,
+            trigger_available=False,
+            invalid_reason=invalid_reason,
         )
 
     @staticmethod
@@ -202,4 +238,6 @@ class PicoUdpInput:
             timestamp_ns=frame.source_time_us * 1000,
             received_monotonic=frame.received_at,
             valid=True,
+            trigger=(float(frame.trigger) if frame.protocol_version >= 2 else 0.0),
+            trigger_available=frame.protocol_version >= 2,
         )

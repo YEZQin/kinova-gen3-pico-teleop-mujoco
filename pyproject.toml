@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kinova-gen3-pico-teleop"
 version = "0.1.0"
-description = "PICO left-controller teleoperation for a Kinova Gen3 arm in MuJoCo"
+description = "PICO left-controller simulation and guarded Kortex hardware teleoperation for a Kinova Gen3"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -15,10 +15,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["jsonschema>=4.0", "pytest>=8.0", "pytest-cov>=5.0"]
 
 [project.scripts]
 kinova-pico-teleop = "kinova_teleop.main:main"
+
+[project.urls]
+Repository = "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco"
+Documentation = "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/tree/codex/public-gen3-pico-hardware-teleop"
+Issues = "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/issues"
+Releases = "https://github.com/YEZQin/kinova-gen3-pico-teleop-mujoco/releases"
 
 [tool.setuptools.packages.find]
 include = ["kinova_teleop*"]

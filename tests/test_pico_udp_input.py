@@ -113,14 +113,17 @@ def test_duplicate_or_out_of_order_frame_invalidates_current_input() -> None:
     assert source.health().rejected == 1
 
 
-def test_other_source_is_ignored_until_active_source_is_stale() -> None:
+def test_other_source_faults_until_active_source_is_stale() -> None:
     first = make_frame(sequence=1, position=(1.0, 0.0, 0.0), received_at=5.0, source=("10.0.0.2", 3000))
     other = make_frame(sequence=1, position=(2.0, 0.0, 0.0), received_at=5.05, source=("10.0.0.3", 4000))
     receiver = FakeReceiver([first, other])
     now = [5.05]
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: now[0])
-    assert source.read().position.tolist() == list(first.position)
+    boundary = source.read()
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
     assert source.health().foreign == 1
+    assert source.health().active_source == first.source
     now[0] = 5.21
     receiver.items.append(make_frame(sequence=2, received_at=5.21, source=("10.0.0.3", 4000)))
     assert not source.read().valid
@@ -139,13 +142,41 @@ def test_stale_handoff_uses_current_read_time_not_datagram_time() -> None:
     assert source.health().active_source == ("10.0.0.3", 4000)
 
 
+def test_locked_recovery_rejects_stale_handoff_and_keeps_original_endpoint() -> None:
+    original = ("10.0.0.2", 3000)
+    foreign = ("10.0.0.3", 4000)
+    receiver = FakeReceiver([
+        make_frame(sequence=1, received_at=5.0, source=original),
+    ])
+    now = [5.0]
+    source = PicoUdpInput(
+        receiver=receiver,
+        monotonic=lambda: now[0],
+        allow_stale_source_handoff=False,
+    )
+    assert source.read().valid
+
+    now[0] = 5.21
+    receiver.items.append(
+        make_frame(sequence=1, received_at=5.21, source=foreign)
+    )
+    boundary = source.read()
+
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
+    assert source.health().active_source == original
+    assert source.health().foreign == 1
+
+
 def test_untracked_or_stale_stream_returns_invalid_sample() -> None:
     now = [5.0]
     receiver = FakeReceiver([make_frame(sequence=1, received_at=5.0)])
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: now[0])
     assert source.read().valid
     now[0] = 5.201
-    assert not source.read().valid
+    stale = source.read()
+    assert not stale.valid
+    assert stale.invalid_reason == "stream is stale"
     receiver.items.append(make_frame(sequence=2, tracked=False, received_at=5.202))
     now[0] = 5.202
     assert not source.read().valid
@@ -200,7 +231,9 @@ def test_healthy_same_ip_new_port_emits_boundary_and_requires_release() -> None:
     )
     boundary = source.read()
     assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
     assert source.health().active_source == ("10.0.0.2", 4000)
+    assert source.health().last_error == "source changed"
     assert (
         mapper.update(boundary, ee, now=5.02).clutch_state
         is ClutchState.WAITING_FOR_RELEASE
@@ -227,8 +260,39 @@ def test_healthy_same_ip_new_port_emits_boundary_and_requires_release() -> None:
     assert rearmed.clutch_state is ClutchState.READY
 
 
-def test_stale_handoff_queued_before_read_emits_boundary_before_valid_frame() -> None:
-    """Draining a recovery frame must not hide the already-stale session."""
+def test_foreign_packet_after_admission_emits_source_changed_without_handoff() -> None:
+    """A foreign sender must fault hardware without replacing the lock."""
+
+    first = make_frame(
+        sequence=1,
+        position=(1.0, 0.0, 0.0),
+        received_at=5.0,
+        source=("10.0.0.2", 3000),
+    )
+    receiver = FakeReceiver([first])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
+
+    assert source.read().valid
+    receiver.items.append(
+        make_frame(sequence=2, received_at=5.01, source=("10.0.0.3", 4000))
+    )
+    boundary = source.read()
+
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
+    assert source.health().foreign == 1
+    assert source.health().active_source == ("10.0.0.2", 3000)
+    assert source.health().last_error == "source changed"
+
+    # The established generation remains intact for diagnostics; the Kortex
+    # controller consumes the invalid boundary and exits before this recovery.
+    cached = source.read()
+    assert cached.valid
+    assert cached.position.tolist() == list(first.position)
+
+
+def test_stale_same_device_handoff_reports_source_changed_before_valid_frame() -> None:
+    """A stale endpoint change must retain its session-boundary diagnostic."""
     receiver = FakeReceiver([
         make_frame(
             sequence=100,
@@ -251,8 +315,11 @@ def test_stale_handoff_queued_before_read_emits_boundary_before_valid_frame() ->
         )
     )
 
-    assert not source.read().valid
+    boundary = source.read()
+    assert not boundary.valid
+    assert boundary.invalid_reason == "source changed"
     assert source.health().active_source == ("10.0.0.2", 4000)
+    assert source.health().last_error == "source changed"
     assert source.read().valid
     assert source.health().rejected == 0
 
@@ -353,3 +420,65 @@ def test_sequence_wraparound_is_newer() -> None:
     source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
     assert source.read().valid
     assert source.health().dropped == 0
+
+
+def test_v2_trigger_propagates_into_controller_sample() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, trigger=0.6, received_at=5.0),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.0)
+    sample = source.read()
+    assert sample.valid
+    assert sample.trigger == pytest.approx(0.6)
+    assert sample.trigger_available is True
+
+
+def test_legacy_frame_without_trigger_yields_zero_trigger() -> None:
+    receiver = FakeReceiver([
+        make_frame(
+            sequence=1,
+            protocol_version=1,
+            trigger=0.9,
+            received_at=5.0,
+        ),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.01)
+    sample = source.read()
+    assert sample.valid
+    assert sample.trigger == 0.0
+    assert sample.trigger_available is False
+
+
+def test_inactive_sample_has_zero_trigger() -> None:
+    source = PicoUdpInput(receiver=FakeReceiver(), monotonic=lambda: 5.0)
+    sample = source.read()
+    assert not sample.valid
+    assert sample.trigger == 0.0
+
+
+def test_untracked_burst_is_not_counted_as_network_loss() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, received_at=5.0),
+        make_frame(sequence=2, tracked=False, received_at=5.01),
+        make_frame(sequence=3, tracked=False, received_at=5.02),
+        make_frame(sequence=4, tracked=False, received_at=5.03),
+        make_frame(sequence=5, received_at=5.04),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.04)
+    # The untracked frames in the drain invalidate this read (safety
+    # boundary); the subject here is only the health counters.
+    source.read()
+    health = source.health()
+    assert health.dropped == 0
+    assert health.rejected == 3
+
+
+def test_real_gap_before_untracked_frame_still_counts_as_loss() -> None:
+    receiver = FakeReceiver([
+        make_frame(sequence=1, received_at=5.0),
+        make_frame(sequence=4, tracked=False, received_at=5.01),
+        make_frame(sequence=5, received_at=5.02),
+    ])
+    source = PicoUdpInput(receiver=receiver, monotonic=lambda: 5.02)
+    source.read()
+    assert source.health().dropped == 2

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -24,10 +24,39 @@ class Pose:
     quaternion: np.ndarray
 
 
+def normalize_translation_rotation(
+    translation_rotation: tuple[tuple[float, float, float], ...] | None,
+) -> tuple[tuple[float, float, float], ...] | None:
+    """Validate and copy an optional proper translation rotation."""
+
+    if translation_rotation is None:
+        return None
+    try:
+        rotation = np.asarray(translation_rotation, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError("translation_rotation must be a finite 3x3 rotation") from error
+    if rotation.shape != (3, 3) or not np.isfinite(rotation).all():
+        raise ValueError("translation_rotation must be a finite 3x3 rotation")
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-9, rtol=0.0):
+        raise ValueError("translation_rotation must be orthogonal")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-9, rtol=0.0):
+        raise ValueError("translation_rotation must have determinant +1")
+    return tuple(tuple(float(value) for value in row) for row in rotation)
+
+
 class ClutchState(str, Enum):
     WAITING_FOR_RELEASE = "waiting_for_release"
     READY = "ready"
     ACTIVE = "active"
+
+
+class InputFault(str, Enum):
+    """Stable classification for input conditions that deactivate mapping."""
+
+    NONE = "none"
+    INVALID = "invalid"
+    STALE = "stale"
+    SOURCE_CHANGED = "source_changed"
 
 
 @dataclass(frozen=True)
@@ -39,6 +68,11 @@ class MappingConfig:
     filter_time_constant: float = 0.05
     max_position_step: float = 0.02
     max_rotation_step: float = 0.15
+    orientation_enabled: bool = True
+    invert_translation: bool = False
+    release_stability_samples: int = 1
+    translation_rotation: tuple[tuple[float, float, float], ...] | None = None
+    translation_axis_gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     def __post_init__(self) -> None:
         thresholds = np.asarray(
@@ -51,6 +85,30 @@ class MappingConfig:
             raise ValueError("Grip thresholds must be finite values in [0, 1]")
         if self.grip_release_threshold >= self.grip_press_threshold:
             raise ValueError("Grip release threshold must be lower than press threshold")
+        if (
+            isinstance(self.release_stability_samples, bool)
+            or not isinstance(self.release_stability_samples, int)
+            or self.release_stability_samples <= 0
+        ):
+            raise ValueError("release_stability_samples must be a positive integer")
+        translation_rotation = normalize_translation_rotation(
+            self.translation_rotation
+        )
+        object.__setattr__(self, "translation_rotation", translation_rotation)
+        axis_gain = np.asarray(self.translation_axis_gain, dtype=np.float64)
+        if (
+            axis_gain.shape != (3,)
+            or not np.isfinite(axis_gain).all()
+            or not np.all(axis_gain != 0.0)
+        ):
+            raise ValueError(
+                "translation_axis_gain must contain three nonzero finite values"
+            )
+        object.__setattr__(
+            self,
+            "translation_axis_gain",
+            tuple(float(value) for value in axis_gain),
+        )
 
 
 @dataclass(frozen=True)
@@ -61,6 +119,7 @@ class MappingOutput:
     activated: bool
     deactivated: bool
     stale: bool
+    input_fault: InputFault = InputFault.NONE
 
 
 def normalize_quat(quaternion: np.ndarray) -> np.ndarray:
@@ -251,6 +310,7 @@ class RelativePoseMapper:
         self._last_timestamp: int | None = None
         self._last_fresh_time: float | None = None
         self._last_update_time: float | None = None
+        self._release_streak = 0
 
     def reset(self, ee_pose: Pose) -> None:
         self.clutch_state = ClutchState.WAITING_FOR_RELEASE
@@ -260,8 +320,9 @@ class RelativePoseMapper:
         self._last_timestamp = None
         self._last_fresh_time = None
         self._last_update_time = None
+        self._release_streak = 0
 
-    def _deactivate(self, stale: bool) -> MappingOutput:
+    def _deactivate(self, stale: bool, input_fault: InputFault) -> MappingOutput:
         was_active = self.clutch_state is ClutchState.ACTIVE
         self.clutch_state = ClutchState.WAITING_FOR_RELEASE
         self._controller_reference = None
@@ -269,6 +330,7 @@ class RelativePoseMapper:
         self._last_timestamp = None
         self._last_fresh_time = None
         self._last_update_time = None
+        self._release_streak = 0
         if self._last_target is None:
             raise RuntimeError("Pose mapper has no target")
         return MappingOutput(
@@ -278,11 +340,56 @@ class RelativePoseMapper:
             activated=False,
             deactivated=was_active,
             stale=stale,
+            input_fault=input_fault,
         )
 
-    def update(self, sample: Any, ee_pose: Pose, now: float) -> MappingOutput:
+    def require_release(self) -> MappingOutput:
+        """Revoke the current clutch and require fresh released samples.
+
+        A backend calls for this only after it has confirmed its own Stop
+        request.  The mapper retains its last finite target but drops all
+        input and end-effector references, so the next activation is a fresh
+        anchor-only cycle after release stability is re-established.
+        """
+
+        return self._deactivate(stale=False, input_fault=InputFault.NONE)
+
+    def rebase_active(self, sample: Any, ee_pose: Pose) -> None:
+        """Rebase relative mapping at a commanded pose without releasing Grip."""
+
+        if self.clutch_state is not ClutchState.ACTIVE:
+            raise RuntimeError("Pose mapper must be active before rebasing")
+        controller_pose = transform_controller_pose(
+            sample.position,
+            sample.quaternion_xyzw,
+        )
+        rebased_pose = _copy_pose(ee_pose)
+        self._controller_reference = controller_pose
+        self._ee_reference = rebased_pose
+        self._last_target = _copy_pose(rebased_pose)
+
+    def update(
+        self,
+        sample: Any,
+        anchor_pose: Pose | Callable[[], Pose],
+        now: float,
+    ) -> MappingOutput:
+        """Advance the clutch state machine with one controller sample.
+
+        ``anchor_pose`` provides the end-effector pose used as the relative
+        anchor. Passing a callable defers the read to the moment the clutch
+        engages, which lets hardware backends run their begin-control
+        transaction exactly once per activation. If the callable raises, the
+        clutch state is left unchanged.
+        """
+
         if self._last_target is None:
-            self._last_target = _copy_pose(ee_pose)
+            if callable(anchor_pose):
+                raise RuntimeError(
+                    "reset() must be called before update() when the anchor "
+                    "is deferred; a deferred anchor may only run on activation"
+                )
+            self._last_target = _copy_pose(anchor_pose)
 
         sample_valid = bool(getattr(sample, "valid", False))
         sample_valid = sample_valid and np.isfinite(getattr(sample, "grip", np.nan))
@@ -298,20 +405,37 @@ class RelativePoseMapper:
             self._last_fresh_time is None
             or now - self._last_fresh_time > self.config.stale_timeout
         )
-        if not sample_valid or stale:
-            return self._deactivate(stale=stale)
+        if not sample_valid:
+            invalid_reason = str(getattr(sample, "invalid_reason", ""))
+            if invalid_reason == "stream is stale":
+                input_fault = InputFault.STALE
+            elif invalid_reason == "source changed":
+                input_fault = InputFault.SOURCE_CHANGED
+            else:
+                input_fault = InputFault.INVALID
+            return self._deactivate(
+                stale=stale or input_fault is InputFault.STALE,
+                input_fault=input_fault,
+            )
+        if stale:
+            return self._deactivate(stale=True, input_fault=InputFault.STALE)
 
         try:
             controller_pose = transform_controller_pose(
                 sample.position, sample.quaternion_xyzw
             )
         except ValueError:
-            return self._deactivate(stale=False)
+            return self._deactivate(stale=False, input_fault=InputFault.INVALID)
 
         grip = float(sample.grip)
         if self.clutch_state is ClutchState.WAITING_FOR_RELEASE:
             if grip < self.config.grip_release_threshold:
-                self.clutch_state = ClutchState.READY
+                if new_timestamp:
+                    self._release_streak += 1
+                if self._release_streak >= self.config.release_stability_samples:
+                    self.clutch_state = ClutchState.READY
+            else:
+                self._release_streak = 0
             return MappingOutput(
                 target=_copy_pose(self._last_target),
                 active=False,
@@ -356,6 +480,7 @@ class RelativePoseMapper:
             )
 
         if self.clutch_state is not ClutchState.ACTIVE:
+            ee_pose = anchor_pose() if callable(anchor_pose) else anchor_pose
             self.clutch_state = ClutchState.ACTIVE
             self._controller_reference = controller_pose
             self._ee_reference = _copy_pose(ee_pose)
@@ -373,16 +498,26 @@ class RelativePoseMapper:
         if self._controller_reference is None or self._ee_reference is None:
             raise RuntimeError("Active mapper is missing reference poses")
 
-        desired_position = self._ee_reference.position + self.config.translation_scale * (
-            controller_pose.position - self._controller_reference.position
+        delta = controller_pose.position - self._controller_reference.position
+        if self.config.translation_rotation is not None:
+            delta = np.asarray(self.config.translation_rotation) @ delta
+        delta = np.asarray(self.config.translation_axis_gain) * delta
+        translation_sign = -1.0 if self.config.invert_translation else 1.0
+        desired_position = self._ee_reference.position + (
+            translation_sign
+            * self.config.translation_scale
+            * delta
         )
-        controller_delta = quat_multiply(
-            controller_pose.quaternion,
-            quat_conjugate(self._controller_reference.quaternion),
-        )
-        desired_quaternion = quat_multiply(
-            controller_delta, self._ee_reference.quaternion
-        )
+        if self.config.orientation_enabled:
+            controller_delta = quat_multiply(
+                controller_pose.quaternion,
+                quat_conjugate(self._controller_reference.quaternion),
+            )
+            desired_quaternion = quat_multiply(
+                controller_delta, self._ee_reference.quaternion
+            )
+        else:
+            desired_quaternion = self._ee_reference.quaternion
 
         delta_time = max(0.0, now - (self._last_update_time or now))
         if self.config.filter_time_constant <= 0.0:

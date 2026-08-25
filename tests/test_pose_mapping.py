@@ -5,6 +5,7 @@ import pytest
 
 from kinova_teleop.pose_mapping import (
     ClutchState,
+    InputFault,
     PICO_TO_WORLD,
     MappingConfig,
     Pose,
@@ -25,6 +26,7 @@ def sample(
     stamp=1,
     received=0.0,
     valid=True,
+    invalid_reason="",
 ):
     return SimpleNamespace(
         position=np.asarray(position, dtype=np.float64),
@@ -33,7 +35,30 @@ def sample(
         timestamp_ns=int(stamp),
         received_monotonic=float(received),
         valid=bool(valid),
+        invalid_reason=str(invalid_reason),
     )
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        pytest.param("stream is stale", InputFault.STALE, id="stale"),
+        pytest.param("source changed", InputFault.SOURCE_CHANGED, id="source-changed"),
+        pytest.param("controller is untracked", InputFault.INVALID, id="invalid"),
+    ],
+)
+def test_invalid_sample_reason_maps_to_stable_input_fault(reason, expected) -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    ee = identity_pose()
+    mapper.reset(ee)
+
+    output = mapper.update(
+        sample([0.0, 0.0, 0.0], valid=False, invalid_reason=reason),
+        ee,
+        now=0.0,
+    )
+
+    assert output.input_fault is expected
 
 
 def identity_pose(position=(0.0, 0.0, 0.0)) -> Pose:
@@ -51,6 +76,174 @@ def unfiltered_config(**overrides) -> MappingConfig:
     }
     values.update(overrides)
     return MappingConfig(**values)
+
+
+CALIBRATED_TRANSLATION_ROTATION = (
+    (0.861288411785, 0.469277688168, -0.194835117758),
+    (-0.470679958298, 0.881303368425, 0.042008923554),
+    (0.191422696095, 0.055523186053, 0.979935981190),
+)
+
+
+def move_after_anchor(
+    config: MappingConfig,
+    raw_delta: list[float],
+    ee: Pose,
+) -> Pose:
+    mapper = RelativePoseMapper(config)
+    release_then_press(mapper, ee)
+    return mapper.update(
+        sample(raw_delta, grip=1.0, stamp=3, received=1.02),
+        ee,
+        now=1.02,
+    ).target
+
+
+@pytest.mark.parametrize(
+    ("raw_delta", "expected_base"),
+    [
+        pytest.param(
+            [0.881303368425, -0.042008923554, -0.470679958298],
+            [0.0, -1.0, 0.0],
+            id="right",
+        ),
+        pytest.param(
+            [-0.055523186053, 0.979935981190, -0.191422696095],
+            [0.0, 0.0, 1.0],
+            id="up",
+        ),
+        pytest.param(
+            [0.469277688168, 0.194835117758, 0.861288411785],
+            [-1.0, 0.0, 0.0],
+            id="forward",
+        ),
+    ],
+)
+def test_operator_calibration_maps_measured_directions(
+    raw_delta, expected_base
+) -> None:
+    ee = Pose(
+        np.array([0.4, -0.2, 0.3], dtype=np.float64),
+        quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), 0.4),
+    )
+
+    target = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+        ),
+        raw_delta,
+        ee,
+    )
+
+    np.testing.assert_allclose(
+        (target.position - ee.position) / np.linalg.norm(target.position - ee.position),
+        expected_base,
+        atol=0.11,
+    )
+    np.testing.assert_allclose(
+        quat_to_matrix(target.quaternion), quat_to_matrix(ee.quaternion), atol=1e-8
+    )
+
+
+def test_signed_translation_axis_gain_reverses_and_boosts_base_x_only() -> None:
+    ee = identity_pose((0.4, -0.2, 0.3))
+    raw_forward = [0.046927768817, 0.019483511776, 0.086128841179]
+    baseline = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+        ),
+        raw_forward,
+        ee,
+    )
+    boosted = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+            translation_axis_gain=(-2.0, 1.0, 1.0),
+        ),
+        raw_forward,
+        ee,
+    )
+
+    baseline_delta = baseline.position - ee.position
+    boosted_delta = boosted.position - ee.position
+    np.testing.assert_allclose(
+        boosted_delta,
+        baseline_delta * np.array([-2.0, 1.0, 1.0]),
+        atol=1e-9,
+    )
+
+
+@pytest.mark.parametrize(
+    "translation_rotation",
+    [
+        pytest.param(((1.0, 0.0), (0.0, 1.0)), id="wrong-shape"),
+        pytest.param(((np.nan, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), id="nonfinite"),
+        pytest.param(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 2.0)), id="nonorthogonal"),
+        pytest.param(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, -1.0)), id="reflection"),
+    ],
+)
+def test_mapping_config_rejects_invalid_translation_rotation(
+    translation_rotation,
+) -> None:
+    with pytest.raises(ValueError):
+        MappingConfig(translation_rotation=translation_rotation)
+
+
+def test_inversion_is_applied_after_operator_translation_rotation() -> None:
+    ee = identity_pose((0.4, -0.2, 0.3))
+    target = move_after_anchor(
+        unfiltered_config(
+            orientation_enabled=False,
+            invert_translation=True,
+            translation_rotation=CALIBRATED_TRANSLATION_ROTATION,
+        ),
+        [0.881303368425, -0.042008923554, -0.470679958298],
+        ee,
+    )
+
+    direction = target.position - ee.position
+    direction /= np.linalg.norm(direction)
+    np.testing.assert_allclose(direction, [0.0, 1.0, 0.0], atol=1e-9)
+
+
+@pytest.mark.parametrize(
+    "mutable_rotation",
+    [
+        pytest.param(
+            [list(row) for row in CALIBRATED_TRANSLATION_ROTATION],
+            id="nested-list",
+        ),
+        pytest.param(np.array(CALIBRATED_TRANSLATION_ROTATION), id="ndarray"),
+    ],
+)
+def test_mapping_config_snapshots_mutable_translation_rotation(
+    mutable_rotation,
+) -> None:
+    mapper = RelativePoseMapper(
+        unfiltered_config(
+            orientation_enabled=False,
+            translation_rotation=mutable_rotation,
+        )
+    )
+    mutable_rotation[0][0] = 0.0
+    ee = identity_pose()
+
+    target = move_after_anchor(
+        mapper.config,
+        [0.881303368425, -0.042008923554, -0.470679958298],
+        ee,
+    )
+
+    assert isinstance(mapper.config.translation_rotation, tuple)
+    assert all(isinstance(row, tuple) for row in mapper.config.translation_rotation)
+    np.testing.assert_allclose(
+        target.position - ee.position,
+        [0.0, -1.0, 0.0],
+        atol=1e-9,
+    )
 
 
 @pytest.mark.parametrize(
@@ -274,6 +467,161 @@ def test_held_grip_maps_full_relative_pose() -> None:
     assert np.linalg.norm(quat_to_rotvec(output.target.quaternion)) == pytest.approx(0.2)
 
 
+def test_translation_only_mapping_keeps_anchor_orientation() -> None:
+    mapper = RelativePoseMapper(
+        unfiltered_config(translation_scale=1.0, orientation_enabled=False)
+    )
+    ee = Pose(
+        np.array([0.4, -0.2, 0.3], dtype=np.float64),
+        quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), 0.4),
+    )
+    release_then_press(mapper, ee)
+    moved_wxyz = quat_from_axis_angle(np.array([0.0, 0.0, 1.0]), 0.6)
+
+    output = mapper.update(
+        sample([0.1, 0.0, 0.0], np.roll(moved_wxyz, -1), 1.0, 3, 1.02),
+        ee,
+        now=1.02,
+    )
+
+    np.testing.assert_allclose(
+        output.target.position,
+        ee.position + PICO_TO_WORLD @ [0.1, 0.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        quat_to_matrix(output.target.quaternion),
+        quat_to_matrix(ee.quaternion),
+        atol=1e-8,
+    )
+
+
+@pytest.mark.parametrize(
+    "controller_delta",
+    (
+        pytest.param([0.1, 0.0, 0.0], id="pico-x"),
+        pytest.param([0.0, 0.1, 0.0], id="pico-y"),
+        pytest.param([0.0, 0.0, 0.1], id="pico-z"),
+    ),
+)
+def test_inverted_translation_negates_every_mapped_axis_and_keeps_anchor_orientation(
+    controller_delta,
+) -> None:
+    mapper = RelativePoseMapper(
+        unfiltered_config(
+            translation_scale=0.8,
+            orientation_enabled=False,
+            invert_translation=True,
+        )
+    )
+    ee = Pose(
+        np.array([0.4, -0.2, 0.3], dtype=np.float64),
+        quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), 0.4),
+    )
+    release_then_press(mapper, ee)
+
+    output = mapper.update(
+        sample(controller_delta, grip=1.0, stamp=3, received=1.02),
+        ee,
+        now=1.02,
+    )
+
+    expected_position = ee.position - 0.8 * (
+        PICO_TO_WORLD @ np.asarray(controller_delta, dtype=np.float64)
+    )
+    np.testing.assert_allclose(output.target.position, expected_position)
+    np.testing.assert_allclose(
+        quat_to_matrix(output.target.quaternion),
+        quat_to_matrix(ee.quaternion),
+        atol=1e-8,
+    )
+
+
+def test_waiting_for_release_requires_configured_distinct_released_samples() -> None:
+    mapper = RelativePoseMapper(unfiltered_config(release_stability_samples=3))
+    ee = identity_pose()
+    mapper.reset(ee)
+
+    first = mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), ee, now=0.00)
+    duplicate = mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), ee, now=0.01)
+    second = mapper.update(sample([0, 0, 0], grip=0.0, stamp=2), ee, now=0.02)
+    pressed = mapper.update(sample([0, 0, 0], grip=1.0, stamp=3), ee, now=0.03)
+    restarted = mapper.update(sample([0, 0, 0], grip=0.0, stamp=4), ee, now=0.04)
+    mapper.update(sample([0, 0, 0], grip=0.0, stamp=5), ee, now=0.05)
+    ready = mapper.update(sample([0, 0, 0], grip=0.0, stamp=6), ee, now=0.06)
+
+    assert first.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert duplicate.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert second.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert pressed.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert restarted.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert ready.clutch_state is ClutchState.READY
+
+
+def test_confirmed_boundary_stop_requires_release_before_reanchoring() -> None:
+    mapper = RelativePoseMapper(unfiltered_config(release_stability_samples=3))
+    original_anchor = identity_pose((0.1, -0.2, 0.3))
+    mapper.reset(original_anchor)
+
+    for timestamp in (1, 2, 3):
+        mapper.update(
+            sample([0, 0, 0], grip=0.0, stamp=timestamp, received=float(timestamp)),
+            original_anchor,
+            now=float(timestamp),
+        )
+    mapper.update(
+        sample([0, 0, 0], grip=1.0, stamp=4, received=4.0),
+        original_anchor,
+        now=4.0,
+    )
+
+    output = mapper.require_release()
+
+    assert output.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert output.active is False
+    assert output.deactivated is True
+
+    pressed = mapper.update(
+        sample([9, 9, 9], grip=1.0, stamp=5, received=5.0),
+        original_anchor,
+        now=5.0,
+    )
+    assert pressed.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    assert not pressed.active
+
+    for timestamp in (6, 7):
+        waiting = mapper.update(
+            sample([9, 9, 9], grip=0.0, stamp=timestamp, received=float(timestamp)),
+            original_anchor,
+            now=float(timestamp),
+        )
+        assert waiting.clutch_state is ClutchState.WAITING_FOR_RELEASE
+    ready = mapper.update(
+        sample([9, 9, 9], grip=0.0, stamp=8, received=8.0),
+        original_anchor,
+        now=8.0,
+    )
+    assert ready.clutch_state is ClutchState.READY
+
+    reanchored_pose = identity_pose((0.4, 0.5, 0.6))
+    activation = mapper.update(
+        sample([5, 5, 5], grip=1.0, stamp=9, received=9.0),
+        reanchored_pose,
+        now=9.0,
+    )
+    moved = mapper.update(
+        sample([5.01, 5, 5], grip=1.0, stamp=10, received=10.0),
+        reanchored_pose,
+        now=10.0,
+    )
+
+    assert activation.activated
+    np.testing.assert_allclose(activation.target.position, reanchored_pose.position)
+    np.testing.assert_allclose(
+        moved.target.position,
+        reanchored_pose.position + np.array([0.0, -0.01, 0.0]),
+    )
+
+
 def test_release_holds_last_target() -> None:
     mapper = RelativePoseMapper(unfiltered_config())
     ee = identity_pose()
@@ -407,3 +755,71 @@ def test_position_and_rotation_steps_are_limited() -> None:
 
     assert np.linalg.norm(output.target.position - ee.position) == pytest.approx(0.01)
     assert np.linalg.norm(quat_to_rotvec(output.target.quaternion)) == pytest.approx(0.05)
+
+
+class CountingAnchor:
+    """Callable anchor that records how often activation resolves it."""
+
+    def __init__(self, pose, error=None):
+        self.pose = pose
+        self.error = error
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.pose
+
+
+def test_deferred_anchor_resolves_exactly_once_per_activation() -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    mapper.reset(identity_pose())
+    anchor = CountingAnchor(identity_pose((0.4, -0.2, 0.3)))
+
+    mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), anchor, now=0.0)
+    assert anchor.calls == 0
+
+    activated = mapper.update(sample([0, 0, 0], grip=1.0, stamp=2), anchor, now=0.01)
+    assert activated.activated
+    assert anchor.calls == 1
+    np.testing.assert_allclose(activated.target.position, [0.4, -0.2, 0.3])
+
+    mapper.update(sample([0.01, 0, 0], grip=1.0, stamp=3), anchor, now=0.02)
+    mapper.update(sample([0.01, 0, 0], grip=1.0, stamp=4), anchor, now=0.03)
+    assert anchor.calls == 1
+
+    # Release and re-clutch: the anchor resolves exactly once more.
+    mapper.update(sample([0.01, 0, 0], grip=0.0, stamp=5), anchor, now=0.04)
+    mapper.update(sample([0.01, 0, 0], grip=1.0, stamp=6), anchor, now=0.05)
+    assert anchor.calls == 2
+
+
+def test_deferred_anchor_failure_leaves_clutch_ready_and_retryable() -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    mapper.reset(identity_pose())
+    failing = CountingAnchor(None, error=RuntimeError("begin_control rejected"))
+
+    mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), failing, now=0.0)
+    with pytest.raises(RuntimeError, match="begin_control rejected"):
+        mapper.update(sample([0, 0, 0], grip=1.0, stamp=2), failing, now=0.01)
+
+    # The clutch state machine must be untouched: still READY, no half
+    # captured references, and a later working anchor can activate.
+    assert mapper.clutch_state is ClutchState.READY
+    assert mapper._controller_reference is None
+    assert mapper._ee_reference is None
+
+    working = CountingAnchor(identity_pose((0.1, 0.2, 0.3)))
+    activated = mapper.update(sample([0, 0, 0], grip=1.0, stamp=3), working, now=0.02)
+    assert activated.activated
+    np.testing.assert_allclose(activated.target.position, [0.1, 0.2, 0.3])
+
+
+def test_deferred_anchor_requires_reset_before_update() -> None:
+    mapper = RelativePoseMapper(unfiltered_config())
+    anchor = CountingAnchor(identity_pose())
+
+    with pytest.raises(RuntimeError, match="reset"):
+        mapper.update(sample([0, 0, 0], grip=0.0, stamp=1), anchor, now=0.0)
+    assert anchor.calls == 0

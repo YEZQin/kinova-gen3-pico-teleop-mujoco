@@ -7,8 +7,8 @@ namespace Yezqin.KinovaPico
 {
     public static class KinovaControllerPacket
     {
-        public const int PacketSize = 56;
-        public const byte Version = 1;
+        public const int PacketSize = 60;
+        public const byte Version = 2;
         public const byte TrackedFlag = 1;
 
         static readonly byte[] Magic =
@@ -23,13 +23,15 @@ namespace Yezqin.KinovaPico
             bool tracked,
             Vector3 position,
             Quaternion rotation,
-            float grip)
+            float grip,
+            float trigger)
         {
-            Validate(tracked, position, rotation, grip);
+            Validate(tracked, position, rotation, grip, trigger);
 
             var safePosition = tracked ? position : Vector3.zero;
             var safeRotation = tracked ? rotation : Quaternion.identity;
             var safeGrip = tracked ? grip : 0.0f;
+            var safeTrigger = tracked ? trigger : 0.0f;
 
             using (var stream = new MemoryStream(PacketSize))
             using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
@@ -48,6 +50,7 @@ namespace Yezqin.KinovaPico
                 writer.Write(safeRotation.z);
                 writer.Write(safeRotation.w);
                 writer.Write(safeGrip);
+                writer.Write(safeTrigger);
                 writer.Flush();
 
                 if (stream.Position != PacketSize)
@@ -63,7 +66,8 @@ namespace Yezqin.KinovaPico
             bool tracked,
             Vector3 position,
             Quaternion rotation,
-            float grip)
+            float grip,
+            float trigger)
         {
             if (!tracked)
                 return;
@@ -80,6 +84,8 @@ namespace Yezqin.KinovaPico
             }
             if (!IsFinite(grip) || grip < 0.0f || grip > 1.0f)
                 throw new ArgumentOutOfRangeException(nameof(grip), "Tracked Grip must be finite and in [0, 1].");
+            if (!IsFinite(trigger) || trigger < 0.0f || trigger > 1.0f)
+                throw new ArgumentOutOfRangeException(nameof(trigger), "Tracked Trigger must be finite and in [0, 1].");
         }
 
         static bool IsFinite(Vector3 value)
@@ -109,18 +115,21 @@ namespace Yezqin.KinovaPico
             bool tracked,
             Vector3 position,
             Quaternion rotation,
-            float grip)
+            float grip,
+            float trigger)
         {
             Tracked = tracked;
             Position = position;
             Rotation = rotation;
             Grip = grip;
+            Trigger = trigger;
         }
 
         public bool Tracked { get; }
         public Vector3 Position { get; }
         public Quaternion Rotation { get; }
         public float Grip { get; }
+        public float Trigger { get; }
 
         public static KinovaControllerSample FromFeatureValues(
             bool deviceValid,
@@ -131,7 +140,9 @@ namespace Yezqin.KinovaPico
             bool hasGrip,
             Vector3 position,
             Quaternion rotation,
-            float rawGrip)
+            float rawGrip,
+            bool hasTrigger = false,
+            float rawTrigger = 0.0f)
         {
             if (!(deviceValid
                 && hasTracking
@@ -148,15 +159,22 @@ namespace Yezqin.KinovaPico
             if (!TryNormalizeRotation(rotation, out var normalizedRotation))
                 return Untracked;
 
+            // The trigger channel is optional so V1-era callers keep working;
+            // a missing or invalid trigger degrades to 0 without untracking.
+            var trigger = hasTrigger && IsFinite(rawTrigger)
+                ? Mathf.Clamp01(rawTrigger)
+                : 0.0f;
+
             return new KinovaControllerSample(
                 true,
                 position,
                 normalizedRotation,
-                Mathf.Clamp01(rawGrip));
+                Mathf.Clamp01(rawGrip),
+                trigger);
         }
 
         public static KinovaControllerSample Untracked =>
-            new KinovaControllerSample(false, Vector3.zero, Quaternion.identity, 0.0f);
+            new KinovaControllerSample(false, Vector3.zero, Quaternion.identity, 0.0f, 0.0f);
 
         static bool IsFinite(Vector3 value)
         {

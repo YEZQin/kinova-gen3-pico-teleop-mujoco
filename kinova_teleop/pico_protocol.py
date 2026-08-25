@@ -7,10 +7,15 @@ import struct
 PICO_DISCOVER = b"KINOVA_DISCOVER_V1"
 PICO_READY = b"KINOVA_READY_V1"
 PICO_MAGIC = b"KINVPICO"
-PICO_VERSION = 1
+PICO_VERSION_1 = 1
+PICO_VERSION_2 = 2
+PICO_VERSION = PICO_VERSION_2
 TRACKED_FLAG = 0x01
-_PACKET = struct.Struct("<8sBBHIQ8f")
-PICO_PACKET_SIZE = _PACKET.size
+_PACKET_V1 = struct.Struct("<8sBBHIQ8f")
+_PACKET_V2 = struct.Struct("<8sBBHIQ9f")
+PICO_PACKET_SIZE_V1 = _PACKET_V1.size
+PICO_PACKET_SIZE_V2 = _PACKET_V2.size
+PICO_PACKET_SIZE = PICO_PACKET_SIZE_V2
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,8 @@ class PicoControllerFrame:
     grip: float
     received_at: float
     source: tuple[str, int]
+    trigger: float = 0.0
+    protocol_version: int = PICO_VERSION_2
 
 
 def sequence_delta(candidate: int, previous: int) -> int:
@@ -52,34 +59,47 @@ def _validate_vector(values: object, length: int, name: str) -> tuple[float, ...
     return vector
 
 
-def _validate_frame_values(frame: PicoControllerFrame) -> tuple[tuple[float, float, float], tuple[float, float, float, float], float]:
+def _validate_unit_interval(value: object, name: str) -> float:
+    try:
+        result = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a finite value within [0, 1]") from error
+    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
+        raise ValueError(f"{name} must be finite and within [0, 1]")
+    return result
+
+
+def _validate_frame_values(
+    frame: PicoControllerFrame,
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float, float],
+    float,
+    float,
+]:
     _validate_unsigned(frame.sequence, 0xFFFFFFFF, "sequence")
     _validate_unsigned(frame.source_time_us, 0xFFFFFFFFFFFFFFFF, "source_time_us")
     if not isinstance(frame.tracked, bool):
         raise ValueError("tracked must be a bool")
     if not frame.tracked:
-        return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), 0.0
+        return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), 0.0, 0.0
 
     position = _validate_vector(frame.position, 3, "position")
     quaternion = _validate_vector(frame.quaternion_xyzw, 4, "quaternion_xyzw")
     norm = math.sqrt(sum(value * value for value in quaternion))
     if norm == 0.0:
         raise ValueError("quaternion_xyzw must have nonzero norm")
-    try:
-        grip = float(frame.grip)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("grip must be a finite value within [0, 1]") from error
-    if not math.isfinite(grip) or not 0.0 <= grip <= 1.0:
-        raise ValueError("grip must be finite and within [0, 1]")
-    return position, quaternion, grip
+    grip = _validate_unit_interval(frame.grip, "grip")
+    trigger = _validate_unit_interval(frame.trigger, "trigger")
+    return position, quaternion, grip, trigger
 
 
 def encode_pico_packet(frame: PicoControllerFrame) -> bytes:
-    position, quaternion, grip = _validate_frame_values(frame)
+    position, quaternion, grip, trigger = _validate_frame_values(frame)
     flags = TRACKED_FLAG if frame.tracked else 0
-    return _PACKET.pack(
+    return _PACKET_V2.pack(
         PICO_MAGIC,
-        PICO_VERSION,
+        PICO_VERSION_2,
         flags,
         0,
         frame.sequence,
@@ -87,18 +107,38 @@ def encode_pico_packet(frame: PicoControllerFrame) -> bytes:
         *position,
         *quaternion,
         grip,
+        trigger,
     )
 
 
 def decode_pico_packet(
     payload: bytes, *, received_at: float, source: tuple[str, int]
 ) -> PicoControllerFrame:
-    if len(payload) != PICO_PACKET_SIZE:
-        raise ValueError(f"PICO packet must be exactly {PICO_PACKET_SIZE} bytes")
-    magic, version, flags, reserved, sequence, source_time_us, *values = _PACKET.unpack(payload)
+    """Decode a controller packet, accepting both V1 and V2 payloads.
+
+    V1 packets (56 bytes, no trigger channel) come from Unity bridges built
+    before the gripper channel existed; they decode with ``trigger=0.0``.
+    """
+
+    if len(payload) == PICO_PACKET_SIZE_V1:
+        expected_version = PICO_VERSION_1
+        magic, version, flags, reserved, sequence, source_time_us, *values = (
+            _PACKET_V1.unpack(payload)
+        )
+        values.append(0.0)
+    elif len(payload) == PICO_PACKET_SIZE_V2:
+        expected_version = PICO_VERSION_2
+        magic, version, flags, reserved, sequence, source_time_us, *values = (
+            _PACKET_V2.unpack(payload)
+        )
+    else:
+        raise ValueError(
+            "PICO packet must be exactly "
+            f"{PICO_PACKET_SIZE_V1} or {PICO_PACKET_SIZE_V2} bytes"
+        )
     if magic != PICO_MAGIC:
         raise ValueError("invalid PICO packet magic")
-    if version != PICO_VERSION:
+    if version != expected_version:
         raise ValueError("unsupported PICO packet version")
     if reserved != 0:
         raise ValueError("PICO packet reserved bytes must be zero")
@@ -108,10 +148,15 @@ def decode_pico_packet(
     position = tuple(values[:3])
     quaternion = tuple(values[3:7])
     grip = values[7]
-    if not all(math.isfinite(value) for value in (*position, *quaternion, grip)):
+    trigger = values[8]
+    if not all(
+        math.isfinite(value) for value in (*position, *quaternion, grip, trigger)
+    ):
         raise ValueError("PICO packet contains non-finite controller values")
     if not 0.0 <= grip <= 1.0:
         raise ValueError("PICO packet grip must be within [0, 1]")
+    if not 0.0 <= trigger <= 1.0:
+        raise ValueError("PICO packet trigger must be within [0, 1]")
     norm = math.sqrt(sum(value * value for value in quaternion))
     if norm == 0.0:
         raise ValueError("PICO packet quaternion must have nonzero norm")
@@ -125,4 +170,6 @@ def decode_pico_packet(
         grip=grip,
         received_at=received_at,
         source=source,
+        trigger=trigger,
+        protocol_version=version,
     )
