@@ -1,5 +1,10 @@
 # PICO-to-Kinova Gen3 guarded teleoperation
 
+## 右手独立追踪器 PID 版本（2026-09-22）
+
+本分支 `codex/right-tracker-pid` 增加 XRoboToolkit Object Tracking 独立追踪器、自动锚定开始、空格暂停／恢复和 Esc/Ctrl+C 退出。
+操作者已报告当前版本可以实机遥操；实际 0.7 秒响应尚未测量。完整安装与下次复现命令见 [右手追踪器中文指南](docs/right-motion-tracker-pid.md#下次复现已成功的大工作区命令)。下方保留旧左手柄流程供参考。
+
 [中文说明](README_CN.md) | [Evidence levels](docs/evidence-levels.md) | [PICO detail](docs/pico-udp-quickstart.md) | [Kortex detail](docs/kortex-hardware-quickstart.md) | [Advanced PICO gripper teleoperation](docs/advanced-gripper-teleoperation.md)
 
 This public walkthrough starts from clean Windows and ends at a deliberately guarded first motion workflow. It supports a **Kinova Gen3 L53, 7 DoF, firmware 2.8.0-5** with the **Kortex 2.8 / `kortex_api` 2.8.0.post5** stack, plus a PICO 4 or PICO 4 Ultra left controller. The default and recommended path is MuJoCo.

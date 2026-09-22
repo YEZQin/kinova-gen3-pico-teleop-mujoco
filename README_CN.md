@@ -1,5 +1,10 @@
 # PICO 到 Kinova Gen3 的受控遥操作
 
+## 右手独立追踪器 PID 版本（2026-09-22）
+
+本分支 `codex/right-tracker-pid` 增加 XRoboToolkit Object Tracking 独立追踪器、自动锚定开始、空格暂停／恢复和 Esc/Ctrl+C 退出。
+操作者已报告当前版本可以实机遥操；实际 0.7 秒响应尚未测量。完整安装与下次复现命令见 [右手追踪器中文指南](docs/right-motion-tracker-pid.md#下次复现已成功的大工作区命令)。下方保留旧左手柄流程供参考。
+
 [English](README.md) | [证据等级](docs/evidence-levels.md) | [PICO 详情](docs/pico-udp-quickstart.md) | [Kortex 详情](docs/kortex-hardware-quickstart.md) | [高级 PICO 夹爪遥操](docs/advanced-gripper-teleoperation.md)
 
 本公开流程从一台干净的 Windows 电脑开始，逐步到达经过明确门禁的首次运动流程。支持对象为 **Kinova Gen3 L53、7 自由度、固件 2.8.0-5**，搭配 **Kortex 2.8 / `kortex_api` 2.8.0.post5** 和 PICO 4 或 PICO 4 Ultra 左手柄。默认且推荐的路径是 MuJoCo。

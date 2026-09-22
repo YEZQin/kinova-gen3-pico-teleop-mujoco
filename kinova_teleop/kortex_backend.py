@@ -12,6 +12,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .backend import BackendResult
+from .cartesian_pid import CartesianPID
 from .pose_mapping import (
     Pose,
     matrix_to_quat,
@@ -111,6 +112,7 @@ class KortexBackend:
         *,
         anchor_envelope: AnchorEnvelope | None,
         kp_linear: float = 1.0,
+        translation_pid: CartesianPID | None = None,
         kp_angular: float = 1.0,
         max_linear_speed: float = MAX_LINEAR_SPEED,
         max_angular_speed_deg: float = MAX_ANGULAR_SPEED_DEG,
@@ -132,6 +134,11 @@ class KortexBackend:
             raise ValueError("Linear speed limit must be in (0, 0.05] m/s")
         if not 0.0 < max_angular_speed_deg <= MAX_ANGULAR_SPEED_DEG:
             raise ValueError("Angular speed limit must be in (0, 5] deg/s")
+        if translation_pid is not None:
+            if not isinstance(translation_pid, CartesianPID):
+                raise TypeError("translation_pid must be a CartesianPID")
+            if translation_pid.max_speed > max_linear_speed:
+                raise ValueError("PID speed limit must not exceed backend linear limit")
         if connection.base is None or connection.base_cyclic is None:
             raise RuntimeError("Kortex connection is not connected")
         if not isinstance(advanced_translation, bool):
@@ -152,6 +159,7 @@ class KortexBackend:
         self.connection = connection
         self.anchor_envelope = anchor_envelope
         self.kp_linear = float(kp_linear)
+        self.translation_pid = translation_pid
         self.kp_angular = float(kp_angular)
         self.max_linear_speed = float(max_linear_speed)
         self.max_angular_speed_deg = float(max_angular_speed_deg)
@@ -464,6 +472,8 @@ class KortexBackend:
                     "Cannot resume while the previous Stop is unconfirmed"
                 )
             self._generation += 1
+            if self.translation_pid is not None:
+                self.translation_pid.reset()
             self._active = True
             self._stop_requested = False
             self._stop_confirmed = False
@@ -531,10 +541,19 @@ class KortexBackend:
                 quat_conjugate(measured.quaternion),
             )
             rotation_error = quat_to_rotvec(q_error)
-            linear = _clip_norm(
-                self.kp_linear * position_error,
-                self.max_linear_speed,
-            )
+            with self._state_lock:
+                # Serialize PID history with reset; stale feedback must not
+                # repopulate an integral after Stop or a new control epoch.
+                if not self._state_allows_command_locked(generation):
+                    return _inactive_result()
+                linear = _clip_norm(
+                    self.kp_linear * position_error
+                    if self.translation_pid is None
+                    else self.translation_pid.update(
+                        target_position, measured.position, self._monotonic()
+                    ),
+                    self.max_linear_speed,
+                )
             angular_rad = _clip_norm(
                 self.kp_angular * rotation_error,
                 math.radians(self.max_angular_speed_deg),
@@ -799,6 +818,8 @@ class KortexBackend:
             return self._stop_token
         self._stop_epoch += 1
         self._generation += 1
+        if self.translation_pid is not None:
+            self.translation_pid.reset()
         token = _StopToken(self._stop_epoch, self._generation)
         self._active = False
         self._stop_requested = True
